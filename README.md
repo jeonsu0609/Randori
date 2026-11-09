@@ -16,25 +16,51 @@ so the whole application is Rust, rendered on the GPU, with no webview.
 The name comes from jujutsu practice: *randori* is free-form sparring, where
 you move, split and recombine freely. That is how jj treats history.
 
-> **Status:** early development. The first screen reads a workspace — the
-> graph log, bookmarks, revision details and diffs. Editing (describe, new,
-> abandon, rebase by drag and drop, push and fetch) is the next milestone.
+> **Status:** early development. Randori reads and edits jj workspaces —
+> tabs, graph log, diffs, describe, new, edit, abandon, bookmarks, rebase by
+> drag and drop, push, fetch, undo and redo. Hunk-level moves, conflict
+> resolution and settings are not built yet.
 
-## The first screen
+## The window
 
 | Region | What it shows |
 | --- | --- |
-| Title bar | Workspace name and path, a **revset** field (press Enter to query), reload |
-| Rail | App navigation (only the revisions view exists so far; settings are not built yet) |
-| Bookmarks | Local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click one to jump to its revision |
-| Revisions | The commit graph with fixed columns: change id, bookmarks and description, author, relative time, commit id. The hollow ring is the working copy (`@`); squares are immutable revisions |
+| Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
+| Toolbar | Workspace path, a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
+| Rail | App navigation and Open; settings are not built yet |
+| Bookmarks | Local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click to jump to the revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
+| Revisions | The commit graph with fixed columns: change id, bookmarks and description, author, relative time, commit id. The hollow ring is the working copy (`@`); squares are immutable revisions. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights |
-| Inspector | The selected revision: change id, description, author, date, commit, parents and the changed files with line counts |
-| Status bar | Worker state, the last jj operation, the working copy and the number of loaded revisions |
+| Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files |
+| Status bar | Worker state, the running jj operation and its progress, the last operation, the working copy and the number of loaded revisions |
 
-Edits made outside Randori, in an editor or with the jj CLI, show up when the
-window comes back to the front: Randori asks jj to snapshot the working copy and
-reloads, keeping the rows you had loaded and your scroll position.
+Each tab runs its own jj worker thread (jj-lib is not thread-safe), so a slow
+fetch in one workspace never blocks another. Edits made outside Randori, in an
+editor or with the jj CLI, show up when the window comes back to the front:
+Randori asks jj to snapshot the working copy and reloads, keeping the rows you
+had loaded and your scroll position.
+
+### Editing
+
+Every command is one of GG's jj mutations, so the rules are jj's own:
+immutable revisions are refused with a warning, `Undo` steps back through the
+operation log, and git credentials are asked for when a remote needs them.
+
+| Command | How |
+| --- | --- |
+| New change on the selection | `N`, toolbar `+`, or the context menu |
+| Edit (make it the working copy) | `E` |
+| Describe | `D` to focus the inspector editor, `⌘↩` to save |
+| Create bookmark | `B`, then type a name and press Enter |
+| Abandon | `⌫` / `Delete`, confirmed in a dialog |
+| Duplicate, back out | Context menu |
+| Rebase | Drag a revision onto its new parent |
+| Move a bookmark | Drag it from the bookmarks panel onto a revision |
+| Push | `⌘⇧P` pushes the selection's bookmarks (an untracked bookmark goes to `origin`, or the only remote) |
+| Fetch | `⌘⇧F` fetches every remote |
+| Undo / redo | `⌘Z` / `⌘⇧Z` in the revision list |
+
+![Creating a bookmark](doc/randori/bookmark-dialog.png)
 
 ### Keyboard
 
@@ -43,10 +69,15 @@ reloads, keeping the rows you had loaded and your scroll position.
 | `↑` `↓` / `k` `j` | Revisions | Select the previous / next revision; the next page loads at the end |
 | `Home` / `End` | Revisions | First / last loaded revision |
 | `/` | Revisions | Edit the revset |
-| `⌘L` (`Ctrl+L`) | Anywhere | Edit the revset |
-| `Esc` | Anywhere | Back to the revision list |
-| `⌘R` (`Ctrl+R`) | Anywhere | Reload |
-| `⌘B` (`Ctrl+B`) | Anywhere | Show or hide the bookmarks panel |
+| `⌘L` (`Ctrl+L`) | Workspace | Edit the revset |
+| `Esc` | Workspace | Back to the revision list |
+| `⌘R` (`Ctrl+R`) | Workspace | Reload |
+| `⌘B` (`Ctrl+B`) | Workspace | Show or hide the bookmarks panel |
+| `⌘O` (`Ctrl+O`) | Window | Open a workspace in a new tab |
+| `⌘W` (`Ctrl+W`) | Window | Close the tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Window | Next / previous tab |
+
+On Linux and Windows, `⌘` is `Ctrl`.
 
 The layout follows the professional workstation style of
 [Longbridge Pro](https://longbridge.com/desktop), the application GPUI Kit was
@@ -78,7 +109,7 @@ the root `target/` directory.
 
 ```sh
 cd crates/randori
-cargo run -- /path/to/jj/workspace
+cargo run -- /path/to/workspace /path/to/another   # each opens in a tab
 ```
 
 | Option | Effect |
@@ -99,14 +130,17 @@ cargo run --features screenshot -- \
   --screenshot ../../doc/randori/first-screen.png /path/to/workspace
 ```
 
-The sample workspace is a clone of this repository with two extra changes, made
-under a placeholder identity (`JJ_USER="Randori Demo"`).
+The sample workspaces are a clone of this repository with two extra changes and
+a small notes repository, made under a placeholder identity
+(`JJ_USER="Randori Demo"`). Screenshot runs never touch your saved tabs.
 
 ## How it is built
 
 ```text
-crates/randori   gpui-kit views: title bar, rail, bookmarks, graph log, diff, inspector
-      │  SessionEvent requests over a channel, push events back through EventSink
+crates/randori   app_view: tabs, rail, open/close, saved session
+                 repo_view: toolbar, bookmarks, graph log, diff, inspector, status bar
+                 repo_view/ops: jj mutations (new, describe, abandon, push, rebase, …)
+      │  SessionEvent requests over a channel per tab, push events back through EventSink
       ▼
 src/worker       GG's jj engine (jj-lib), one worker thread per window
 src/messages     request and response types shared with the UI
