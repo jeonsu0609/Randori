@@ -12,7 +12,7 @@ use pollster::FutureExt as _;
 use std::{
     fs::{self, File},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use tempfile::{TempDir, tempdir};
 use zip::ZipArchive;
@@ -55,7 +55,25 @@ impl Default for WorkerSession {
 //
 // The `revs` module provides helpers for known commits. Use `jj log` to find change/commit IDs.
 
+/// Points jj's user config directory (`XDG_CONFIG_HOME`) at one temporary
+/// directory for the whole test process. jj keeps repo configs in
+/// `<config>/jj/repos/<id>` and migrates the test repository's legacy config
+/// there on every load, so without this each test left a directory in the
+/// developer's own jj config; it also keeps their personal settings out of
+/// the tests.
+pub fn isolate_user_config() {
+    static CONFIG: OnceLock<TempDir> = OnceLock::new();
+    CONFIG.get_or_init(|| {
+        let dir = tempdir().unwrap();
+        // SAFETY: set once, under the OnceLock, before the first workspace
+        // in this process reads its configuration.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+        dir
+    });
+}
+
 pub fn mkrepo() -> TempDir {
+    isolate_user_config();
     let repo_dir = tempdir().unwrap();
     let mut archive_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     archive_path.push("res/test-repo.zip");
@@ -320,8 +338,7 @@ async fn snapshot_respects_xdg_gitignore_colocated() -> Result<()> {
     fs::create_dir_all(&ignore_dir)?;
     fs::write(ignore_dir.join("ignore"), "*.ignored\n")?;
 
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path()) };
-    let _guard = SetVarGuard("XDG_CONFIG_HOME");
+    let _guard = SetVarGuard::set("XDG_CONFIG_HOME", xdg_dir.path());
 
     let workspace_dir = tempdir()?;
     let mut session = WorkerSession::default();
@@ -361,8 +378,7 @@ async fn snapshot_respects_xdg_gitignore_internal() -> Result<()> {
     fs::create_dir_all(&ignore_dir)?;
     fs::write(ignore_dir.join("ignore"), "*.ignored\n")?;
 
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg_dir.path()) };
-    let _guard = SetVarGuard("XDG_CONFIG_HOME");
+    let _guard = SetVarGuard::set("XDG_CONFIG_HOME", xdg_dir.path());
 
     let workspace_dir = tempdir()?;
     let mut session = WorkerSession::default();
@@ -593,11 +609,24 @@ async fn list_workspaces_returns_sorted_names() -> Result<()> {
     Ok(())
 }
 
-/// RAII guard that removes an env var on drop
-struct SetVarGuard(&'static str);
+/// RAII guard that sets an env var and puts the previous value back on drop
+/// (removing it would undo [`isolate_user_config`] for every later test).
+struct SetVarGuard(&'static str, Option<std::ffi::OsString>);
+
+impl SetVarGuard {
+    fn set(name: &'static str, value: &std::path::Path) -> Self {
+        isolate_user_config();
+        let previous = std::env::var_os(name);
+        unsafe { std::env::set_var(name, value) };
+        SetVarGuard(name, previous)
+    }
+}
 
 impl Drop for SetVarGuard {
     fn drop(&mut self) {
-        unsafe { std::env::remove_var(self.0) };
+        match self.1.take() {
+            Some(previous) => unsafe { std::env::set_var(self.0, previous) },
+            None => unsafe { std::env::remove_var(self.0) },
+        }
     }
 }

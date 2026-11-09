@@ -24,6 +24,7 @@ use crate::{
 };
 
 async fn mkcolocated() -> Result<TempDir> {
+    super::isolate_user_config();
     let dir = tempdir()?;
     WorkerSession::default()
         .init_repository(&dir.path().to_owned(), true)
