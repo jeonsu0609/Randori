@@ -879,7 +879,7 @@ async fn clone_workspace_dest_empty_ok() -> Result<()> {
 #[cfg(windows)]
 const EOL: &str = "\r\n";
 #[cfg(not(windows))]
-const EOL: &'static str = "\n";
+const EOL: &str = "\n";
 
 #[tokio::test]
 async fn clone_workspace_checks_out_file_content() -> Result<()> {

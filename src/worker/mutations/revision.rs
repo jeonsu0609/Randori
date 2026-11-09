@@ -640,7 +640,104 @@ impl Mutation for MoveRevisions {
     }
 }
 
-#[cfg(all(test, not(feature = "ts-rs")))]
+/// Disinherit external children of a range of commits.
+/// Finds all children of any commit in the range that are not themselves in the range,
+/// and rebases them to the specified orphan parents (typically the oldest commit's parents).
+async fn disinherit_children(
+    ws: &WorkspaceSession<'_>,
+    tx: &mut Transaction,
+    range: &[Commit],
+    orphan_to: Vec<CommitId>,
+) -> Result<HashMap<CommitId, CommitId>> {
+    let range_ids: HashSet<CommitId> = range.iter().map(|c| c.id().clone()).collect();
+
+    // find all children of any commit in the range
+    let mut external_children: Vec<Commit> = Vec::new();
+    for target in range {
+        let children_expr = RevsetExpression::commit(target.id().clone()).children();
+        let store = ws.repo().store().clone();
+        let children: Vec<Commit> = children_expr
+            .evaluate(ws.repo())?
+            .stream()
+            .commits(&store)
+            .try_collect()
+            .block_on()?;
+
+        for child in children {
+            if !range_ids.contains(child.id()) {
+                external_children.push(child);
+            }
+        }
+    }
+
+    // dedupe in case a child has multiple parents in the range
+    external_children.sort_by_key(|c| c.id().clone());
+    external_children.dedup_by_key(|c| c.id().clone());
+
+    if external_children.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // rebase each external child, replacing any parent in the range with orphan_to
+    let mut rebased_commit_ids = HashMap::new();
+    for child_commit in external_children {
+        let new_child_parent_ids: Vec<CommitId> = child_commit
+            .parent_ids()
+            .iter()
+            .flat_map(|c| {
+                if range_ids.contains(c) {
+                    orphan_to.clone()
+                } else {
+                    vec![c.clone()]
+                }
+            })
+            .collect_vec();
+
+        // some of the new parents may be ancestors of others
+        let new_child_parents_expression = RevsetExpression::commits(new_child_parent_ids.clone())
+            .minus(
+                &RevsetExpression::commits(new_child_parent_ids.clone())
+                    .parents()
+                    .ancestors(),
+            );
+        let new_child_parents: Result<Vec<CommitId>, _> = new_child_parents_expression
+            .evaluate(tx.base_repo().as_ref())?
+            .stream()
+            .try_collect()
+            .block_on();
+
+        rebased_commit_ids.insert(
+            child_commit.id().clone(),
+            rewrite::rebase_commit(tx.repo_mut(), child_commit, new_child_parents?)
+                .await?
+                .id()
+                .clone(),
+        );
+    }
+
+    // rebase descendants of modified commits, tracking new ids
+    let mut mapping = HashMap::new();
+    tx.repo_mut()
+        .rebase_descendants_with_options(
+            &RevsetExpression::none(),
+            &RebaseOptions::default(),
+            |old_commit, rebased| {
+                mapping.insert(
+                    old_commit.id().clone(),
+                    match rebased {
+                        RebasedCommit::Rewritten(new_commit) => new_commit.id().clone(),
+                        RebasedCommit::Abandoned { parent_id } => parent_id,
+                    },
+                );
+            },
+        )
+        .await?;
+    rebased_commit_ids.extend(mapping);
+
+    Ok(rebased_commit_ids)
+}
+
+#[cfg(test)]
 mod tests {
     use std::fs;
 
@@ -1914,101 +2011,4 @@ mod tests {
 
         Ok(())
     }
-}
-
-/// Disinherit external children of a range of commits.
-/// Finds all children of any commit in the range that are not themselves in the range,
-/// and rebases them to the specified orphan parents (typically the oldest commit's parents).
-async fn disinherit_children(
-    ws: &WorkspaceSession<'_>,
-    tx: &mut Transaction,
-    range: &[Commit],
-    orphan_to: Vec<CommitId>,
-) -> Result<HashMap<CommitId, CommitId>> {
-    let range_ids: HashSet<CommitId> = range.iter().map(|c| c.id().clone()).collect();
-
-    // find all children of any commit in the range
-    let mut external_children: Vec<Commit> = Vec::new();
-    for target in range {
-        let children_expr = RevsetExpression::commit(target.id().clone()).children();
-        let store = ws.repo().store().clone();
-        let children: Vec<Commit> = children_expr
-            .evaluate(ws.repo())?
-            .stream()
-            .commits(&store)
-            .try_collect()
-            .block_on()?;
-
-        for child in children {
-            if !range_ids.contains(child.id()) {
-                external_children.push(child);
-            }
-        }
-    }
-
-    // dedupe in case a child has multiple parents in the range
-    external_children.sort_by_key(|c| c.id().clone());
-    external_children.dedup_by_key(|c| c.id().clone());
-
-    if external_children.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    // rebase each external child, replacing any parent in the range with orphan_to
-    let mut rebased_commit_ids = HashMap::new();
-    for child_commit in external_children {
-        let new_child_parent_ids: Vec<CommitId> = child_commit
-            .parent_ids()
-            .iter()
-            .flat_map(|c| {
-                if range_ids.contains(c) {
-                    orphan_to.clone()
-                } else {
-                    vec![c.clone()]
-                }
-            })
-            .collect_vec();
-
-        // some of the new parents may be ancestors of others
-        let new_child_parents_expression = RevsetExpression::commits(new_child_parent_ids.clone())
-            .minus(
-                &RevsetExpression::commits(new_child_parent_ids.clone())
-                    .parents()
-                    .ancestors(),
-            );
-        let new_child_parents: Result<Vec<CommitId>, _> = new_child_parents_expression
-            .evaluate(tx.base_repo().as_ref())?
-            .stream()
-            .try_collect()
-            .block_on();
-
-        rebased_commit_ids.insert(
-            child_commit.id().clone(),
-            rewrite::rebase_commit(tx.repo_mut(), child_commit, new_child_parents?)
-                .await?
-                .id()
-                .clone(),
-        );
-    }
-
-    // rebase descendants of modified commits, tracking new ids
-    let mut mapping = HashMap::new();
-    tx.repo_mut()
-        .rebase_descendants_with_options(
-            &RevsetExpression::none(),
-            &RebaseOptions::default(),
-            |old_commit, rebased| {
-                mapping.insert(
-                    old_commit.id().clone(),
-                    match rebased {
-                        RebasedCommit::Rewritten(new_commit) => new_commit.id().clone(),
-                        RebasedCommit::Abandoned { parent_id } => parent_id,
-                    },
-                );
-            },
-        )
-        .await?;
-    rebased_commit_ids.extend(mapping);
-
-    Ok(rebased_commit_ids)
 }

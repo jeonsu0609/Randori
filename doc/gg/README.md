@@ -1,6 +1,6 @@
-# ![icon](res/icons/24x24.png) GG - Gui for JJ
+# ![icon](https://raw.githubusercontent.com/gulbanana/gg/v0.46.0/res/icons/24x24.png) GG - Gui for JJ
 
-![screenshot](res/screenshot.png)
+![screenshot](https://raw.githubusercontent.com/gulbanana/gg/v0.46.0/res/screenshot.png)
 
 GG is a GUI for the version control system [Jujutsu](https://github.com/jj-vcs/jj). It takes advantage of Jujutsu's composable primitives to present an interactive view of your repository. The big idea: what if you were always in the middle of an interactive rebase, but this was actually a good thing?
 
@@ -24,7 +24,7 @@ Run `gg` in a Jujutsu workspace, pass the workspace directory as an argument or 
 - When using a POSIX shell on Windows, `start gg` can be used to run in the background.
 
 ### Configuration
-GG uses `jj config`; `revset-aliases.immutable_heads()` is particularly important, as it determines how much history you can edit. GG has some additional settings of its own, with defaults and documentation [here](src/config/gg.toml). They can be set in your JJ `config.toml` like this:
+GG uses `jj config`; `revset-aliases.immutable_heads()` is particularly important, as it determines how much history you can edit. GG has some additional settings of its own, with defaults and documentation [here](../../src/config/gg.toml). They can be set in your JJ `config.toml` like this:
 ```
 [gg]
 default-mode = "gui"
@@ -48,9 +48,9 @@ GG doesn't require [JJ](https://jj-vcs.github.io/jj/latest/install-and-setup/) i
 More detail is available in [the changelog](CHANGELOG.md).
 
 ### Future Features
-There's no roadmap as such, but items on [the to-do list](doc/TODO.md) may or may not be implemented in future.
+There's no roadmap as such, but items on [the to-do list](TODO.md) may or may not be implemented in future.
 
 ### Known Issues
 GG is lightly maintained and may have bugs. In theory it can't corrupt a repository thanks to the operation log, but it never hurts to make backups. 
 
-If your repo is "too large" some features will be disabled for performance. See [the default config](src/config/gg.toml) for details.
+If your repo is "too large" some features will be disabled for performance. See [the default config](../../src/config/gg.toml) for details.

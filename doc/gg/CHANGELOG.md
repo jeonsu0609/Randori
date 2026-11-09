@@ -1,6 +1,6 @@
 # GG Changelog
 
-## [0.46.0](releases/tag/v0.46.0)
+## [0.46.0](https://github.com/gulbanana/gg/releases/tag/v0.46.0)
 This release is based on Jujutsu 0.46.
 
 ### Added
@@ -10,12 +10,12 @@ This release is based on Jujutsu 0.46.
 ### Changed
 - Since JJ 0.33, `jj undo` has worked like a stack, with `jj redo` for replaying undone operations. GG kept the old semantics, where you could undo an undo - not very useful, but we hadn't got around to catching up. The Undo command is now accompanied by a Redo command unless you're at the top of the stack. It's interoperable with JJ, so you can `undo` from the CLI and Redo from a GUI or vice versa.
 
-## [0.45.1](releases/tag/v0.45.1)
+## [0.45.1](https://github.com/gulbanana/gg/releases/tag/v0.45.1)
 
 ### Deprecated
 - The `gg_lib` library target hasn't turned out to be worth the complexity - soon, JJ is introducing a `jj-frontend` crate which makes it easier to build custom clients, and which GG will be using. The `[lib]` target will be removed from the gg-cli crate in some future release, unless someone comes up with a use for it.
 
-## [0.45.0](releases/tag/v0.45.0)
+## [0.45.0](https://github.com/gulbanana/gg/releases/tag/v0.45.0)
 This release is based on Jujutsu 0.45.1.
 
 ### Added
@@ -32,7 +32,7 @@ This release is based on Jujutsu 0.45.1.
 - The Reopen command didn't work. It may have *appeared* to work if you pressed F5, due to a webpage reload, but only on some platforms.
 - Revsets with elided rows didn't always display accurately - they could cut off and prevent further scrolling.
 
-## [0.41.0](releases/tag/v0.41.0)
+## [0.41.0](https://github.com/gulbanana/gg/releases/tag/v0.41.0)
 This release is based on Jujutsu 0.41.
 
 ### Added
@@ -51,13 +51,13 @@ This release is based on Jujutsu 0.41.
 - Text selection in the diff view no longer includes +/- prefixes (or an extra space for unchanged lines).
 - Context menus were incorrectly positioned in Wayland and nonfunctional on certain GTK versions (thanks to @rielas).
 
-## [0.39.1](releases/tag/v0.39.1)
+## [0.39.1](https://github.com/gulbanana/gg/releases/tag/v0.39.1)
 
 ### Added
 - The MacOS app build will now detect when it's run from a terminal like the CLI build does, spawning in the background by default (--foreground to block the shell). (Windows already had behaviour similar to this.)
 - GG is now available on Homebrew and Winget.
 
-## [0.39.0](releases/tag/v0.39.0)
+## [0.39.0](https://github.com/gulbanana/gg/releases/tag/v0.39.0)
 This release is based on Jujutsu 0.39.
 
 ### Added
@@ -70,7 +70,7 @@ This release is based on Jujutsu 0.39.
   * `WorkspaceSession::forget_workspace()`
   * `WorkspaceSession::list_workspaces()`
 
-## [0.38.4](releases/tag/v0.38.4)
+## [0.38.4](https://github.com/gulbanana/gg/releases/tag/v0.38.4)
 
 ### Added
 - JJ config settings can now be overridden for GG only by prefixing a setting with `gg.`. For example, if you have...
@@ -105,18 +105,18 @@ This release is based on Jujutsu 0.39.
 - Scrollbar colours on MacOS weren't respecting dark theme.
 - Scrollbars in the log pane were covering part of the log until the window was resized.
 
-## [0.38.2](releases/tag/v0.38.2)
+## [0.38.2](https://github.com/gulbanana/gg/releases/tag/v0.38.2)
 
 ### Fixed
 - The revset selector and textbox colours were broken on MacOS due to some CSS that Safari doesn't yet support.
 - The reset-author toggle in the right pane didn't become clickable when toggling on "ignore immutability" until you performed some other operation.
 
-## [0.38.1](releases/tag/v0.38.1)
+## [0.38.1](https://github.com/gulbanana/gg/releases/tag/v0.38.1)
 
 ### Fixed
 - `XDG_CONFIG_HOME` wasn't being used to look up global gitignores.
 
-## [0.38.0](releases/tag/v0.38.0)
+## [0.38.0](https://github.com/gulbanana/gg/releases/tag/v0.38.0)
 This release is based on Jujutsu 0.38.
 
 ### Added
@@ -130,7 +130,7 @@ This release is based on Jujutsu 0.38.
 ### Fixed
 - In web mode, right-clicking on revisions enabled context menu commands based on the *selected* revision rather than the one you'd clicked.
 
-## [0.37.2](releases/tag/v0.37.2)
+## [0.37.2](https://github.com/gulbanana/gg/releases/tag/v0.37.2)
 
 ### Added
 - Multiple selection: 
@@ -145,7 +145,7 @@ This release is based on Jujutsu 0.38.
 ### Changed
 - "Backout" is now "Revert", following the change in JJ 0.35.
 
-## [0.37.1](releases/tag/v0.37.1)
+## [0.37.1](https://github.com/gulbanana/gg/releases/tag/v0.37.1)
 
 ### Added
 - Repository -> Recent Items menu.
@@ -155,7 +155,7 @@ This release is based on Jujutsu 0.38.
 - Revision menu commands were applying to *every* open window.
 - Tweaks to the "Changes" bar visuals.
 
-## [0.37.0](releases/tag/v0.37.0)
+## [0.37.0](https://github.com/gulbanana/gg/releases/tag/v0.37.0)
 This release is based on Jujutsu 0.37.
 
 ### Added
@@ -167,7 +167,7 @@ This release is based on Jujutsu 0.37.
 ### Fixed
 - In GUI mode, the Repository -> Open... menuitem always opened a new window even if you didn't have a workspace loaded in the current window.
 
-## [0.36.4](releases/tag/v0.36.4)
+## [0.36.4](https://github.com/gulbanana/gg/releases/tag/v0.36.4)
 
 ### Added
 - **Web Mode**: GG can now be run using `gg web`, which will start a web server and a browser instead of a desktop application. It has the same featureset apart from the lack of a top menubar and features inherent to the platform - only gui mode has a taskbar icon to right-click, only web mode supports http-proxy remote access, etc. 
@@ -204,24 +204,24 @@ This release is based on Jujutsu 0.37.
 
 - When built as a CLI, improved child spawning - background and `--foreground` modes work more consistently.
 
-## [0.36.3](releases/tag/v0.36.3)
+## [0.36.3](https://github.com/gulbanana/gg/releases/tag/v0.36.3)
 
 ### Fixed
 - CLI build: added dock icon on MacOS.
 - CLI build: the advertised `--foreground` now actually exists and works.
 - GG now respects the `snapshot.auto-track` setting.
 
-## [0.36.2](releases/tag/v0.36.2)
+## [0.36.2](https://github.com/gulbanana/gg/releases/tag/v0.36.2)
 
 ### Added
 - GG is now available from crates.io: `cargo install --locked gg-cli`. This will give you a `gg` CLI binary on your PATH which launches the GUI in the background or, with `--foreground`, in the foreground.
 
-## [0.36.1](releases/tag/v0.36.1)
+## [0.36.1](https://github.com/gulbanana/gg/releases/tag/v0.36.1)
 
 ### Fixed
 - Change IDs in the log pane would sometimes display the wrong suffix. This was happening when a line's id changed but its prefix remained the same.
 
-## [0.36.0](releases/tag/v0.36.0)
+## [0.36.0](https://github.com/gulbanana/gg/releases/tag/v0.36.0)
 This release is based on Jujutsu 0.36.
 
 ### Added
@@ -233,7 +233,7 @@ This release is based on Jujutsu 0.36.
 ### Fixes
 - Performance improvements due updated dependencies and some internal use of async.
 
-## [0.35.2](releases/tag/v0.35.2)
+## [0.35.2](https://github.com/gulbanana/gg/releases/tag/v0.35.2)
 
 ### Fixed
 - Git remote handling: gg now displays only fetchable remotes, and fetching actually works again.
@@ -243,7 +243,7 @@ This release is based on Jujutsu 0.36.
 - Drag-drop of bookmarks was also affected, and is also fixed.
 - Spurious "receiving on a closed channel" errors at startup - they were harmless, but now they're gone.
 
-## [0.35.1](releases/tag/v0.35.1)
+## [0.35.1](https://github.com/gulbanana/gg/releases/tag/v0.35.1)
 
 ### Added
 - New config option `gg.ui.track-recent-workspaces`, which can be set to false to disable saving recent workspaces to the config file.
@@ -252,13 +252,13 @@ This release is based on Jujutsu 0.36.
 - Another memory leak (failure to deregister RAF callbacks).
 - Some broken graph rendering (which was relying on the previous leak!).
 
-## [0.35.0](releases/tag/v0.35.0)
+## [0.35.0](https://github.com/gulbanana/gg/releases/tag/v0.35.0)
 This release is based on Jujutsu 0.35.
 
 ### Fixed
 - Memory leak in the log pane (thanks to @brk).
 
-## [0.29.1](releases/tag/v0.29.1)
+## [0.29.1](https://github.com/gulbanana/gg/releases/tag/v0.29.1)
 
 ### Added
 - "New inserted parent" menu item (thanks to @brk).
@@ -272,7 +272,7 @@ This release is based on Jujutsu 0.35.
 - Use from_utf8_lossy to prevent invalid utf-8 sequence errors (thanks to @jmole).
 - Enabled LTO for release builds, smaller and faster binary (thanks to @berkus).
 
-## [0.29.0](releases/tag/v0.29.0) 
+## [0.29.0](https://github.com/gulbanana/gg/releases/tag/v0.29.0) 
 This version is based on Jujutsu 0.29.
 
 ### Changed
@@ -287,7 +287,7 @@ This version is based on Jujutsu 0.29.
 - Describe box resizing on some platforms (thanks to @natural-selection1).
 - Flickering when dragging commits onto each other to rebase (thanks to @natural-selection1).
 
-## [0.27.0](releases/tag/v0.27.0) 
+## [0.27.0](https://github.com/gulbanana/gg/releases/tag/v0.27.0) 
 This version is based on Jujutsu 0.27.
 
 ### Added
@@ -296,13 +296,13 @@ This version is based on Jujutsu 0.27.
 ### Fixed
 - Suppress MacOS auto-capitalisation of branch/remote names. 
 
-## [0.23.0](releases/tag/v0.23.0) 
+## [0.23.0](https://github.com/gulbanana/gg/releases/tag/v0.23.0) 
 This version is based on Jujutsu 0.23 and the recently-released Tauri 2.0.
 
 ### Changed
 - Branches have been renamed to bookmarks. The setting `gg.ui.mark-unpushed-branches` has changed to `mark-unpushed-bookmarks`, but the old one will still work as well.
 
-## [0.20.0](releases/tag/v0.20.0) 
+## [0.20.0](https://github.com/gulbanana/gg/releases/tag/v0.20.0) 
 This version is based on Jujutsu 0.20.
 
 ### Fixed
@@ -311,13 +311,13 @@ This version is based on Jujutsu 0.20.
 - Improved button/control font display on Linux.
 - Fixed a panic attempting to display delete/delete conflicts in the right pane.
 
-## [0.18.0](releases/tag/v0.18.0) 
+## [0.18.0](https://github.com/gulbanana/gg/releases/tag/v0.18.0) 
 This version is based on Jujutsu 0.18.
 
-## [0.17.0](releases/tag/v0.17.0) 
+## [0.17.0](https://github.com/gulbanana/gg/releases/tag/v0.17.0) 
 This version is compatible with Jujutsu 0.17.
 
-## [0.16.0](releases/tag/v0.16.0) 
+## [0.16.0](https://github.com/gulbanana/gg/releases/tag/v0.16.0) 
 This version is compatible with Jujutsu 0.16.
 
 ### Added
@@ -329,7 +329,7 @@ This version is compatible with Jujutsu 0.16.
 - Right-pane scrollbar wasn't responding to clicks.
 - Various design improvements. 
 
-## [0.15.3](releases/tag/v0.15.3)
+## [0.15.3](https://github.com/gulbanana/gg/releases/tag/v0.15.3)
 
 ### Added
 - Relatively comprehensive branch management - create, delete, rename, forget, push and fetch.
@@ -353,12 +353,12 @@ This version is compatible with Jujutsu 0.16.
 - Watchman support (core.fsmonitor) was not enabled.
 - Various design improvements.
 
-## [0.15.2](releases/tag/v0.15.2)
+## [0.15.2](https://github.com/gulbanana/gg/releases/tag/v0.15.2)
 
 ### Fixed
 - Right click -> Abandon revision... again.
 
-## [0.15.1](releases/tag/v0.15.1)
+## [0.15.1](https://github.com/gulbanana/gg/releases/tag/v0.15.1)
 
 ### Fixed
 - Several buttons had stopped working due to IPC changes:
@@ -367,7 +367,7 @@ This version is compatible with Jujutsu 0.16.
   * Right click -> Squash into parent.
   * Right click -> Restore from parent.
 
-## [0.15.0](releases/tag/v0.15.0)
+## [0.15.0](https://github.com/gulbanana/gg/releases/tag/v0.15.0)
 Initial experimental release. This version is compatible with Jujutsu 0.15.
 
 ### Added

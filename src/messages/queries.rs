@@ -5,7 +5,6 @@ use super::*;
 
 /// A file-level change within a revision's diff.
 #[derive(Serialize, Deserialize, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct RevChange {
     pub kind: ChangeKind,
     pub path: TreePath,
@@ -15,7 +14,6 @@ pub struct RevChange {
 
 /// A file-level conflict in a revision's parent tree.
 #[derive(Serialize, Deserialize, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct RevConflict {
     pub path: TreePath,
     pub hunk: ChangeHunk,
@@ -23,7 +21,6 @@ pub struct RevConflict {
 
 /// The type of modification made to a file in a diff.
 #[derive(Serialize, Deserialize, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub enum ChangeKind {
     None,
     Added,
@@ -34,7 +31,6 @@ pub enum ChangeKind {
 /// Response to a revision detail query: either not found or full details.
 #[derive(Serialize, Debug)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 #[allow(clippy::large_enum_variant)]
 pub enum RevsResult {
     NotFound {
@@ -56,13 +52,11 @@ pub enum RevsResult {
 
 /// (column, row) position of a node in the log graph.
 #[derive(Serialize, Clone, Copy, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct LogCoordinates(pub usize, pub usize);
 
 /// An edge segment in the log graph connecting two nodes.
 #[derive(Serialize, Debug)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub enum LogLine {
     FromNode {
         source: LogCoordinates,
@@ -88,7 +82,6 @@ pub enum LogLine {
 
 /// A single row in the log graph with its revision and edges.
 #[derive(Serialize, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct LogRow {
     pub revision: RevHeader,
     pub location: LogCoordinates,
@@ -98,7 +91,6 @@ pub struct LogRow {
 
 /// A paginated slice of the log graph.
 #[derive(Serialize)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct LogPage {
     pub rows: Vec<LogRow>,
     pub has_more: bool,

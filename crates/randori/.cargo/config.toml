@@ -1,3 +1,0 @@
-# Share the root target directory so GG and Randori reuse each other's builds.
-[build]
-target-dir = "../../target"

@@ -1,6 +1,6 @@
-# ![icon](res/icons/24x24.png) GG - Gui for JJ
+# ![icon](https://raw.githubusercontent.com/gulbanana/gg/v0.46.0/res/icons/24x24.png) GG - Gui for JJ
 
-Contributions are welcome. GG has a pretty specific vision, so we might not accept every suggestion, but we do aim to build a GUI that's useful for a wide range of Jujutsu workflows. [DESIGN.md](doc/DESIGN.md) has some basic information about how GG works and why.
+Contributions are welcome. GG has a pretty specific vision, so we might not accept every suggestion, but we do aim to build a GUI that's useful for a wide range of Jujutsu workflows. [DESIGN.md](DESIGN.md) has some basic information about how GG works and why.
 
 We have high standards for maintainability; don't submit AI-generated code without verifying its quality and your understanding.
 

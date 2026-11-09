@@ -7,12 +7,11 @@
 //! Use [`read_config`] to load the merged configuration, and [`GGSettings`]
 //! to access individual values with their defaults.
 
-#[cfg(all(test, not(feature = "ts-rs")))]
+#[cfg(test)]
 pub mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use jj_cli::config::{ConfigEnv, config_from_environment, default_config_layers};
@@ -41,9 +40,6 @@ pub trait GGSettings {
     fn ui_track_recent_workspaces(&self) -> bool;
     #[allow(dead_code)]
     fn ui_recent_workspaces(&self) -> Vec<String>;
-    fn web_default_port(&self) -> u16;
-    fn web_client_timeout(&self) -> Duration;
-    fn web_launch_browser(&self) -> bool;
 }
 
 impl GGSettings for UserSettings {
@@ -89,21 +85,6 @@ impl GGSettings for UserSettings {
                     .collect()
             })
             .unwrap_or_default()
-    }
-
-    fn web_default_port(&self) -> u16 {
-        self.get_int("gg.web.default-port").unwrap_or(0) as u16
-    }
-
-    fn web_client_timeout(&self) -> Duration {
-        self.get_string("gg.web.client-timeout")
-            .ok()
-            .and_then(|s| humantime::parse_duration(&s).ok())
-            .unwrap_or(Duration::from_secs(600))
-    }
-
-    fn web_launch_browser(&self) -> bool {
-        self.get_bool("gg.web.launch-browser").unwrap_or(true)
     }
 }
 

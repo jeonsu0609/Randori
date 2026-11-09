@@ -11,15 +11,15 @@
 //!    frontend is paging through results.
 //!
 //! Callers drive the worker by sending [`SessionEvent`] messages over a
-//! standard [`std::sync::mpsc`] channel. See [`web::create_app`](crate::web::create_app)
-//! for an example of wiring this up.
+//! standard [`std::sync::mpsc`] channel; `crates/randori/src/worker.rs` wires it
+//! up for each workspace tab.
 
 mod git_util;
 mod gui_util;
 mod mutations;
 mod queries;
 mod session;
-#[cfg(all(test, not(feature = "ts-rs")))]
+#[cfg(test)]
 mod tests;
 
 use std::env::{self, VarError};
@@ -81,9 +81,8 @@ pub trait Mutation: Debug {
 
 /// Abstraction over how backend-to-frontend push events are delivered.
 ///
-/// In GUI mode this wraps Tauri's event emitter; in web mode it feeds a
-/// broadcast channel that clients consume via Server-Sent Events (SSE).
-/// Provide your own implementation to integrate with a different transport.
+/// Randori forwards these into an async channel per tab
+/// (`crates/randori/src/worker.rs`).
 pub trait EventSink: Send + Sync {
     /// Emit a named event with a pre-serialized JSON payload.
     fn send(&self, event_name: &str, payload: serde_json::Value);

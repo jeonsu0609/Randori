@@ -4,7 +4,7 @@ description: Updates the jj-lib and jj-cli dependencies. Use when asked to updat
 ---
 
 <background-information>
-GG (this project) depends on multiple crates from the JJ project. `gg` is primarily an alternative to `jj-cli`, so it uses a lot of `jj-lib` code; however, it also uses `jj-cli` directly in a few cases
+Randori (this project) depends on multiple crates from the JJ project through its engine taken from GG. The engine is primarily an alternative to `jj-cli`, so it uses a lot of `jj-lib` code; however, it also uses `jj-cli` directly in a few cases
 </background-information>
 
 Updating crate versions
@@ -15,11 +15,11 @@ Updating crate versions
 
 Fixing breaking changes
 =======================
-It's likely that jj API changes will require modifications to gg code. Make any necessary modifications, maintaining gg's current behaviour. 
-For examples of how to use modified jj APIs, consult the source code at https://github.com/jj-vcs/jj - the jj-cli code (`cli/` directory) often makes use of jj-lib code (`lib/` directory) in similar ways to gg.
+It's likely that jj API changes will require modifications to the engine code. Make any necessary modifications, maintaining the current behaviour. 
+For examples of how to use modified jj APIs, consult the source code at https://github.com/jj-vcs/jj - the jj-cli code (`cli/` directory) often makes use of jj-lib code (`lib/` directory) in similar ways to the engine.
 
 Verifying the update
 ==================
 1. Run `cargo check` - there should be no warnings or errors.
 2. Run `cargo test` - all tests should pass. 
-3. If API changes have affected message structs in src/messages, use `cargo gen` to regenerate Typescript types and then `npm run check` to verify them.
+3. Run `cargo build -p randori` - the gpui frontend in crates/randori must still build against the changed message structs in src/messages.

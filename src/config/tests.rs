@@ -390,23 +390,18 @@ mod extract_overrides {
     fn native_keys_discovered_from_gg_toml() {
         let keys = native_keys();
         // leaf keys from gg.toml
-        assert!(keys.contains("default-mode"));
         assert!(keys.contains("queries.log-page-size"));
         assert!(keys.contains("queries.large-repo-heuristic"));
         assert!(keys.contains("ui.recent-workspaces"));
         assert!(keys.contains("ui.track-recent-workspaces"));
         assert!(keys.contains("ui.mark-unpushed-bookmarks"));
         assert!(keys.contains("ui.theme-override"));
-        assert!(keys.contains("web.default-port"));
-        assert!(keys.contains("web.client-timeout"));
-        assert!(keys.contains("web.launch-browser"));
         // supplementary keys not in gg.toml
         assert!(keys.contains("queries.auto-snapshot"));
         assert!(keys.contains("ui.mark-unpushed-branches"));
         // table prefixes should NOT be in the set (only leaf keys)
         assert!(!keys.contains("queries"));
         assert!(!keys.contains("ui"));
-        assert!(!keys.contains("web"));
     }
 
     #[test]

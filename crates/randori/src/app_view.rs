@@ -13,7 +13,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, StyledExt as _, Theme, ThemeMode,
     TitleBar, WindowExt as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariant, ButtonVariants as _},
     command::{Command, CommandItem, CommandState},
     h_flex,
     menu::DropdownMenu as _,
@@ -22,13 +22,14 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    Action, Anchor, AppContext as _, Context, Entity, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, PathPromptOptions, Render, SharedString,
-    Styled as _, Subscription, Window, div, img, prelude::FluentBuilder as _, px,
+    Action, Anchor, AppContext as _, Context, Entity, FocusHandle, Image, ImageFormat,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
+    Render, SharedString, Styled as _, Subscription, Window, div, img, prelude::FluentBuilder as _,
+    px,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::repo_view::RepoView;
+use crate::repo_view::{RepoView, RepoViewEvent};
 use crate::worker::Worker;
 
 const LOGO: &[u8] = include_bytes!("../assets/icon/randori-128.png");
@@ -72,6 +73,10 @@ struct RepoTab {
     path: PathBuf,
     title: SharedString,
     view: Entity<RepoView>,
+    /// The workspace did not open (not a jj repo, missing, broken); such tabs
+    /// stay open to show why, but are not saved for the next launch.
+    failed: bool,
+    _events: Subscription,
 }
 
 /// Tabs restored on the next launch.
@@ -99,7 +104,12 @@ pub struct RandoriApp {
     logo: Arc<Image>,
     /// Whether open tabs are saved and restored (off for screenshots).
     persist: bool,
+    /// Appearance shown now; `--light` can override it for one run.
     theme: ThemeChoice,
+    /// Appearance chosen in Settings, which is what the session remembers.
+    saved_theme: ThemeChoice,
+    /// Focus for the window itself, so its keys (⌘K, ⌘O) work with no tab open.
+    focus: FocusHandle,
     _activation: Subscription,
     _appearance: Subscription,
 }
@@ -140,6 +150,8 @@ impl RandoriApp {
             logo: Arc::new(Image::from_bytes(ImageFormat::Png, LOGO.to_vec())),
             persist,
             theme: theme_override.unwrap_or(session.theme),
+            saved_theme: session.theme,
+            focus: cx.focus_handle(),
             _activation,
             _appearance,
         };
@@ -182,6 +194,9 @@ impl RandoriApp {
         }
         app.active = active.min(app.tabs.len().saturating_sub(1));
         app.save_session();
+        if app.tabs.is_empty() {
+            app.focus.focus(window, cx);
+        }
         app
     }
 
@@ -200,6 +215,8 @@ impl RandoriApp {
         cx: &mut Context<Self>,
     ) -> Result<usize> {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        // A folder inside a workspace opens (or selects) the workspace itself.
+        let path = workspace_root(&path).unwrap_or(path);
         if let Some(ix) = self.tabs.iter().position(|tab| tab.path == path) {
             self.activate(ix, window, cx);
             return Ok(ix);
@@ -211,10 +228,18 @@ impl RandoriApp {
         let (worker, events) = Worker::spawn(Some(path.clone()), settings)?;
         let view =
             cx.new(|cx| RepoView::new(worker, events, Some(path.clone()), revset, window, cx));
+        let _events = cx.subscribe(&view, |app, view, event: &RepoViewEvent, _| {
+            if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.view == view) {
+                tab.failed = matches!(event, RepoViewEvent::LoadFailed);
+            }
+            app.save_session();
+        });
         self.tabs.push(RepoTab {
             title: tab_title(&path),
             path,
             view,
+            failed: false,
+            _events,
         });
         let ix = self.tabs.len() - 1;
         self.activate(ix, window, cx);
@@ -249,7 +274,9 @@ impl RandoriApp {
         } else if ix < self.active {
             self.active -= 1;
         }
-        if !self.tabs.is_empty() {
+        if self.tabs.is_empty() {
+            self.focus.focus(window, cx);
+        } else {
             self.activate(self.active, window, cx);
         }
         self.save_session();
@@ -266,6 +293,7 @@ impl RandoriApp {
 
     fn set_theme(&mut self, theme: ThemeChoice, window: &mut Window, cx: &mut Context<Self>) {
         self.theme = theme;
+        self.saved_theme = theme;
         self.apply_theme(window, cx);
         self.save_session();
         cx.notify();
@@ -293,6 +321,16 @@ impl RandoriApp {
                     "Describe revision",
                     IconName::TextCursorInput,
                     Box::new(repo::DescribeRevision),
+                ),
+                (
+                    "Rebase selection onto…",
+                    IconName::GitBranch,
+                    Box::new(repo::PickRebase),
+                ),
+                (
+                    "Move selected file to revision…",
+                    IconName::FileInput,
+                    Box::new(repo::PickMoveFile),
                 ),
                 (
                     "Create bookmark",
@@ -348,6 +386,11 @@ impl RandoriApp {
         }
         commands.extend([
             (
+                "Create a jj repository here",
+                IconName::FolderGit2,
+                Box::new(crate::repo_view::actions::InitRepository) as Box<dyn Action>,
+            ),
+            (
                 "Open workspace",
                 IconName::FolderOpen,
                 Box::new(actions::OpenRepository) as Box<dyn Action>,
@@ -380,6 +423,7 @@ impl RandoriApp {
             Rc::new(commands.into_iter().map(|(_, _, action)| action).collect());
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let target = self.active_view();
+        let app = cx.entity().downgrade();
 
         {
             let palette = palette.clone();
@@ -390,6 +434,7 @@ impl RandoriApp {
         window.open_dialog(cx, move |dialog, _, _| {
             let actions = actions.clone();
             let target = target.clone();
+            let app = app.clone();
             dialog.p_0().w(px(560.)).child(
                 Command::new(&palette)
                     .bordered(false)
@@ -401,13 +446,88 @@ impl RandoriApp {
                             return;
                         };
                         window.close_dialog(cx);
-                        // Run from the revision list so workspace commands reach it.
+                        // Window commands run on the app itself: with no tab open there
+                        // is no focused element for a dispatched action to start from.
+                        if let Some(app) = app.upgrade()
+                            && app.update(cx, |app, cx| {
+                                app.run_window_action(action.as_ref(), window, cx)
+                            })
+                        {
+                            return;
+                        }
+                        // Workspace commands run from the revision list, like a key binding.
                         if let Some(view) = &target {
                             view.update(cx, |view, cx| view.focus_log(window, cx));
                         }
                         window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
                     }),
             )
+        });
+    }
+
+    /// Runs a window-level action directly. Returns false for workspace actions.
+    fn run_window_action(
+        &mut self,
+        action: &dyn Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let any = action.as_any();
+        if any.is::<actions::OpenRepository>() {
+            self.prompt_open(window, cx);
+        } else if any.is::<actions::CloseTab>() {
+            self.request_close_tab(self.active, window, cx);
+        } else if any.is::<actions::NextTab>() {
+            self.cycle(1, window, cx);
+        } else if any.is::<actions::PreviousTab>() {
+            self.cycle(-1, window, cx);
+        } else if any.is::<actions::ThemeLight>() {
+            self.set_theme(ThemeChoice::Light, window, cx);
+        } else if any.is::<actions::ThemeDark>() {
+            self.set_theme(ThemeChoice::Dark, window, cx);
+        } else if any.is::<actions::ThemeSystem>() {
+            self.set_theme(ThemeChoice::System, window, cx);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Closes a tab, asking first when it holds descriptions that were not saved.
+    fn request_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix) else {
+            return;
+        };
+        let unsaved = tab.view.read(cx).unsaved_descriptions(cx);
+        if unsaved == 0 {
+            self.close_tab(ix, window, cx);
+            return;
+        }
+        let title = tab.title.clone();
+        let view = tab.view.clone();
+        let app = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app = app.clone();
+            let view = view.clone();
+            alert
+                .title(format!("Close {title}?"))
+                .description(format!(
+                    "{unsaved} unsaved description{} will be lost.",
+                    if unsaved == 1 { "" } else { "s" }
+                ))
+                .confirm()
+                .ok_text("Close")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let view = view.clone();
+                    let _ = app.update(cx, |app, cx| {
+                        // The tab may have moved since the dialog opened.
+                        if let Some(ix) = app.tabs.iter().position(|tab| tab.view == view) {
+                            app.close_tab(ix, window, cx);
+                        }
+                    });
+                    true
+                })
         });
     }
 
@@ -457,9 +577,14 @@ impl RandoriApp {
             return;
         }
         let session = Session {
-            tabs: self.tabs.iter().map(|tab| tab.path.clone()).collect(),
+            tabs: self
+                .tabs
+                .iter()
+                .filter(|tab| !tab.failed)
+                .map(|tab| tab.path.clone())
+                .collect(),
             active: self.active,
-            theme: self.theme,
+            theme: self.saved_theme,
         };
         if let Err(err) = store_session(&session) {
             log::warn!("cannot save open tabs: {err:#}");
@@ -498,7 +623,7 @@ impl RandoriApp {
                                     .tooltip("Close tab")
                                     .on_click(cx.listener(move |app, _, window, cx| {
                                         cx.stop_propagation();
-                                        app.close_tab(ix, window, cx);
+                                        app.request_close_tab(ix, window, cx);
                                     })),
                             )
                     })),
@@ -605,6 +730,7 @@ impl Render for RandoriApp {
         v_flex()
             .id("randori")
             .key_context(APP_CONTEXT)
+            .track_focus(&self.focus)
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
@@ -613,7 +739,7 @@ impl Render for RandoriApp {
                 app.prompt_open(window, cx)
             }))
             .on_action(cx.listener(|app, _: &actions::CloseTab, window, cx| {
-                app.close_tab(app.active, window, cx)
+                app.request_close_tab(app.active, window, cx)
             }))
             .on_action(
                 cx.listener(|app, _: &actions::NextTab, window, cx| app.cycle(1, window, cx)),
@@ -649,6 +775,13 @@ impl Render for RandoriApp {
                     })),
             )
     }
+}
+
+/// The nearest ancestor that holds a `.jj` directory.
+fn workspace_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|dir| dir.join(".jj").is_dir())
+        .map(Path::to_path_buf)
 }
 
 /// Splits saved tab paths into directories that still exist and ones that do not.

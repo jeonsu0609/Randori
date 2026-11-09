@@ -3,11 +3,8 @@
 //! The jj work is done by GG's worker (`gg_lib::worker`); this crate owns only
 //! the windows and views.
 
-// gg_lib marks itself deprecated as a public library. Randori vendors it in the
-// same workspace on purpose, so the warning does not apply here.
-#![allow(deprecated)]
-
 mod app_view;
+mod assets;
 mod graph;
 mod repo_view;
 mod worker;
@@ -119,7 +116,7 @@ fn main() -> Result<()> {
     }
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
+        .with_assets(assets::RandoriAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             repo_view::bind_keys(cx);

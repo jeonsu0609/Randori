@@ -903,7 +903,7 @@ fn classify_bookmark_push(
 
 pub(crate) use precondition;
 
-#[cfg(all(test, not(feature = "ts-rs")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{

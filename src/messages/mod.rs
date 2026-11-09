@@ -1,10 +1,7 @@
-//! Serializable message types shared between the Rust backend and the
-//! TypeScript frontend.
+//! Message types exchanged between the jj worker and Randori's views.
 //!
-//! Every type here derives [`Serialize`] and/or
-//! [`Deserialize`]. When the `ts-rs` feature is enabled,
-//! `cargo gen` (alias for `cargo test -F ts-rs`) exports matching TypeScript
-//! definitions into `app/messages/`.
+//! Every type here derives [`Serialize`] and/or [`Deserialize`]; push events
+//! from the worker carry them as JSON.
 
 pub mod mutations;
 pub mod queries;
@@ -15,12 +12,9 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, FixedOffset, Local, TimeZone, Utc, offset::LocalResult};
 use jj_lib::backend::{Signature, Timestamp};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "ts-rs")]
-use ts_rs::TS;
 
 /// Utility type used to abstract crlf/&lt;br&gt;/etc
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct MultilineString {
     pub lines: Vec<String>,
 }
@@ -38,7 +32,6 @@ where
 
 /// Utility type used for platform-specific display
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct DisplayPath(pub String);
 
 impl<T: AsRef<Path>> From<T> for DisplayPath {
@@ -53,7 +46,6 @@ impl<T: AsRef<Path>> From<T> for DisplayPath {
 
 /// Utility type used for round-tripping
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct TreePath {
     pub repo_path: String,
     pub relative_path: DisplayPath,
@@ -61,7 +53,6 @@ pub struct TreePath {
 
 /// A contiguous range of lines in a file.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct ChangeRange {
     pub start: usize,
     pub len: usize,
@@ -69,7 +60,6 @@ pub struct ChangeRange {
 
 /// A single contiguous diff hunk with its location and content.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct ChangeHunk {
     pub location: ChangeLocation,
     pub lines: MultilineString,
@@ -77,7 +67,6 @@ pub struct ChangeHunk {
 
 /// Line ranges in the source and target files for a diff hunk.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct ChangeLocation {
     pub from_file: ChangeRange,
     pub to_file: ChangeRange,
@@ -94,7 +83,6 @@ pub trait Id {
 /// A commit's unique hash identifier with disambiguated prefix.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct CommitId {
     pub hex: String,
     pub prefix: String,
@@ -116,7 +104,6 @@ impl Id for CommitId {
 /// A change's unique identifier with disambiguated prefix.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct ChangeId {
     pub hex: String,
     pub prefix: String,
@@ -141,7 +128,6 @@ impl Id for ChangeId {
 ///
 /// The worker may use one or both depending on policy.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct RevId {
     pub change: ChangeId,
     pub commit: CommitId,
@@ -151,7 +137,6 @@ pub struct RevId {
 ///
 /// Equivalent to either `from::to` or `to::from` - whichever one is nonempty.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct RevSet {
     pub from: RevId,
     pub to: RevId,
@@ -173,7 +158,6 @@ impl RevSet {
 
 /// A revision's author name, email, and timestamp.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct RevAuthor {
     pub email: String,
     pub name: String,
@@ -194,7 +178,6 @@ impl TryFrom<&Signature> for RevAuthor {
 
 /// Summary metadata for a revision displayed in the log.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct RevHeader {
     pub id: RevId,
     pub description: MultilineString,
@@ -210,7 +193,6 @@ pub struct RevHeader {
 /// Configuration sent to the frontend when a workspace is opened.
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 #[allow(clippy::large_enum_variant)]
 pub enum RepoConfig {
     #[allow(dead_code)] // used by frontend
@@ -241,7 +223,6 @@ pub enum RepoConfig {
 
 /// Current state of the repository after an operation.
 #[derive(Serialize, Clone, Debug)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct RepoStatus {
     pub operation_description: String,
     pub working_copy: CommitId,
@@ -251,7 +232,6 @@ pub struct RepoStatus {
 /// Events requiring user interaction during clone/init flows.
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub enum RepoEvent {
     CloneURL,
     CloneConfirm { url: String, path: String },
@@ -261,7 +241,6 @@ pub enum RepoEvent {
 /// Bookmark or tag name with metadata.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub enum StoreRef {
     LocalBookmark {
         bookmark_name: String,
@@ -302,7 +281,6 @@ impl StoreRef {
 /// Refers to one of the repository's manipulatable objects
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 #[allow(clippy::large_enum_variant)]
 pub enum Operand {
     Repository,
@@ -335,7 +313,6 @@ pub enum Operand {
 
 /// A prompt for user input (e.g. credentials for git operations).
 #[derive(Serialize, Debug, Clone)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct InputRequest {
     pub title: String,
     pub detail: String,
@@ -344,14 +321,12 @@ pub struct InputRequest {
 
 /// User-provided values for an [`InputRequest`].
 #[derive(Deserialize, Debug, Clone)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct InputResponse {
     pub fields: HashMap<String, String>,
 }
 
 /// A single field in an [`InputRequest`] form.
 #[derive(Serialize, Debug, Clone)]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub struct InputField {
     pub label: String,
     pub choices: Vec<String>,
@@ -369,7 +344,6 @@ impl From<&str> for InputField {
 /// Progress updates for long-running operations like git fetch/push.
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type")]
-#[cfg_attr(feature = "ts-rs", derive(TS), ts(export, export_to = "app/messages/"))]
 pub enum ProgressEvent {
     Progress { overall_percent: u32 },
     Message { text: String },

@@ -38,9 +38,8 @@ pub trait Session {
 /// Messages sent from the frontend (or test harness) to a worker thread.
 ///
 /// Most variants carry a [`Sender`] so the caller can block on the response.
-/// In web mode, [`crate::web::create_app`] handles the wiring — it spawns the
-/// worker thread, creates the channel, and translates HTTP requests into these
-/// events. In GUI mode, the Tauri IPC handlers do the same.
+/// Randori's `crates/randori/src/worker.rs` does the wiring: it spawns the
+/// worker thread, creates the channel and sends these events from the views.
 ///
 /// To drive a [`WorkerSession`] yourself, create an
 /// `mpsc::channel::<SessionEvent>()`, send events on the `Sender` half, and

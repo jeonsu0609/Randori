@@ -60,6 +60,9 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.blocked_by_pick(window, cx) {
+            return;
+        }
         let label = label.into();
         self.busy.push(label.clone());
         cx.notify();
@@ -153,6 +156,20 @@ impl RepoView {
         }
     }
 
+    /// While a target revision is being chosen, other commands wait: the keys
+    /// that move the selection would otherwise also be able to run them.
+    pub(super) fn blocked_by_pick(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.pick.is_none() {
+            return false;
+        }
+        window.push_notification(
+            Notification::info("Press Enter to apply it or Esc to cancel.")
+                .title("Finish choosing a revision first"),
+            cx,
+        );
+        true
+    }
+
     /// jj refuses to rewrite immutable history; say so before asking anything.
     /// Returns true when the selection is immutable.
     pub(super) fn refuse_if_immutable(
@@ -211,6 +228,9 @@ impl RepoView {
 
     /// Abandon is destructive, so it asks first.
     pub(super) fn confirm_abandon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked_by_pick(window, cx) {
+            return;
+        }
         if self.refuse_if_immutable("Abandon", window, cx) {
             return;
         }
@@ -291,6 +311,11 @@ impl RepoView {
             return;
         };
         if parent.commit == source.commit {
+            window.push_notification(
+                Notification::info("Choose a different revision as the new parent.")
+                    .title("Can't rebase onto itself"),
+                cx,
+            );
             return;
         }
         let label = format!(
@@ -395,6 +420,11 @@ impl RepoView {
             return;
         };
         if to.commit == from.commit {
+            window.push_notification(
+                Notification::info("The file is already in this revision.")
+                    .title("Nothing to move"),
+                cx,
+            );
             return;
         }
         let label = format!(
@@ -421,6 +451,9 @@ impl RepoView {
     /// Discards the selected file's changes by copying it back from the parent
     /// (`jj restore <path>`). Asks first: the edits are only reachable by undo.
     pub(super) fn confirm_restore_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked_by_pick(window, cx) {
+            return;
+        }
         if self.refuse_if_immutable("Discard", window, cx) {
             return;
         }
@@ -804,6 +837,9 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.blocked_by_pick(window, cx) {
+            return;
+        }
         let input = cx.new(|cx| InputState::new(window, cx).default_value(initial));
         let view = cx.entity().downgrade();
         let submit = Rc::new(submit);

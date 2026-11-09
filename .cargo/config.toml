@@ -1,2 +1,0 @@
-[alias]
-gen = "test -F ts-rs"

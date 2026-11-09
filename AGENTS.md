@@ -1,64 +1,64 @@
 # Project Overview
 
-GG is a GUI for Jujutsu (jj) version control. It's a Tauri desktop app with Svelte/TypeScript frontend (`app/`) and Rust backend (`src/`). Two launch modes: native GUI (`gg gui`) and browser-based web mode (`gg web`).
+Randori is a desktop client for Jujutsu (jj). The root package (`randori-core`,
+library `gg_lib`) is the jj engine taken from GG: a worker thread per workspace
+that owns jj-lib state and answers queries and mutations. The UI is
+`crates/randori`, built on GPUI and gpui-kit. There is no webview, Tauri or
+TypeScript.
 
 ## Development Commands
 
 ```bash
-npm install && npm run build   # Initial frontend build (required first time)
-cargo tauri dev                # Debug build with auto-reload
-cargo tauri dev -- -- --debug  # Pass --debug flag to app (yes, 2x --)
-cargo check                    # Check whether backend compiles
-cargo test                     # Run backend tests
-npm run check                  # Check whether frontend compiles
-npm run test                   # Run frontend tests
-cargo gen                      # Regenerate TypeScript types after changing ts-rs structs in src/messages/
-cargo run                      # Launch GUI (uses prebuilt assets)
-cargo run -- web               # Launch in web mode (opens browser)
+cargo run -- /path/to/workspace     # launch Randori (default member: crates/randori)
+cargo run -- --check /path          # open a workspace through the worker, print a summary, no window
+cargo check --workspace             # engine + UI
+cargo test --workspace              # engine tests need git >= 2.42 on PATH
+cargo clippy --workspace --all-targets
+cargo clippy -p randori --features screenshot
+cargo fmt --all
+script/bundle-macos.sh [--dmg]      # release Randori.app (and .dmg) under target/release
 ```
 
-**Before committing:** Run `cargo clippy` and `cargo fmt` to ensure code quality and consistent formatting.
+**Before committing:** run `cargo fmt --all`, both clippy commands and `cargo test --workspace`.
 
 ## Architecture
 
-Each window has a dedicated worker thread owning a `Session` (jj-lib is not thread-safe). The session progresses through states: `WorkerSession` → `WorkspaceSession` → `QuerySession`.
+Each tab has a dedicated worker thread owning a `Session` (jj-lib is not
+thread-safe). The session progresses through states: `WorkerSession` →
+`WorkspaceSession` → `QuerySession`.
 
 ### Key Boundaries
 
-- **`app/ipc.ts`**: Frontend transport abstraction. `isTauri()` detects runtime. Exports `query()`, `mutate()`, `trigger()`; the `event()` store lives in `app/events.ts`.
-- **`src/worker/mod.rs`**: Worker thread state machine processing `SessionEvent`s.
-- **`src/gui/mod.rs`**: Tauri setup, multi-window state (`HashMap<String, WindowState>`), IPC handlers.
-- **`src/web/mod.rs`**: Axum HTTP server with `/api/{query|trigger|mutate}/{command}` endpoints.
-
-### IPC Categories
-
-1. **Triggers**: Fire-and-forget backend actions (native UI operations)
-2. **Queries**: Request data without side effects
-3. **Mutations**: Structured repository modifications
-4. **Events**: Push updates to frontend (Tauri events in GUI; SSE from `/api/events` in web, where the store's `set()` is local-only)
-
-## Type Generation
-
-After modifying Rust structs with `#[cfg_attr(feature = "ts-rs", ...)]` in `src/messages/`:
-```bash
-cargo gen  # Runs: cargo test -F ts-rs
-```
-This exports TypeScript types to `app/messages/`. **Frontend breaks without this step.**
+- **`src/worker/session.rs`**: `SessionEvent`, the requests a view sends to its worker.
+- **`src/worker/mod.rs`**: worker state machine, the `Mutation` trait and the `EventSink` trait for push events.
+- **`src/messages/`**: request/response types (`Serialize`/`Deserialize`).
+- **`crates/randori/src/worker.rs`**: spawns a worker per tab, `Worker::call` sends a `SessionEvent` and blocks on the reply (call it from a background task, never the UI thread). Log queries take `log_lock` so paging is never interleaved.
+- **`crates/randori/src/app_view.rs`**: window, tabs, rail, command palette, settings, saved session (`<config dir>/randori/session.json`).
+- **`crates/randori/src/repo_view.rs`**: one workspace: `RepoView` state, opening, loading and paging, selection, worker events, actions and key bindings. The rest of the view is split into submodules that each `use super::*`:
+  - `model.rs`: row, ref, file and diff data built from worker responses (pure, unit tested)
+  - `log_list.rs`: graph log rows and header
+  - `panels.rs`: toolbar, bookmarks panel, status bar and the body layout
+  - `inspector.rs`: revision details, changed files and the diff
+  - `ops.rs`: every jj mutation the UI runs, and how results are applied
+  - `pick.rs`: pick mode, choosing a target revision from the keyboard
+  - `dnd.rs`, `menus.rs`: drag payloads, context menus
+- **`crates/randori/src/graph.rs`**: draws the worker's graph layout per virtual-list row.
+- **`crates/randori/src/assets.rs`**: the icons the app embeds. Only listed icons ship; a new `IconName::Foo` must be added to `icon_assets!` or it draws nothing (the `every_used_icon_is_embedded` test catches this, and needs new submodules added to its file list).
 
 ## Adding New Mutations
 
-1. Define struct in `src/messages/mutations.rs` with `#[cfg_attr(feature = "ts-rs", derive(TS))]`
-2. Implement the `Mutation` trait (defined in `src/worker/mod.rs`) in the matching file under `src/worker/mutations/` (`revision.rs`, `change.rs`, `ref.rs`; others in `mod.rs`):
-   - Start transaction first
+1. Define the struct in `src/messages/mutations.rs`.
+2. Implement the `Mutation` trait in the matching file under `src/worker/mutations/` (`revision.rs`, `change.rs`, `ref.rs`; others in `mod.rs`):
+   - Start the transaction first
    - Use `from`/`to` variable names (not `source`/`target`)
    - Check immutability immediately after resolving commits
-   - Use `precondition!` macro for user-facing validation errors
-3. Run `cargo gen`
-4. Call from frontend via `mutate()` in `app/ipc.ts`
+   - Use the `precondition!` macro for user-facing validation errors
+3. Add a method in `repo_view/ops.rs` that builds it and calls `run_mutation`; refuse immutable selections up front with `refuse_if_immutable`.
+4. Expose it as an action in `repo_view::actions`, bind it in a menu, the palette (`app_view::open_palette`) and, if it is frequent, a key.
 
 ## Testing Mutations
 
-Test repository (`res/test-repo.zip`) contains pre-defined commits. Key test commits (helpers in the `revs` module of `src/worker/tests/mod.rs`):
+The test repository (`res/test-repo.zip`) contains pre-defined commits. Key test commits (helpers in the `revs` module of `src/worker/tests/mod.rs`):
 - `working_copy()` - empty, child of main
 - `main_bookmark()` - renamed c.txt
 - `conflict_bookmark()` - has conflict in b.txt
@@ -70,9 +70,27 @@ Test patterns:
 - `assert_matches!(result, MutationResult::Updated { .. })` for success
 - Immutable commits fail with `PreconditionError`
 
+## Verifying the UI
+
+Build with `--features screenshot` to render offscreen and drive the real key
+bindings (no screen-recording permission needed):
+
+```bash
+cargo run -p randori --features screenshot -- \
+  --revset 'all()' --select-row 1 --keys 'down,cmd-k,n,e,w,enter' \
+  --screenshot /tmp/shot.png /path/to/workspace
+```
+
+`--keys` takes keystrokes and `action:randori::Name` (runs an action the way a
+menu item does). Screenshot runs never read or write the saved session. Use
+throwaway workspaces under a placeholder identity (`JJ_USER`, `JJ_EMAIL`).
+Pointer gestures (drag and drop, diff line selection) cannot be driven this way.
+
 ## JJ Version Coupling
 
-jj-lib and jj-cli dependencies are pinned to specific versions (see `Cargo.toml`). The app embeds jj functionality - users don't need jj CLI installed.
+jj-lib and jj-cli are pinned to specific versions (see `Cargo.toml`). The app
+embeds jj functionality - users don't need the jj CLI installed. Rust is
+pinned in `rust-toolchain.toml`.
 
 ## Key Patterns
 
@@ -83,42 +101,31 @@ jj-lib's `MergedTree::merge()` performs 3-way merges:
 - **Remove changes**: `modified.merge(&base, &added)` - removes diff base→added from modified
 - **Backout**: `working.merge(&to_revert, &parent_of_to_revert)` - reverses changes
 
-### Direct Manipulation (Drag & Drop)
+### Direct Manipulation
 
-UI metaphor: drag-and-drop to edit repository. Policy centralized in `app/mutators/BinaryMutator.ts` - check `canDrag()` and `canDrop()` for valid operations.
+Drag payloads are in `repo_view/dnd.rs` (`DraggedRevision`, `DraggedRef`,
+`DraggedFile`); what a drop does is in `repo_view/ops.rs` (`rebase_onto`,
+`move_ref_to`, `move_file_to`). Every drag has a keyboard path too: pick mode
+(`repo_view/pick.rs`, started by `R`, the context menus or the palette). While
+a pick is open, `run_mutation` and the dialogs refuse other commands
+(`blocked_by_pick`), so nothing changes the repository underneath an open pick.
 
-### Svelte Virtualization
+### GG Hunk Ranges
 
-The log pane (`app/GraphLog.svelte`) uses virtualization. Key by slot index, not content:
-```svelte
-<!-- CORRECT -->
-{#each visibleSlice as row, i (i)}
+`ChangeRange` lines are already 1-based (GG's copy of jj's hunker starts at
+`1..1`). Only an empty side changes in a unified header (`-0,0`).
 
-<!-- WRONG - fights virtualization -->
-{#key row?.revision.id.commit.hex ?? i}
-```
+### UI Rules
 
-### Reactive Props
-
-Use `$:` for derived values from props (critical in virtualized lists):
-```svelte
-$: label = ref.bookmark_name;  // CORRECT: reactive
-let label = ref.bookmark_name; // WRONG: computed once at mount
-```
-
-### Error Handling (GUI Mode)
-
-Use macros from `src/gui/handler.rs`:
-- `fatal!(result)` - panic with logging
-- `nonfatal!(result)` - log and return early
-- `optional!(result)` - silently ignore (for optional operations)
+Follow the gpui-kit Design Guides: colours from `cx.theme()` tokens only,
+sizes in `rem` (graph geometry scales by the window's rem), every action
+reachable from the keyboard, visible hover/focus/selection/disabled states.
 
 ## Configuration
 
-Settings loaded via `jj config`. Key GG-specific settings in `src/config/gg.toml`:
-- `gg.default-mode` - "gui" or "web"
+Settings are loaded via `jj config`. Engine settings live in `src/config/gg.toml`:
 - `gg.queries.log-page-size` - paging size (default 1000)
-- `gg.queries.large-repo-heuristic` - disables features when repo too large (default 100k)
+- `gg.queries.large-repo-heuristic` - disables features when the repo is too large (default 100k)
 
 ## Comment Style
 
@@ -147,14 +154,9 @@ let err = anyhow::Error::new(e.error);
 let options = jj_cli::git_util::load_git_import_options(&ui, &settings);
 ```
 
-## TypeScript Style
-
-Use `let` instead of `const` for variable declarations.
-
 ## Key Files Reference
 
-- `doc/DESIGN.md` - Core metaphors, bookmark state machine
-- `app/mutators/BinaryMutator.ts` - All drag-drop policies
-- `app/ipc.ts` - IPC abstraction with runtime detection
-- `src/worker/mutations/` - All mutation implementations, by category
-- `src/config/gg.toml` - Default configuration with inline docs
+- `doc/gg/DESIGN.md` - GG's core metaphors, bookmark state machine
+- `src/worker/mutations/` - all mutation implementations, by category
+- `src/config/gg.toml` - default engine configuration with inline docs
+- `crates/randori/src/repo_view/ops.rs` - every mutation the UI performs

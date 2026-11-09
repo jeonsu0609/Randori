@@ -6,7 +6,7 @@
 //! (repo status, progress) come back through [`EventSink`] as [`WorkerEvent`]s.
 
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,9 @@ impl EventSink for ChannelSink {
 #[derive(Clone)]
 pub struct Worker {
     tx: mpsc::Sender<SessionEvent>,
+    /// The worker pages through the *last* log query, so a query and its next
+    /// pages must not interleave with another query's. Held across each sequence.
+    log_lock: Arc<Mutex<()>>,
     /// Liveness token. The thread holds only a weak reference, so once every
     /// handle is gone (the tab closed) it stops instead of restarting.
     _alive: Arc<()>,
@@ -112,7 +115,14 @@ impl Worker {
             })
             .context("failed to start the jj worker thread")?;
 
-        Ok((Self { tx, _alive: alive }, event_rx))
+        Ok((
+            Self {
+                tx,
+                log_lock: Arc::default(),
+                _alive: alive,
+            },
+            event_rx,
+        ))
     }
 
     /// Sends one request and blocks until the worker answers.
@@ -134,12 +144,37 @@ impl Worker {
 
     /// Starts a log query and returns its first page.
     pub fn query_log(&self, query: String) -> Result<LogPage> {
-        self.call(|tx| SessionEvent::QueryLog { tx, query })?
+        self.query_log_pages(query, 0)
+    }
+
+    /// Runs a log query and keeps paging until at least `min_rows` rows are
+    /// loaded (or the log ends), as one uninterrupted sequence.
+    pub fn query_log_pages(&self, query: String, min_rows: usize) -> Result<LogPage> {
+        let _guard = self
+            .log_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut page: LogPage = self.call(|tx| SessionEvent::QueryLog { tx, query })??;
+        while page.has_more && page.rows.len() < min_rows {
+            let next: LogPage = self.call(|tx| SessionEvent::QueryLogNextPage { tx })??;
+            page.has_more = next.has_more;
+            page.rows.extend(next.rows);
+        }
+        Ok(page)
     }
 
     /// Returns the next page of the current log query.
     pub fn query_log_next_page(&self) -> Result<LogPage> {
+        let _guard = self
+            .log_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         self.call(|tx| SessionEvent::QueryLogNextPage { tx })?
+    }
+
+    /// Creates a jj repository at `wd` (colocated with git when it already has one).
+    pub fn init_workspace(&self, wd: PathBuf, colocated: bool) -> Result<PathBuf> {
+        self.call(|tx| SessionEvent::InitWorkspace { tx, wd, colocated })?
     }
 
     /// Loads headers, parents and the combined diff for a revision set.
