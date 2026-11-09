@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    Randori app icon.
+    An ensō (brush circle, a nod to jujutsu) holds a jj change graph: a line that
+    branches and merges back, ending in the hollow working-copy commit (@).
+    Body follows the macOS icon grid: 824 x 824 rounded square inset by 100.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#262B5E"/>
+      <stop offset="0.55" stop-color="#171A3D"/>
+      <stop offset="1" stop-color="#0D0F26"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.55">
+      <stop offset="0" stop-color="#6C63FF" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#6C63FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="enso" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#FF5F6D"/>
+      <stop offset="0.6" stop-color="#FF9A5A"/>
+      <stop offset="1" stop-color="#FFD36E"/>
+    </linearGradient>
+    <linearGradient id="graph" gradientUnits="userSpaceOnUse" x1="0" y1="720" x2="0" y2="300">
+      <stop offset="0" stop-color="#7FE7D4"/>
+      <stop offset="1" stop-color="#E9FFFA"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="body">
+      <rect x="100" y="100" width="824" height="824" rx="186"/>
+    </clipPath>
+  </defs>
+
+  <!-- body -->
+  <g clip-path="url(#body)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#bg)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#glow)"/>
+    <rect x="100" y="100" width="824" height="412" fill="url(#edge)" opacity="0.5"/>
+  </g>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="3"/>
+
+  <!-- ensō: open brush circle around (512, 500), gap at the upper right -->
+  <path d="M 667 279 A 270 270 0 1 0 766 408"
+        fill="none" stroke="url(#enso)" stroke-width="60" stroke-linecap="round"/>
+
+  <!-- change graph: a trunk with one parallel branch that merges back.
+       Drawn at full size, then scaled into the ensō around its centre. -->
+  <g transform="translate(518 505) scale(0.86) translate(-518 -487)">
+    <g fill="none" stroke="url(#graph)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 458 690 L 458 358"/>
+      <path d="M 458 650 C 458 610 578 625 578 580 L 578 500 C 578 458 458 472 458 430"/>
+    </g>
+    <g fill="url(#graph)">
+      <circle cx="458" cy="690" r="30"/>
+      <circle cx="458" cy="560" r="24"/>
+      <circle cx="578" cy="580" r="27"/>
+      <circle cx="578" cy="500" r="27"/>
+    </g>
+    <!-- merge commit -->
+    <circle cx="458" cy="430" r="32" fill="#F2FFFC"/>
+    <!-- working copy (@): hollow ring with a soft halo -->
+    <circle cx="458" cy="318" r="64" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="10"/>
+    <circle cx="458" cy="318" r="40" fill="#1A1D44" stroke="#FFFFFF" stroke-width="20"/>
+  </g>
+</svg>

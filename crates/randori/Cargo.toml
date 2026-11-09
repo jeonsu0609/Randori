@@ -1,0 +1,59 @@
+[package]
+name = "randori"
+version = "0.1.0"
+description = "Randori - a GPU-accelerated desktop client for Jujutsu, built on GG and gpui-kit"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/jeonsu0609/Randori"
+publish = false
+
+# Randori is its own workspace with its own Cargo.lock, so gpui's dependency
+# tree never changes the versions GG's Tauri app is locked to.
+[workspace]
+
+[[bin]]
+name = "randori"
+path = "src/main.rs"
+
+[dependencies]
+# jj worker, messages and config from GG, without the Tauri app.
+gg-cli = { path = "../..", default-features = false }
+gpui-kit = "0.9.0"
+# Same jj-lib as GG; needed to name `UserSettings`.
+jj-lib = "0.46.0"
+anyhow = "1.0.100"
+chrono = "0.4.44"
+futures = "0.3.31"
+log = "0.4"
+pollster = "1.0.1"
+serde_json = "1.0.150"
+# Only for `--screenshot`; same major version gpui renders into.
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+# The gpui that gpui-kit pins, listed only to turn on `Window::render_to_image`.
+# A caret range, not `=`: Cargo unifies it with gpui-kit's exact pin, so bumping
+# gpui-kit needs no edit here. If gpui-kit ever leaves 0.3, the screenshot build
+# fails to compile instead of silently testing a different gpui.
+gpui-pre = { version = "0.3", features = ["test-support"], optional = true }
+
+[features]
+# `randori --screenshot out.png` renders the first screen offscreen (README images, visual checks).
+screenshot = ["dep:gpui-pre", "dep:gpui-pre-macos", "dep:image"]
+
+# The macOS window implements the offscreen render only with its own test-support.
+[target."cfg(target_os = \"macos\")".dependencies]
+gpui-pre-macos = { version = "0.3", features = ["test-support"], optional = true }
+
+# App bundle (cargo-bundle). macOS uses the .icns; other platforms pick the PNGs.
+[package.metadata.bundle]
+name = "Randori"
+identifier = "io.github.jeonsu0609.randori"
+icon = [
+    "assets/icon/randori-32.png",
+    "assets/icon/randori-128.png",
+    "assets/icon/randori-256.png",
+    "assets/icon/randori-512.png",
+    "assets/icon/randori-1024.png",
+    "assets/icon/Randori.icns",
+]
+category = "Developer Tool"
+short_description = "A desktop client for Jujutsu"
