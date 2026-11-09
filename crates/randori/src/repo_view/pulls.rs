@@ -2,6 +2,7 @@
 //! workspace's GitHub remote, refreshed in the background, plus the author
 //! avatars the same query brings back for the graph.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::{WindowExt as _, notification::Notification};
@@ -32,6 +33,8 @@ pub(super) struct Pulls {
     token: Option<String>,
     fetching: bool,
     last_fetch: Option<Instant>,
+    /// Avatar URL → whether it is a real picture (not an identicon).
+    avatar_checks: HashMap<String, bool>,
     _timer: Task<()>,
 }
 
@@ -67,6 +70,7 @@ impl RepoView {
             token: None,
             fetching: false,
             last_fetch: None,
+            avatar_checks: HashMap::new(),
             _timer,
         });
         self.refresh_pulls(true, cx);
@@ -88,6 +92,7 @@ impl RepoView {
         pulls.fetching = true;
         let repo = pulls.repo.clone();
         let cached = pulls.token.clone();
+        let known: HashSet<String> = pulls.avatar_checks.keys().cloned().collect();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let token = match cached {
@@ -99,7 +104,28 @@ impl RepoView {
                 }
             };
             let result = match token.clone() {
-                Some(token) => Some(github::fetch(client, repo, token).await),
+                Some(token) => match github::fetch(client.clone(), repo, token).await {
+                    Ok(snapshot) => {
+                        // look at each new picture once, to drop identicons
+                        let mut urls: Vec<String> = snapshot
+                            .avatars
+                            .values()
+                            .cloned()
+                            .chain(
+                                snapshot
+                                    .pulls
+                                    .iter()
+                                    .filter_map(|pr| pr.author_avatar.clone()),
+                            )
+                            .filter(|url| !known.contains(url))
+                            .collect();
+                        urls.sort();
+                        urls.dedup();
+                        let checks = github::check_avatars(client, urls).await;
+                        Some(Ok((snapshot, checks)))
+                    }
+                    Err(err) => Some(Err(err)),
+                },
                 None => None,
             };
             let _ = this.update(cx, |view, cx| {
@@ -109,21 +135,25 @@ impl RepoView {
                 pulls.fetching = false;
                 pulls.last_fetch = Some(Instant::now());
                 match result {
-                    Some(Ok(snapshot)) => {
+                    Some(Ok((snapshot, checks))) => {
+                        pulls.avatar_checks.extend(checks);
+                        let real = |url: &String| pulls.avatar_checks.get(url) != Some(&false);
                         pulls.token = token;
                         pulls.list = snapshot.pulls;
+                        for pr in &mut pulls.list {
+                            pr.author_avatar = pr.author_avatar.take().filter(|url| real(url));
+                        }
                         pulls.total = snapshot.total;
                         pulls.state = PullsState::Ready;
-                        if !snapshot.avatars.is_empty() {
-                            let mut avatars = (*view.avatars).clone();
-                            avatars.extend(
-                                snapshot
-                                    .avatars
-                                    .into_iter()
-                                    .map(|(email, url)| (email, url.into())),
-                            );
-                            view.avatars = Rc::new(avatars);
+                        let mut avatars = (*view.avatars).clone();
+                        for (email, url) in snapshot.avatars {
+                            if real(&url) {
+                                avatars.insert(email, url.into());
+                            } else {
+                                avatars.remove(&email);
+                            }
                         }
+                        view.avatars = Rc::new(avatars);
                     }
                     None | Some(Err(FetchError::Unauthorized)) => {
                         pulls.token = None;

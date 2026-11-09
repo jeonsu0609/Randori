@@ -289,6 +289,46 @@ pub fn parse(value: &Value) -> Result<Snapshot> {
     })
 }
 
+/// GitHub's generated picture for an account without one (an identicon):
+/// always a 420×420 PNG, whatever size was asked for. At node size it reads as
+/// a broken image, so such accounts get initials instead.
+pub fn is_identicon(bytes: &[u8]) -> bool {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    let dimension = |at: usize| {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    bytes.starts_with(PNG) && dimension(16) == Some(420) && dimension(20) == Some(420)
+}
+
+/// Whether each avatar URL is a real picture (`false` for an identicon). A
+/// URL that cannot be read counts as real, so the image loader still tries
+/// it and falls back to initials on its own.
+pub async fn check_avatars(
+    client: Arc<dyn HttpClient>,
+    urls: Vec<String>,
+) -> HashMap<String, bool> {
+    let checks = urls.into_iter().map(|url| {
+        let client = client.clone();
+        async move {
+            let identicon = async {
+                let mut response = client.get(&url, AsyncBody::empty(), true).await.ok()?;
+                let mut bytes = Vec::new();
+                response.body_mut().read_to_end(&mut bytes).await.ok()?;
+                Some(is_identicon(&bytes))
+            }
+            .await
+            .unwrap_or(false);
+            (url, !identicon)
+        }
+    });
+    futures::future::join_all(checks)
+        .await
+        .into_iter()
+        .collect()
+}
+
 /// GitHub's no-reply addresses name the account, so the avatar needs no
 /// lookup: `123+login@users.noreply.github.com` or `login@users.noreply…`.
 pub fn noreply_avatar(email: &str) -> Option<String> {
@@ -411,6 +451,21 @@ mod tests {
         assert_eq!(parse(&error).unwrap_err().to_string(), "Bad credentials");
         let hidden = json!({ "data": { "repository": null } });
         assert!(parse(&hidden).is_err());
+    }
+
+    #[test]
+    fn identicons_are_420_pixel_pngs() {
+        let png = |width: u32, height: u32| {
+            let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+            bytes.extend(width.to_be_bytes());
+            bytes.extend(height.to_be_bytes());
+            bytes
+        };
+        assert!(is_identicon(&png(420, 420)));
+        // a picture GitHub resized to the requested 64px
+        assert!(!is_identicon(&png(64, 64)));
+        assert!(!is_identicon(b"\xff\xd8\xff\xe0 JFIF"));
+        assert!(!is_identicon(b""));
     }
 
     #[test]
