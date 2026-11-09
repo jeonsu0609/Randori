@@ -20,8 +20,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AppContext as _, Context, Entity, Image, ImageFormat, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Window,
-    div, img, prelude::FluentBuilder as _,
+    KeyBinding, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _,
+    Subscription, Window, div, img, prelude::FluentBuilder as _,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +71,7 @@ pub struct RandoriApp {
     logo: Arc<Image>,
     /// Whether open tabs are saved and restored (off for screenshots).
     persist: bool,
+    _activation: Subscription,
 }
 
 impl RandoriApp {
@@ -84,11 +85,19 @@ impl RandoriApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Pick up edits made outside Randori when the window comes back to the
+        // front. Only the selected tab snapshots; the others do when selected.
+        let _activation = cx.observe_window_activation(window, |app, window, cx| {
+            if window.is_window_active() {
+                app.snapshot_active(cx);
+            }
+        });
         let mut app = Self {
             tabs: Vec::new(),
             active: 0,
             logo: Arc::new(Image::from_bytes(ImageFormat::Png, LOGO.to_vec())),
             persist,
+            _activation,
         };
 
         let session = if persist {
@@ -96,10 +105,23 @@ impl RandoriApp {
         } else {
             Session::default()
         };
-        for path in &session.tabs {
+        // A workspace that was moved or deleted is dropped from the session
+        // instead of coming back as an error tab on every launch.
+        let (existing, missing) = split_existing(session.tabs);
+        for path in existing {
             if let Err(err) = app.open_tab(path.clone(), None, window, cx) {
                 log::warn!("cannot restore {}: {err:#}", path.display());
             }
+        }
+        if !missing.is_empty() {
+            let list: Vec<String> = missing
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            window.push_notification(
+                Notification::info(list.join("\n")).title("Workspaces no longer found"),
+                cx,
+            );
         }
         let mut active = session.active;
 
@@ -164,9 +186,15 @@ impl RandoriApp {
         if ix >= self.tabs.len() {
             return;
         }
+        let switched = self.active != ix;
         self.active = ix;
         let view = self.tabs[ix].view.clone();
-        view.update(cx, |view, cx| view.focus_log(window, cx));
+        view.update(cx, |view, cx| {
+            view.focus_log(window, cx);
+            if switched {
+                view.snapshot(cx);
+            }
+        });
         self.save_session();
         cx.notify();
     }
@@ -187,6 +215,12 @@ impl RandoriApp {
         }
         self.save_session();
         cx.notify();
+    }
+
+    fn snapshot_active(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.active_view() {
+            view.update(cx, |view, cx| view.snapshot(cx));
+        }
     }
 
     fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -383,6 +417,11 @@ impl Render for RandoriApp {
     }
 }
 
+/// Splits saved tab paths into directories that still exist and ones that do not.
+fn split_existing(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    paths.into_iter().partition(|path| path.is_dir())
+}
+
 fn tab_title(path: &Path) -> SharedString {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -410,4 +449,18 @@ fn store_session(session: &Session) -> Result<()> {
     }
     std::fs::write(&path, serde_json::to_vec_pretty(session)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_skips_workspaces_that_are_gone() {
+        let here = std::env::temp_dir();
+        let gone = here.join("randori-no-such-workspace-7f3a");
+        let (existing, missing) = split_existing(vec![here.clone(), gone.clone()]);
+        assert_eq!(existing, vec![here]);
+        assert_eq!(missing, vec![gone]);
+    }
 }

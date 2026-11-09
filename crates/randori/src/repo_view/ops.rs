@@ -58,7 +58,7 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let label = label.into();
-        self.busy = Some(label.clone());
+        self.busy.push(label.clone());
         cx.notify();
 
         let worker = self.worker.clone();
@@ -67,8 +67,9 @@ impl RepoView {
                 .background_spawn(async move { worker.mutate(mutation) })
                 .await;
             let _ = this.update_in(cx, |view, window, cx| {
-                view.busy = None;
-                view.progress = None;
+                if let Some(ix) = view.busy.iter().position(|busy| *busy == label) {
+                    view.busy.remove(ix);
+                }
                 match result {
                     Ok(result) => view.apply_result(&label, result, retry, window, cx),
                     Err(err) => {
@@ -76,6 +77,14 @@ impl RepoView {
                             Notification::error(format!("{err:#}")).title(label.clone()),
                             cx,
                         );
+                    }
+                }
+                // Several operations can run at once (one push per bookmark, one fetch
+                // per remote); the log is read again once, after the last of them.
+                if view.busy.is_empty() {
+                    view.progress = None;
+                    if std::mem::take(&mut view.reload_after_ops) {
+                        view.reload(cx);
                     }
                 }
                 cx.notify();
@@ -102,10 +111,12 @@ impl RepoView {
                     workspace.operation = new_status.operation_description.into();
                     workspace.can_redo = new_status.can_redo;
                 }
-                self.pending_select = new_selection.map(|header| header.id.change.hex);
-                self.reload(cx);
+                if let Some(header) = new_selection {
+                    self.pending_select = Some(header.id.change.hex);
+                }
+                self.reload_after_ops = true;
             }
-            MutationResult::Reconfigured { .. } => self.reload(cx),
+            MutationResult::Reconfigured { .. } => self.reload_after_ops = true,
             MutationResult::InputRequired { request } => match retry {
                 Some(retry) => self.prompt_credentials(label.clone(), request, retry, window, cx),
                 None => window.push_notification(
@@ -139,7 +150,32 @@ impl RepoView {
         }
     }
 
+    /// jj refuses to rewrite immutable history; say so before asking anything.
+    /// Returns true when the selection is immutable.
+    pub(super) fn refuse_if_immutable(
+        &self,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(header) = self.selected_header().filter(|header| header.is_immutable) else {
+            return false;
+        };
+        let change = super::short_id(&header.id.change.prefix, &header.id.change.rest, 8);
+        window.push_notification(
+            Notification::warning(format!(
+                "{change} is immutable. Change `immutable_heads()` in jj config to rewrite it."
+            ))
+            .title(action.to_owned()),
+            cx,
+        );
+        true
+    }
+
     pub(super) fn edit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_if_immutable("Edit", window, cx) {
+            return;
+        }
         if let Some(header) = self.selected_header() {
             let id = header.id.clone();
             self.run_mutation("Edit", Box::new(CheckoutRevision { id }), None, window, cx);
@@ -172,6 +208,9 @@ impl RepoView {
 
     /// Abandon is destructive, so it asks first.
     pub(super) fn confirm_abandon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_if_immutable("Abandon", window, cx) {
+            return;
+        }
         let Some(header) = self.selected_header() else {
             return;
         };

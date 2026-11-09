@@ -10,6 +10,7 @@
 //! └ status bar: worker state · workspace · last operation · @ ──────────────────┘
 //! ```
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -236,7 +237,9 @@ pub struct RepoView {
     _subscriptions: Vec<Subscription>,
     detail_task: Option<Task<()>>,
     /// Label of the mutation in flight, shown in the status bar.
-    busy: Option<SharedString>,
+    busy: Vec<SharedString>,
+    /// A finished operation changed the repository; reload when none are left.
+    reload_after_ops: bool,
     /// Latest progress message from a git fetch or push.
     progress: Option<SharedString>,
     /// Change to select after the next reload (from a mutation result).
@@ -245,6 +248,8 @@ pub struct RepoView {
     ref_target: Option<StoreRef>,
     /// Inspector editor for the selected revision's description.
     description_input: Entity<TextareaState>,
+    /// Unsaved descriptions of changes the user moved away from, by change id.
+    description_drafts: HashMap<String, String>,
     /// Keeps the open one-field dialog's Enter handler alive.
     dialog_subscription: Option<Subscription>,
     /// Change id and text last loaded into the description editor.
@@ -307,14 +312,6 @@ impl RepoView {
             },
         ));
 
-        // Pick up edits made outside Randori whenever the window comes back to the front,
-        // the same moment GG snapshots the working copy.
-        _subscriptions.push(cx.observe_window_activation(window, |view, window, cx| {
-            if window.is_window_active() {
-                view.snapshot(cx);
-            }
-        }));
-
         let mut view = Self {
             worker,
             state: LoadState::Loading,
@@ -339,12 +336,14 @@ impl RepoView {
             _events,
             _subscriptions,
             detail_task: None,
-            busy: None,
+            busy: Vec::new(),
+            reload_after_ops: false,
             progress: None,
             pending_select: None,
             ref_target: None,
             description_input,
             description_for: None,
+            description_drafts: HashMap::new(),
             dialog_subscription: None,
         };
         view.open(workspace, initial_query, window, cx);
@@ -356,7 +355,7 @@ impl RepoView {
         matches!(self.state, LoadState::Ready | LoadState::Failed(_))
             && !self.detail_loading
             && !self.loading_more
-            && self.busy.is_none()
+            && self.busy.is_empty()
     }
 
     /// Moves keyboard focus to the revision list (e.g. when its tab is selected).
@@ -485,7 +484,9 @@ impl RepoView {
     }
 
     /// Asks the worker to record working-copy changes and reloads if there were any.
-    fn snapshot(&mut self, cx: &mut Context<Self>) {
+    /// Called by the window for the selected tab when the window comes back to
+    /// the front or the tab is selected, the moments GG snapshots too.
+    pub fn snapshot(&mut self, cx: &mut Context<Self>) {
         if self.workspace.is_none() {
             return;
         }
@@ -1427,7 +1428,7 @@ impl RepoView {
                                             .small()
                                             .label("Save")
                                             .when(dirty, |button| button.primary())
-                                            .disabled(!dirty || self.busy.is_some())
+                                            .disabled(!dirty || !self.busy.is_empty())
                                             .on_click(cx.listener(|view, _, window, cx| {
                                                 view.save_description(window, cx)
                                             })),
@@ -1635,16 +1636,24 @@ impl RepoView {
                     .child(div().size_2().rounded_full().bg(state_color))
                     .child(state_label)
                     // A running jj operation replaces the last-operation note.
-                    .when_some(self.busy.clone(), |this, busy| {
+                    .when_some(self.busy.last().cloned(), |this, busy| {
+                        let others = self.busy.len() - 1;
                         this.child(div().text_color(theme.muted_foreground).child("·"))
                             .child(Spinner::new().xsmall())
                             .child(busy)
+                            .when(others > 0, |this| {
+                                this.child(
+                                    div()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("+{others} more")),
+                                )
+                            })
                             .when_some(self.progress.clone(), |this, progress| {
                                 this.child(div().text_color(theme.muted_foreground).child(progress))
                             })
                     })
                     .when_some(
-                        self.workspace.as_ref().filter(|_| self.busy.is_none()),
+                        self.workspace.as_ref().filter(|_| self.busy.is_empty()),
                         |this, ws| {
                             this.child(div().text_color(theme.muted_foreground).child("·"))
                                 .child(
@@ -1794,6 +1803,9 @@ impl Render for RepoView {
             }))
             .on_action(
                 cx.listener(|view, _: &actions::DescribeRevision, window, cx| {
+                    if view.refuse_if_immutable("Describe", window, cx) {
+                        return;
+                    }
                     view.description_input
                         .update(cx, |state, cx| state.focus(window, cx));
                 }),
@@ -1870,16 +1882,39 @@ impl RepoView {
         };
         let change = header.id.change.hex.clone();
         let text = header.description.lines.join("\n").trim_end().to_owned();
-        if let Some((loaded_change, loaded_text)) = &self.description_for
-            && *loaded_change == change
-        {
-            let editing = self.description_input.read(cx).value().trim_end() != loaded_text;
-            if editing || *loaded_text == text {
-                return;
+        let current = self
+            .description_input
+            .read(cx)
+            .value()
+            .trim_end()
+            .to_owned();
+
+        if let Some((loaded_change, loaded_text)) = &self.description_for {
+            if *loaded_change == change {
+                if current == text {
+                    // Saved (or changed to the same text elsewhere): track the new text.
+                    self.description_for = Some((change, text));
+                    return;
+                }
+                if current != *loaded_text {
+                    // Unsaved edits on this change: leave them alone.
+                    return;
+                }
+                // Not editing and jj's text changed (undo, the jj CLI): load it below.
+            } else if current != *loaded_text {
+                // Leaving a change with unsaved edits: keep them as a draft.
+                self.description_drafts
+                    .insert(loaded_change.clone(), current.clone());
             }
         }
+
+        // A draft left on this change earlier comes back; otherwise jj's text.
+        let value = self
+            .description_drafts
+            .remove(&change)
+            .unwrap_or_else(|| text.clone());
         self.description_input
-            .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+            .update(cx, |state, cx| state.set_value(value, window, cx));
         self.description_for = Some((change, text));
     }
 
