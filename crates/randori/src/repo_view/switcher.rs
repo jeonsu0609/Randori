@@ -285,6 +285,7 @@ impl RepoView {
                 let (name, id) = (choice.name.clone(), choice.rev.id.clone());
                 let _ = view.update(cx, |view, cx| {
                     view.close_focus(window, cx);
+                    view.check_picked_up_after();
                     view.run_mutation(
                         format!("New change on {name}"),
                         Box::new(gg_lib::messages::mutations::CreateRevision {

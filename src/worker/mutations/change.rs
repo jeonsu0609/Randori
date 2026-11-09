@@ -23,7 +23,8 @@ pub use crate::{
     messages::{
         ChangeHunk, TreePath,
         mutations::{
-            CopyChanges, CopyHunk, MoveChanges, MoveHunk, MutationOptions, MutationResult,
+            CopyChanges, CopyHunk, IgnoreNewFiles, MoveChanges, MoveHunk, MutationOptions,
+            MutationResult,
         },
     },
     worker::{Mutation, gui_util::WorkspaceSession},
@@ -748,6 +749,86 @@ async fn update_tree_entry(
     );
     let new_tree = builder.write_tree().await?;
     Ok(new_tree)
+}
+
+#[async_trait(?Send)]
+impl Mutation for IgnoreNewFiles {
+    async fn execute(
+        self: Box<Self>,
+        ws: &mut WorkspaceSession,
+        _options: &MutationOptions,
+    ) -> Result<MutationResult> {
+        if self.paths.is_empty() {
+            return Ok(MutationResult::Unchanged);
+        }
+        // the files are taken in by a snapshot; make sure it has happened
+        ws.import_and_snapshot(true, false).await?;
+        let wc_commit = ws.get_commit(ws.wc_id())?;
+        let parents = wc_commit.parents().await?;
+        let parent_tree = rewrite::merge_commit_trees(ws.repo(), &parents).await?;
+
+        let mut paths = Vec::new();
+        let mut patterns: Vec<String> = Vec::new();
+        for path in &self.paths {
+            let path = RepoPath::from_internal_string(&path.repo_path)?.to_owned();
+            if !parent_tree.path_value(&path).await?.is_absent() {
+                precondition!(
+                    "{} is in the parent revision too; only files the working copy picked up can be ignored",
+                    path.as_internal_file_string()
+                );
+            }
+            let pattern = exclude_pattern(&path, &parent_tree).await?;
+            if !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+            paths.push(path);
+        }
+        ws.ignore_and_untrack(&paths, &patterns).await?;
+        Ok(MutationResult::Updated {
+            new_status: ws.format_status(),
+            new_selection: None,
+        })
+    }
+}
+
+/// The `info/exclude` line for a picked-up file: its top-most directory that
+/// the parent does not have (a whole build output folder is one line), or
+/// the file itself, anchored at the root and with gitignore's special
+/// characters escaped.
+async fn exclude_pattern(path: &RepoPath, parent_tree: &MergedTree) -> Result<String> {
+    let mut ancestors: Vec<&RepoPath> = path.ancestors().collect();
+    ancestors.reverse(); // root first
+    for dir in ancestors.iter().skip(1) {
+        if *dir == path {
+            break;
+        }
+        if parent_tree.path_value(dir).await?.is_absent() {
+            return Ok(format!(
+                "/{}/",
+                escape_gitignore(dir.as_internal_file_string())
+            ));
+        }
+    }
+    Ok(format!(
+        "/{}",
+        escape_gitignore(path.as_internal_file_string())
+    ))
+}
+
+fn escape_gitignore(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for (ix, c) in path.chars().enumerate() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']') || (ix == 0 && matches!(c, '#' | '!')) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    // trailing spaces are dropped by git unless escaped
+    if out.ends_with(' ') {
+        out.pop();
+        out.push_str("\\ ");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2285,5 +2366,94 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn tracks(ws: &WorkspaceSession, path: &str) -> bool {
+        use pollster::FutureExt as _;
+        let tree = ws.get_commit(ws.wc_id()).unwrap().tree();
+        !tree
+            .path_value(RepoPath::from_internal_string(path).unwrap())
+            .block_on()
+            .unwrap()
+            .is_absent()
+    }
+
+    #[tokio::test]
+    async fn ignore_new_files_untracks_and_keeps_them() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        // a build output the working copy picked up
+        fs::create_dir_all(repo.path().join("out/sub"))?;
+        fs::write(repo.path().join("out/app.bin"), "build")?;
+        fs::write(repo.path().join("out/sub/x.o"), "obj")?;
+        ws.import_and_snapshot(true, false).await?;
+        assert!(tracks(&ws, "out/app.bin"));
+
+        let result = IgnoreNewFiles {
+            paths: ["out/app.bin", "out/sub/x.o"]
+                .iter()
+                .map(|p| TreePath {
+                    repo_path: p.to_string(),
+                    relative_path: "".into(),
+                })
+                .collect(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Updated { .. });
+
+        assert!(!tracks(&ws, "out/app.bin") && !tracks(&ws, "out/sub/x.o"));
+        assert!(
+            repo.path().join("out/app.bin").exists(),
+            "the file stays on disk"
+        );
+        // a later snapshot does not take it in again
+        ws.import_and_snapshot(true, false).await?;
+        assert!(!tracks(&ws, "out/app.bin"));
+
+        // one line for the whole new folder
+        let exclude = fs::read_dir(repo.path().join(".jj/repo/store"))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join("info/exclude"))
+            .find(|p| p.exists())
+            .expect("an exclude file in the git store");
+        let text = fs::read_to_string(exclude)?;
+        assert_eq!(text.lines().filter(|l| *l == "/out/").count(), 1, "{text}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ignore_new_files_refuses_files_the_parent_has() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        let parent_file = ws
+            .get_commit(ws.wc_id())?
+            .tree()
+            .entries()
+            .next()
+            .map(|(path, _)| path.as_internal_file_string().to_owned())
+            .expect("a file in the working copy");
+        let result = IgnoreNewFiles {
+            paths: vec![TreePath {
+                repo_path: parent_file,
+                relative_path: "".into(),
+            }],
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::PreconditionError { .. });
+        Ok(())
+    }
+
+    #[test]
+    fn gitignore_escapes() {
+        assert_eq!(escape_gitignore("a/b.txt"), "a/b.txt");
+        assert_eq!(escape_gitignore("x[1]*?.log"), "x\\[1\\]\\*\\?.log");
+        assert_eq!(escape_gitignore("#notes"), "\\#notes");
+        assert_eq!(escape_gitignore("!keep"), "\\!keep");
+        assert_eq!(escape_gitignore("trail "), "trail\\ ");
     }
 }

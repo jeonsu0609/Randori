@@ -54,6 +54,7 @@ mod model;
 mod ops;
 mod panels;
 mod pick;
+mod picked_up;
 mod pulls;
 mod switcher;
 
@@ -292,6 +293,12 @@ pub struct RepoView {
     derived_at: std::time::Instant,
     /// A column being resized: which, where the drag started, its width then.
     column_drag: Option<(log_list::Column, gpui_kit::Pixels, f32)>,
+    /// A move of the working copy asked to look for files it picked up.
+    /// `Some(working copy before the move)` while a check is due.
+    check_picked_up: Option<Option<String>>,
+    picked_up_checking: bool,
+    /// Files found, waiting to be shown in a notification.
+    picked_up: Vec<TreePath>,
     /// Where the pointer went down on a column handle.
     column_press: Option<gpui_kit::Pixels>,
 }
@@ -414,6 +421,9 @@ impl RepoView {
             derived_at: std::time::Instant::now(),
             column_drag: None,
             column_press: None,
+            check_picked_up: None,
+            picked_up_checking: false,
+            picked_up: Vec::new(),
         };
         view.wd = workspace.clone();
         view.initial_query = initial_query.clone();
@@ -429,6 +439,7 @@ impl RepoView {
             && self.busy.is_empty()
             && !self.pulls_fetching()
             && !self.conflicts_loading
+            && !self.picked_up_pending()
     }
 
     /// Moves keyboard focus to the revision list (e.g. when its tab is selected).
@@ -775,6 +786,7 @@ impl RepoView {
         }
         self.refresh_focus(cx);
         self.refresh_conflicts(cx);
+        self.run_picked_up_check(cx);
     }
 
     fn rebuild_derived(&mut self) {
@@ -994,6 +1006,9 @@ impl RepoView {
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_description(window, cx);
+        if !self.picked_up.is_empty() {
+            cx.defer_in(window, |view, window, cx| view.notify_picked_up(window, cx));
+        }
         // a resize released outside the window never reaches the drop handler
         if self.column_drag.is_some() && !cx.has_active_drag() {
             cx.defer_in(window, |view, _, cx| view.finish_column_resize(cx));

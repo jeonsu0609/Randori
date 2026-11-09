@@ -115,6 +115,14 @@ pub struct MoveHunk {
     pub hunk: ChangeHunk,
 }
 
+/// Stops tracking files the working copy picked up although another commit
+/// ignores them: adds them to the git repository's `info/exclude` (never
+/// committed) and untracks them, leaving the files on disk.
+#[derive(Deserialize, Debug)]
+pub struct IgnoreNewFiles {
+    pub paths: Vec<TreePath>,
+}
+
 /// Copies a single diff hunk from one revision into another.
 #[derive(Deserialize, Debug)]
 pub struct CopyHunk {

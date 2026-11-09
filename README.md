@@ -45,6 +45,14 @@ mutable revision with a conflict (`conflicts() & mutable()`), loaded or not;
 clicking it goes to the next one, switching to **All branches** when it is not
 loaded.
 
+After New, Edit or a bookmark switch, Randori snapshots once and checks
+whether the new working copy picked up files. That happens when the revision
+you move to does not ignore files the previous one ignored, an older
+`.gitignore` meeting a build folder: jj then tracks them
+([jj #5596](https://github.com/jj-vcs/jj/issues/5596)). A notification lists
+them; **Ignore locally** adds them to `.git/info/exclude` (one line per new
+folder, never committed) and untracks them, leaving the files on disk.
+
 **Mine** is jj's own log (`revsets.log`): your changes that are not in trunk
 yet, and trunk. Changes on other people's branches are immutable to jj and stay
 out of it. **All branches** shows every visible commit (`all()`), every branch

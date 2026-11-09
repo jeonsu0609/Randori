@@ -146,6 +146,7 @@ impl RepoView {
 
     pub(super) fn new_child(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(set) = self.selected_set() {
+            self.check_picked_up_after();
             self.run_mutation(
                 "New change",
                 Box::new(CreateRevision { set }),
@@ -198,6 +199,7 @@ impl RepoView {
         }
         if let Some(header) = self.selected_header() {
             let id = header.id.clone();
+            self.check_picked_up_after();
             self.run_mutation("Edit", Box::new(CheckoutRevision { id }), None, window, cx);
         }
     }

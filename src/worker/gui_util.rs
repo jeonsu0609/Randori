@@ -1669,3 +1669,123 @@ async fn load_at_head(workspace: &Workspace, data: &WorkspaceData) -> Result<Ope
 
     Ok(OperationData::new(workspace.workspace_name(), data, repo))
 }
+
+impl WorkspaceSession<'_> {
+    /// Stops tracking `paths` in the working-copy commit and keeps the files
+    /// on disk, like `jj file untrack`, after adding `patterns` to the git
+    /// repository's `info/exclude` so the next snapshot does not take them
+    /// in again. Returns the exclude file written.
+    ///
+    /// This is the answer to files a checkout started tracking because the
+    /// commit it moved to does not ignore them (jj #5596).
+    pub(crate) async fn ignore_and_untrack(
+        &mut self,
+        paths: &[jj_lib::repo_path::RepoPathBuf],
+        patterns: &[String],
+    ) -> Result<PathBuf> {
+        let Some(git_backend) = self.operation.git_backend() else {
+            return Err(anyhow!("only git-backed repositories have an exclude file"));
+        };
+        let exclude = git_backend.git_repo_path().join("info").join("exclude");
+        append_exclude_patterns(&exclude, patterns)?;
+
+        let workspace_name = self.workspace.workspace_name().to_owned();
+        let wc_commit = self.get_commit(self.wc_id())?;
+        let base_ignores = self
+            .operation
+            .base_ignores(self.workspace.workspace_root())?;
+        let mut locked_ws = self.workspace.start_working_copy_mutation().await?;
+
+        let mut builder = jj_lib::merged_tree_builder::MergedTreeBuilder::new(wc_commit.tree());
+        for path in paths {
+            builder.set_or_remove(path.clone(), jj_lib::merge::Merge::absent());
+        }
+        let new_tree = builder.write_tree().await?;
+
+        let mut tx = cli_util::start_repo_transaction(&self.operation.repo, &workspace_name, &[]);
+        let new_commit = tx
+            .repo_mut()
+            .rewrite_commit(&wc_commit)
+            .set_tree(new_tree)
+            .write()
+            .await?;
+        tx.repo_mut()
+            .set_wc_commit(workspace_name.clone(), new_commit.id().clone())?;
+        // reset, not check out: the files stay where they are
+        locked_ws.locked_wc().reset(&new_commit).await?;
+
+        // a path the new patterns do not cover would come straight back
+        let HumanByteSize(mut max_new_file_size) = self
+            .data
+            .workspace_settings
+            .get_value_with("snapshot.max-new-file-size", TryInto::try_into)?;
+        if max_new_file_size == 0 {
+            max_new_file_size = u64::MAX;
+        }
+        let (after, _) = locked_ws
+            .locked_wc()
+            .snapshot(&SnapshotOptions {
+                base_ignores,
+                progress: None,
+                max_new_file_size,
+                start_tracking_matcher: self.data.auto_tracking_matcher()?.as_ref(),
+                force_tracking_matcher: &NothingMatcher,
+            })
+            .await?;
+        if after.tree_ids() != new_commit.tree_ids() {
+            // like `jj file untrack`: only the untracked paths coming back is
+            // an error; other changes are concurrent edits, left for the next
+            // snapshot to record
+            let matcher = jj_lib::matchers::FilesMatcher::new(paths);
+            let back = after.entries_matching(&matcher).count();
+            locked_ws.locked_wc().reset(&new_commit).await?;
+            if back > 0 {
+                return Err(anyhow!(
+                    "{back} file(s) are still not ignored; check {}",
+                    exclude.display()
+                ));
+            }
+        }
+
+        tx.repo_mut().rebase_descendants().await?;
+        if self.is_colocated {
+            git::export_refs(tx.repo_mut())?;
+        }
+        self.operation = OperationData::new(
+            &workspace_name,
+            &self.data,
+            tx.commit("untrack files ignored locally").await?,
+        );
+        locked_ws
+            .finish(self.operation.repo.op_id().clone())
+            .await?;
+        Ok(exclude)
+    }
+}
+
+/// Adds the patterns `exclude` does not have yet, under a comment that says
+/// where they came from.
+fn append_exclude_patterns(exclude: &Path, patterns: &[String]) -> Result<()> {
+    let existing = std::fs::read_to_string(exclude).unwrap_or_default();
+    let have: std::collections::HashSet<&str> = existing.lines().map(str::trim).collect();
+    let new: Vec<&String> = patterns
+        .iter()
+        .filter(|pattern| !have.contains(pattern.as_str()))
+        .collect();
+    if new.is_empty() {
+        return Ok(());
+    }
+    if let Some(dir) = exclude.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("# ignored on another bookmark, added by Randori\n");
+    for pattern in new {
+        text.push_str(pattern);
+        text.push('\n');
+    }
+    std::fs::write(exclude, text).with_context(|| format!("writing {}", exclude.display()))
+}
