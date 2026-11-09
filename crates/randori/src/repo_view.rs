@@ -299,6 +299,8 @@ pub struct RepoView {
     picked_up_checking: bool,
     /// Files found, waiting to be shown in a notification.
     picked_up: Vec<TreePath>,
+    /// The revision list's width in rems, measured when it paints.
+    log_width: Rc<std::cell::Cell<f32>>,
     /// Where the pointer went down on a column handle.
     column_press: Option<gpui_kit::Pixels>,
 }
@@ -421,6 +423,7 @@ impl RepoView {
             derived_at: std::time::Instant::now(),
             column_drag: None,
             column_press: None,
+            log_width: Rc::default(),
             check_picked_up: None,
             picked_up_checking: false,
             picked_up: Vec::new(),

@@ -1,6 +1,6 @@
 //! The revision list: column header, graph rows and the virtual list.
 
-use gpui_kit::{Rems, px};
+use gpui_kit::{Rems, canvas, px};
 
 use super::*;
 
@@ -39,6 +39,37 @@ pub(super) struct Columns {
     pub(super) graph: Rems,
     pub(super) change: Rems,
     pub(super) author: Rems,
+    /// Room right of the author for the age labels, when the list is wide
+    /// enough; otherwise the labels sit over the row's right end.
+    pub(super) age_gutter: Option<Rems>,
+    /// Too narrow for names: the author column shows avatars only.
+    pub(super) compact_author: bool,
+}
+
+/// The narrowest description before the author column gives way.
+const MIN_DESCRIPTION: f32 = 11.;
+/// The age labels' own room on a wide list.
+const AGE_GUTTER: f32 = 6.5;
+/// The author column with avatars only.
+const COMPACT_AUTHOR: f32 = 1.75;
+/// Row padding and the gaps between the columns, in rems.
+const ROW_CHROME: f32 = 3.5;
+
+/// How the columns fit `width` rems, GitKraken style: a gutter for the age
+/// labels when there is room, then labels over the row end, then avatars
+/// instead of author names. An unknown width (0) keeps the names, no gutter.
+pub(super) fn fit_columns(width: f32, fixed: f32, author: f32) -> (Option<f32>, bool) {
+    if width <= 0. {
+        return (None, false);
+    }
+    let room = width - ROW_CHROME - fixed - MIN_DESCRIPTION;
+    if room >= author + AGE_GUTTER {
+        (Some(AGE_GUTTER), false)
+    } else if room >= author {
+        (None, false)
+    } else {
+        (None, true)
+    }
 }
 
 /// What a column handle drags; which column is in `RepoView::column_drag`.
@@ -117,7 +148,7 @@ pub(super) fn render_row(
                         .child(graph.row_element(
                             ix,
                             row.author.clone(),
-                            avatar,
+                            avatar.clone(),
                             !row.refs.is_empty(),
                             cols.graph,
                             rem,
@@ -160,15 +191,32 @@ pub(super) fn render_row(
                                 .child("(no description set)"),
                         }),
                 )
-                .child(
+                .child(if cols.compact_author {
+                    div()
+                        .w(cols.author)
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(crate::graph::avatar(
+                            &row.author,
+                            avatar,
+                            rem * 1.25,
+                            theme.border,
+                            false,
+                            cx,
+                        ))
+                } else {
                     div()
                         .w(cols.author)
                         .flex_none()
                         .truncate()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(row.author.clone()),
-                )
+                        .child(row.author.clone())
+                })
+                .when_some(cols.age_gutter, |this, gutter| {
+                    this.child(div().w(gutter).flex_none())
+                })
                 // the age of a new group, GitKraken style: a label on the hairline
                 // where the group starts, over the row's right end rather than in
                 // a column of its own (row 0 has no line above, so it sits inside)
@@ -297,7 +345,17 @@ impl RepoView {
             header_cell("Branch / Tag", cols.refs, Column::Refs, false, cx),
             header_cell("Graph", cols.graph, Column::Graph, false, cx),
             header_cell("Change", cols.change, Column::Change, false, cx),
-            header_cell("Author", cols.author, Column::Author, false, cx),
+            if cols.compact_author {
+                div()
+                    .w(cols.author)
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(gpui_kit::component::Icon::new(IconName::User).xsmall())
+                    .into_any_element()
+            } else {
+                header_cell("Author", cols.author, Column::Author, false, cx)
+            },
         ];
         let [refs_cell, graph_cell, change_cell, author_cell] = header;
         let theme = cx.theme();
@@ -354,7 +412,10 @@ impl RepoView {
                     )
                     .child(change_cell)
                     .child(div().flex_1().min_w_0().truncate().child("Description"))
-                    .child(author_cell),
+                    .child(author_cell)
+                    .when_some(cols.age_gutter, |this, gutter| {
+                        this.child(div().w(gutter).flex_none())
+                    }),
             )
     }
 
@@ -362,11 +423,20 @@ impl RepoView {
     pub(super) fn columns(&self) -> Columns {
         let c = self.columns;
         let rems = gpui_kit::rems;
+        let graph = c.graph.map(rems).unwrap_or_else(|| self.graph.width());
+        let (age_gutter, compact_author) =
+            fit_columns(self.log_width.get(), c.refs + graph.0 + c.change, c.author);
         Columns {
             refs: rems(c.refs),
-            graph: c.graph.map(rems).unwrap_or_else(|| self.graph.width()),
+            graph,
             change: rems(c.change),
-            author: rems(c.author),
+            author: rems(if compact_author {
+                COMPACT_AUTHOR
+            } else {
+                c.author
+            }),
+            age_gutter: age_gutter.map(rems),
+            compact_author,
         }
     }
 
@@ -587,7 +657,24 @@ impl RepoView {
                         .size_full()
                         .track_scroll(&self.scroll),
                     )
-                    .child(Scrollbar::vertical(&self.scroll)),
+                    .child(Scrollbar::vertical(&self.scroll))
+                    // measures the list, so the columns can fit its width
+                    .child({
+                        let width = self.log_width.clone();
+                        canvas(
+                            move |bounds, window, _| {
+                                let rems =
+                                    f32::from(bounds.size.width) / f32::from(window.rem_size());
+                                if (width.get() - rems).abs() > 0.25 {
+                                    width.set(rems);
+                                    window.refresh();
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full()
+                    }),
             )
             .into_any_element()
     }
@@ -665,4 +752,26 @@ fn header_cell(
         .child(div().min_w_0().truncate().child(label))
         .child(handle)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_columns;
+
+    #[test]
+    fn columns_give_way_as_the_list_narrows() {
+        // fixed columns 20rem, author 7rem: 3.5 + 20 + 11 = 34.5 before the author
+        assert_eq!(
+            fit_columns(80., 20., 7.),
+            (Some(6.5), false),
+            "wide: a gutter"
+        );
+        assert_eq!(
+            fit_columns(46., 20., 7.),
+            (None, false),
+            "labels over the row end"
+        );
+        assert_eq!(fit_columns(40., 20., 7.), (None, true), "avatars only");
+        assert_eq!(fit_columns(0., 20., 7.), (None, false), "not measured yet");
+    }
 }
