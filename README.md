@@ -18,8 +18,9 @@ you move, split and recombine freely. That is how jj treats history.
 
 > **Status:** early development. Randori reads and edits jj workspaces —
 > tabs, graph log, diffs, describe, new, edit, abandon, bookmarks, rebase by
-> drag and drop, push, fetch, undo and redo. Hunk-level moves, conflict
-> resolution and settings are not built yet.
+> drag and drop, file and hunk squashes, push, fetch, undo and redo, a command
+> palette and appearance settings. Conflicts open in your merge tool; an
+> in-app conflict editor is not built yet.
 
 ## The window
 
@@ -27,11 +28,11 @@ you move, split and recombine freely. That is how jj treats history.
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
 | Toolbar | Workspace path, a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
-| Rail | App navigation and Open; settings are not built yet |
+| Rail | Revisions, Open, the command palette (`⌘K`) and Settings (appearance: light, dark or follow the system; remembered) |
 | Bookmarks | Local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click to jump to the revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
 | Revisions | The commit graph with fixed columns: change id, bookmarks and description, author, relative time, commit id. The hollow ring is the working copy (`@`); squares are immutable revisions. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights |
-| Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files |
+| Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Status bar | Worker state, the running jj operation and its progress, the last operation, the working copy and the number of loaded revisions |
 
 Each tab runs its own jj worker thread (jj-lib is not thread-safe), so a slow
@@ -56,11 +57,19 @@ operation log, and git credentials are asked for when a remote needs them.
 | Duplicate, back out | Context menu |
 | Rebase | Drag a revision onto its new parent |
 | Move a bookmark | Drag it from the bookmarks panel onto a revision |
+| Squash a file into the parent | Right-click it in the inspector |
+| Move a file to any revision | Drag it from the inspector onto the revision |
+| Discard a file's changes | Right-click it in the inspector, confirmed in a dialog |
+| Squash one hunk into the parent | Select lines in the diff, then **Squash hunk into parent** |
+| Resolve a conflict | Right-click the conflicted file → **Resolve in merge tool** (`ui.merge-editor`) |
+| Anything else | `⌘K` opens the command palette |
 | Push | `⌘⇧P` pushes the selection's bookmarks (an untracked bookmark goes to `origin`, or the only remote) |
 | Fetch | `⌘⇧F` fetches every remote |
 | Undo / redo | `⌘Z` / `⌘⇧Z` in the revision list |
 
 ![Creating a bookmark](doc/randori/bookmark-dialog.png)
+
+![The command palette](doc/randori/command-palette.png)
 
 ### Keyboard
 
@@ -76,6 +85,7 @@ operation log, and git credentials are asked for when a remote needs them.
 | `⌘O` (`Ctrl+O`) | Window | Open a workspace in a new tab |
 | `⌘W` (`Ctrl+W`) | Window | Close the tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Window | Next / previous tab |
+| `⌘K` (`Ctrl+K`) | Window | Command palette |
 
 On Linux and Windows, `⌘` is `Ctrl`.
 
@@ -119,7 +129,7 @@ cargo run -- /path/to/workspace /path/to/another   # each opens in a tab
 | `--check` | Open the workspace through the worker, print a summary and exit (no window) |
 | `--select-row <n>` | Select the n-th log row once loaded |
 | `--screenshot <png>` | Render the first screen offscreen and exit; needs `--features screenshot` |
-| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end` |
+| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does |
 
 The screenshots above were produced with:
 
