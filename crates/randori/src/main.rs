@@ -15,7 +15,7 @@ mod worker;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use gpui_kit::component::{Theme, ThemeMode, TitleBar};
+use gpui_kit::component::TitleBar;
 use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, px, size};
 
 use app_view::RandoriApp;
@@ -32,7 +32,8 @@ Options:
   --check              load the workspace through the worker, print a summary and exit
   --select-row <n>     select the n-th log row once loaded
   --screenshot <png>   render the first screen to a PNG and exit (needs --features screenshot)
-  --keys <k1,k2,...>   with --screenshot: press these keys first, e.g. \"down,j,end\"";
+  --keys <k1,k2,...>   with --screenshot: press these keys first, e.g. \"down,j,end\";
+                       action:<name> runs an action as a menu would, e.g. action:randori::SquashFile";
 
 #[derive(Default)]
 struct Args {
@@ -123,15 +124,6 @@ fn main() -> Result<()> {
             gpui_kit::init(cx);
             repo_view::bind_keys(cx);
             app_view::bind_keys(cx);
-            Theme::change(
-                if args.light {
-                    ThemeMode::Light
-                } else {
-                    ThemeMode::Dark
-                },
-                None,
-                cx,
-            );
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1440.), px(900.)), cx)),
@@ -143,8 +135,11 @@ fn main() -> Result<()> {
             let revset = args.revset.clone();
             // Screenshots must not replace the user's saved tabs with sample workspaces.
             let persist = args.screenshot.is_none();
+            let args_light = args.light;
             let (window, app) = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| RandoriApp::new(workspaces, revset, persist, window, cx))
+                // --light overrides the saved appearance for this run only.
+                let theme = args_light.then_some(app_view::ThemeChoice::Light);
+                cx.new(|cx| RandoriApp::new(workspaces, revset, persist, theme, window, cx))
             })
             .expect("failed to open the main window");
             cx.activate(true);
@@ -165,6 +160,18 @@ fn main() -> Result<()> {
                 if let Some(path) = screenshot {
                     // Drive the real key bindings, as a user would, before capturing.
                     for key in keys {
+                        // `action:<namespace::Name>` runs an action the way a menu item
+                        // does, through the focused element.
+                        if let Some(name) = key.strip_prefix("action:") {
+                            let _ = window.update(cx, |_, window, cx| {
+                                match cx.build_action(name, None) {
+                                    Ok(action) => window.dispatch_action(action, cx),
+                                    Err(err) => eprintln!("keys: {err}"),
+                                }
+                            });
+                            wait_until_settled(cx, &app).await;
+                            continue;
+                        }
                         let Ok(keystroke) =
                             gpui_kit::Keystroke::parse(Box::leak(key.into_boxed_str()))
                         else {

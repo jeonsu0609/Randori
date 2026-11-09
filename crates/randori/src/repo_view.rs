@@ -18,12 +18,12 @@ use chrono::{DateTime, Local};
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
 use gg_lib::messages::queries::{ChangeKind, LogPage, LogRow, RevChange, RevsResult};
-use gg_lib::messages::{RepoConfig, RevHeader, RevId, RevSet, StoreRef};
+use gg_lib::messages::{ChangeHunk, RepoConfig, RevHeader, RevId, RevSet, StoreRef, TreePath};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
-    diff::{Diff, DiffFile, DiffMode, DiffState},
+    diff::{Diff, DiffEvent, DiffFile, DiffLineRange, DiffMode, DiffState},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     list::ListItem,
@@ -75,6 +75,12 @@ pub mod actions {
             RenameBookmark,
             DeleteRef,
             ToggleTrackBookmark,
+            // files and hunks (on the selected file in the inspector)
+            SquashFile,
+            RestoreFile,
+            ResolveInTool,
+            DiffInTool,
+            SquashHunk,
             // repository
             Undo,
             Redo,
@@ -154,6 +160,9 @@ struct WorkspaceInfo {
     remotes: Vec<String>,
     /// Whether the last undo can be redone.
     can_redo: bool,
+    /// `ui.diff-formatter` / `ui.merge-editor` are configured.
+    has_diff_tool: bool,
+    has_merge_tool: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -194,6 +203,10 @@ struct RowData {
 }
 
 struct FileItem {
+    /// GG's path, for file and hunk mutations.
+    tree_path: TreePath,
+    /// GG's hunks, for moving one hunk.
+    hunks: Vec<ChangeHunk>,
     path: SharedString,
     name: SharedString,
     dir: SharedString,
@@ -206,6 +219,7 @@ struct FileItem {
 struct Detail {
     header: RevHeader,
     parents: Vec<SharedString>,
+    parent_ids: Vec<RevId>,
     files: Vec<FileItem>,
     patches: Vec<DiffFile>,
     conflicts: usize,
@@ -248,6 +262,8 @@ pub struct RepoView {
     ref_target: Option<StoreRef>,
     /// Inspector editor for the selected revision's description.
     description_input: Entity<TextareaState>,
+    /// Lines selected in the diff; picks the hunk for "Squash hunk into parent".
+    diff_selection: Option<DiffLineRange>,
     /// Unsaved descriptions of changes the user moved away from, by change id.
     description_drafts: HashMap<String, String>,
     /// Keeps the open one-field dialog's Enter handler alive.
@@ -292,6 +308,14 @@ impl RepoView {
         )];
 
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(DiffMode::Unified));
+        let diff_events = cx.subscribe(&diff, |view: &mut Self, _, event: &DiffEvent, cx| {
+            match event {
+                DiffEvent::SelectionEnded(range) => view.diff_selection = Some(range.clone()),
+                DiffEvent::SelectionChanged(None) => view.diff_selection = None,
+                _ => return,
+            }
+            cx.notify();
+        });
 
         let description_input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -299,6 +323,7 @@ impl RepoView {
                 .placeholder("Describe this change")
         });
         let mut _subscriptions = _subscriptions;
+        _subscriptions.push(diff_events);
         _subscriptions.push(cx.subscribe_in(
             &description_input,
             window,
@@ -344,6 +369,7 @@ impl RepoView {
             description_input,
             description_for: None,
             description_drafts: HashMap::new(),
+            diff_selection: None,
             dialog_subscription: None,
         };
         view.open(workspace, initial_query, window, cx);
@@ -396,6 +422,8 @@ impl RepoView {
                             latest_query,
                             status,
                             git_remotes,
+                            has_external_diff_tool,
+                            has_external_merge_tool,
                             ..
                         } => {
                             let query = initial_query.unwrap_or(latest_query);
@@ -408,6 +436,8 @@ impl RepoView {
                                     operation: status.operation_description.into(),
                                     remotes: git_remotes,
                                     can_redo: status.can_redo,
+                                    has_diff_tool: has_external_diff_tool,
+                                    has_merge_tool: has_external_merge_tool,
                                 },
                                 page,
                             ))
@@ -690,6 +720,7 @@ impl RepoView {
             .flatten()
             .collect();
         self.detail = Some(Detail {
+            parent_ids: parents.iter().map(|parent| parent.id.clone()).collect(),
             parents: parents
                 .iter()
                 .map(|parent| {
@@ -710,6 +741,7 @@ impl RepoView {
 
     fn select_file(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
         self.selected_file = ix;
+        self.diff_selection = None;
         let file = ix
             .and_then(|ix| self.detail.as_ref()?.files.get(ix))
             .map(|file| file.path.clone());
@@ -1201,6 +1233,23 @@ impl RepoView {
                                                 });
                                             }
                                         })
+                                        .drag_over::<DraggedFile>(|style, _, _, cx| {
+                                            style.bg(cx.theme().primary.opacity(0.18))
+                                        })
+                                        .on_drop({
+                                            let owner = drop_owner.clone();
+                                            move |dragged: &DraggedFile, window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.move_file_to(
+                                                        dragged.path.clone(),
+                                                        dragged.from.clone(),
+                                                        ix,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        })
                                         .context_menu(move |menu, _, _| {
                                             revision_menu(menu, focus.clone())
                                         })
@@ -1279,6 +1328,27 @@ impl RepoView {
                         )
                     })
                     .child(div().flex_1())
+                    .when(file.is_some() && !self.detail_is_immutable(), |this| {
+                        if self.selected_hunk().is_some() {
+                            this.child(
+                                Button::new("squash-hunk")
+                                    .small()
+                                    .outline()
+                                    .icon(IconName::ArrowDownToLine)
+                                    .label("Squash hunk into parent")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.squash_hunk_into_parent(window, cx)
+                                    })),
+                            )
+                        } else {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Select lines to pick a hunk"),
+                            )
+                        }
+                    })
                     .child(
                         TabBar::new("diff-mode")
                             .segmented()
@@ -1612,6 +1682,32 @@ impl RepoView {
                             ),
                     )
                     .on_click(cx.listener(move |view, _, _, cx| view.select_file(Some(ix), cx)))
+                    .on_mouse_down(
+                        gpui_kit::MouseButton::Right,
+                        cx.listener(move |view, _, window, cx| {
+                            view.select_file(Some(ix), cx);
+                            view.log_focus.focus(window, cx);
+                        }),
+                    )
+                    .on_drag(
+                        DraggedFile {
+                            path: file.tree_path.clone(),
+                            from: header.id.clone(),
+                            label: file.name.clone(),
+                        },
+                        |dragged, _, _, cx| {
+                            cx.new(|_| DragChip {
+                                label: format!("Move {}", dragged.label).into(),
+                                icon: IconName::File,
+                            })
+                        },
+                    )
+                    .context_menu({
+                        let focus = self.log_focus.clone();
+                        let has_conflict = file.has_conflict;
+                        let immutable = header.is_immutable;
+                        move |menu, _, _| file_menu(menu, has_conflict, immutable, focus.clone())
+                    })
             }))
             .into_any_element()
     }
@@ -1851,6 +1947,21 @@ impl Render for RepoView {
                     view.toggle_track_ref_target(window, cx)
                 }),
             )
+            .on_action(cx.listener(|view, _: &actions::SquashFile, window, cx| {
+                view.squash_file_into_parent(window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &actions::RestoreFile, window, cx| {
+                view.confirm_restore_file(window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &actions::ResolveInTool, window, cx| {
+                view.resolve_in_tool(window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &actions::DiffInTool, window, cx| {
+                view.diff_in_tool(window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &actions::SquashHunk, window, cx| {
+                view.squash_hunk_into_parent(window, cx)
+            }))
             .on_action(cx.listener(|view, _: &actions::Undo, window, cx| view.undo(window, cx)))
             .on_action(cx.listener(|view, _: &actions::Redo, window, cx| view.redo(window, cx)))
             .on_action(
@@ -1918,6 +2029,12 @@ impl RepoView {
         self.description_for = Some((change, text));
     }
 
+    fn detail_is_immutable(&self) -> bool {
+        self.detail
+            .as_ref()
+            .is_some_and(|detail| detail.header.is_immutable)
+    }
+
     /// True when the editor differs from the selected revision's description.
     fn description_dirty(&self, cx: &App) -> bool {
         self.detail.as_ref().is_some_and(|detail| {
@@ -1940,6 +2057,15 @@ struct DraggedRevision {
 #[derive(Clone)]
 struct DraggedRef {
     store: StoreRef,
+    label: SharedString,
+}
+
+/// A changed file being dragged from the inspector; dropping it on a revision
+/// moves the file's changes there.
+#[derive(Clone)]
+struct DraggedFile {
+    path: TreePath,
+    from: RevId,
     label: SharedString,
 }
 
@@ -1986,6 +2112,31 @@ fn revision_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
         .menu("Back out", Box::new(BackoutRevision))
         .separator()
         .menu("Abandon…", Box::new(AbandonRevision))
+}
+
+/// Commands for a changed file in the inspector.
+fn file_menu(
+    menu: PopupMenu,
+    has_conflict: bool,
+    immutable: bool,
+    focus: FocusHandle,
+) -> PopupMenu {
+    use actions::*;
+    let menu = menu.action_context(focus);
+    let menu = if has_conflict {
+        menu.menu("Resolve in merge tool", Box::new(ResolveInTool))
+            .separator()
+    } else {
+        menu
+    };
+    let menu = menu.menu("Open in diff tool", Box::new(DiffInTool));
+    if immutable {
+        menu
+    } else {
+        menu.separator()
+            .menu("Squash into parent", Box::new(SquashFile))
+            .menu("Discard changes…", Box::new(RestoreFile))
+    }
 }
 
 /// Commands for a bookmark or tag in the bookmarks panel.
@@ -2166,6 +2317,8 @@ impl From<&RevChange> for FileItem {
             }
         }
         Self {
+            tree_path: change.path.clone(),
+            hunks: change.hunks.clone(),
             path: path.into(),
             name: name.into(),
             dir: dir.into(),

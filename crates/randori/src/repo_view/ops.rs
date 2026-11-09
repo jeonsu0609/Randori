@@ -10,11 +10,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gg_lib::messages::mutations::{
-    AbandonRevisions, BackoutRevisions, CheckoutRevision, CreateRef, CreateRevision, DeleteRef,
-    DescribeRevision, DuplicateRevisions, GitFetch, GitPush, GitRefspec, MoveRef, MoveRevisions,
-    MutationResult, RedoOperation, RenameBookmark, TrackBookmark, UndoOperation, UntrackBookmark,
+    AbandonRevisions, BackoutRevisions, CheckoutRevision, CopyChanges, CreateRef, CreateRevision,
+    DeleteRef, DescribeRevision, DuplicateRevisions, ExternalDiff, ExternalResolve, GitFetch,
+    GitPush, GitRefspec, MoveChanges, MoveHunk, MoveRef, MoveRevisions, MutationResult,
+    RedoOperation, RenameBookmark, TrackBookmark, UndoOperation, UntrackBookmark,
 };
-use gg_lib::messages::{InputRequest, InputResponse, RevHeader, RevId, RevSet, StoreRef};
+use gg_lib::messages::{
+    ChangeHunk, InputRequest, InputResponse, RevHeader, RevId, RevSet, StoreRef, TreePath,
+};
 use gg_lib::worker::Mutation;
 use gpui_kit::component::{
     WindowExt as _,
@@ -333,6 +336,221 @@ impl RepoView {
             window,
             cx,
         );
+    }
+
+    // ----- files and hunks ------------------------------------------------------------------
+
+    /// The revision shown in the inspector and its first parent.
+    fn detail_ids(&self) -> Option<(RevId, RevId)> {
+        let detail = self.detail.as_ref()?;
+        let parent = detail.parent_ids.first()?.clone();
+        Some((detail.header.id.clone(), parent))
+    }
+
+    fn selected_file_path(&self) -> Option<TreePath> {
+        let detail = self.detail.as_ref()?;
+        detail
+            .files
+            .get(self.selected_file?)
+            .map(|file| file.tree_path.clone())
+    }
+
+    /// Moves the selected file's changes into the parent (`jj squash <path>`).
+    pub(super) fn squash_file_into_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_if_immutable("Squash", window, cx) {
+            return;
+        }
+        let (Some((id, parent)), Some(path)) = (self.detail_ids(), self.selected_file_path())
+        else {
+            return;
+        };
+        let name = path.repo_path.clone();
+        self.run_mutation(
+            format!("Squash {name} into parent"),
+            Box::new(MoveChanges {
+                from: RevSet {
+                    from: id.clone(),
+                    to: id,
+                },
+                to_id: parent.commit,
+                paths: vec![path],
+            }),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Drag and drop: moves a file's changes from the inspected revision into
+    /// the revision in row `target` (`jj squash --into <target> <path>`).
+    pub(super) fn move_file_to(
+        &mut self,
+        path: TreePath,
+        from: RevId,
+        target: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(to) = self.rows.get(target).map(|row| row.revision.id.clone()) else {
+            return;
+        };
+        if to.commit == from.commit {
+            return;
+        }
+        let label = format!(
+            "Move {} into {}",
+            path.repo_path,
+            super::short_id(&to.change.prefix, &to.change.rest, 8)
+        );
+        self.run_mutation(
+            label,
+            Box::new(MoveChanges {
+                from: RevSet {
+                    from: from.clone(),
+                    to: from,
+                },
+                to_id: to.commit,
+                paths: vec![path],
+            }),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Discards the selected file's changes by copying it back from the parent
+    /// (`jj restore <path>`). Asks first: the edits are only reachable by undo.
+    pub(super) fn confirm_restore_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_if_immutable("Discard", window, cx) {
+            return;
+        }
+        let (Some((id, parent)), Some(path)) = (self.detail_ids(), self.selected_file_path())
+        else {
+            return;
+        };
+        let view = cx.entity().downgrade();
+        let name = path.repo_path.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            let (id, parent, path) = (id.clone(), parent.clone(), path.clone());
+            alert
+                .title(format!("Discard changes to {name}?"))
+                .description("The file goes back to its content in the parent revision. Undo brings the changes back.")
+                .confirm()
+                .ok_text("Discard")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let (id, parent, path) = (id.clone(), parent.clone(), path.clone());
+                    let _ = view.update(cx, |view, cx| {
+                        view.run_mutation(
+                            format!("Discard {}", path.repo_path),
+                            Box::new(CopyChanges {
+                                from_id: parent.commit,
+                                to_set: RevSet { from: id.clone(), to: id },
+                                paths: vec![path],
+                            }),
+                            None,
+                            window,
+                            cx,
+                        )
+                    });
+                    true
+                })
+        });
+    }
+
+    /// The hunk of the selected file that the diff's line selection falls in.
+    pub(super) fn selected_hunk(&self) -> Option<(TreePath, ChangeHunk)> {
+        let range = self.diff_selection.as_ref()?;
+        let detail = self.detail.as_ref()?;
+        let file = detail.files.get(self.selected_file?)?;
+        if range.path().as_ref() != file.path.as_ref() {
+            return None;
+        }
+        let (start, end) = (
+            range.start().min(range.end()),
+            range.start().max(range.end()),
+        );
+        file.hunks
+            .iter()
+            .find(|hunk| {
+                let lines = match range.side() {
+                    gpui_kit::component::diff::DiffSide::Original => &hunk.location.from_file,
+                    gpui_kit::component::diff::DiffSide::Modified => &hunk.location.to_file,
+                };
+                // GG ranges are 1-based; an empty side has no lines to hit.
+                lines.len > 0 && start < lines.start + lines.len && end >= lines.start
+            })
+            .map(|hunk| (file.tree_path.clone(), hunk.clone()))
+    }
+
+    /// Moves the hunk under the diff selection into the parent revision.
+    pub(super) fn squash_hunk_into_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_if_immutable("Squash hunk", window, cx) {
+            return;
+        }
+        let (Some((id, parent)), Some((path, hunk))) = (self.detail_ids(), self.selected_hunk())
+        else {
+            return;
+        };
+        let label = format!("Squash hunk of {} into parent", path.repo_path);
+        self.diff_selection = None;
+        self.run_mutation(
+            label,
+            Box::new(MoveHunk {
+                from_id: id,
+                to_id: parent.commit,
+                path,
+                hunk,
+            }),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Opens the selected file in the configured external merge tool.
+    pub(super) fn resolve_in_tool(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((id, _)), Some(path)) = (self.detail_ids(), self.selected_file_path()) else {
+            return;
+        };
+        if !self.workspace.as_ref().is_some_and(|ws| ws.has_merge_tool) {
+            window.push_notification(
+                Notification::info(
+                    "Set `ui.merge-editor` in jj config to resolve conflicts in a tool.",
+                )
+                .title("No merge tool"),
+                cx,
+            );
+            return;
+        }
+        let label = format!("Resolve {}", path.repo_path);
+        self.run_mutation(
+            label,
+            Box::new(ExternalResolve { id, path }),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Opens the selected file's change in the configured external diff tool.
+    pub(super) fn diff_in_tool(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((id, _)), Some(path)) = (self.detail_ids(), self.selected_file_path()) else {
+            return;
+        };
+        if !self.workspace.as_ref().is_some_and(|ws| ws.has_diff_tool) {
+            window.push_notification(
+                Notification::info(
+                    "Set `ui.diff-formatter` in jj config to open changes in a tool.",
+                )
+                .title("No diff tool"),
+                cx,
+            );
+            return;
+        }
+        let label = format!("Open {} in diff tool", path.repo_path);
+        self.run_mutation(label, Box::new(ExternalDiff { id, path }), None, window, cx);
     }
 
     // ----- bookmarks ------------------------------------------------------------------------

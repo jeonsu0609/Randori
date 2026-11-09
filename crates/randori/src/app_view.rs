@@ -5,23 +5,26 @@
 //! are saved and restored on the next launch.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _, StyledExt as _, Theme, ThemeMode,
     TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
+    command::{Command, CommandItem, CommandState},
     h_flex,
+    menu::DropdownMenu as _,
     notification::Notification,
     tab::{Tab, TabBar},
     v_flex,
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, Image, ImageFormat, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _,
-    Subscription, Window, div, img, prelude::FluentBuilder as _,
+    Action, Anchor, AppContext as _, Context, Entity, Image, ImageFormat, InteractiveElement as _,
+    IntoElement, KeyBinding, ParentElement as _, PathPromptOptions, Render, SharedString,
+    Styled as _, Subscription, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,21 +35,34 @@ const LOGO: &[u8] = include_bytes!("../assets/icon/randori-128.png");
 const APP_CONTEXT: &str = "RandoriApp";
 
 pub mod actions {
-    gpui_kit::actions!(randori, [OpenRepository, CloseTab, NextTab, PreviousTab]);
+    gpui_kit::actions!(
+        randori,
+        [
+            OpenRepository,
+            CloseTab,
+            NextTab,
+            PreviousTab,
+            OpenCommandPalette,
+            ThemeLight,
+            ThemeDark,
+            ThemeSystem,
+        ]
+    );
 }
 
 /// Binds the tab keys. Call once at startup.
 pub fn bind_keys(cx: &mut gpui_kit::App) {
     use actions::*;
     // `cmd-` on macOS, `ctrl-` elsewhere.
-    let (open, close) = if cfg!(target_os = "macos") {
-        ("cmd-o", "cmd-w")
+    let (open, close, palette) = if cfg!(target_os = "macos") {
+        ("cmd-o", "cmd-w", "cmd-k")
     } else {
-        ("ctrl-o", "ctrl-w")
+        ("ctrl-o", "ctrl-w", "ctrl-k")
     };
     cx.bind_keys([
         KeyBinding::new(open, OpenRepository, Some(APP_CONTEXT)),
         KeyBinding::new(close, CloseTab, Some(APP_CONTEXT)),
+        KeyBinding::new(palette, OpenCommandPalette, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-tab", NextTab, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(APP_CONTEXT)),
     ]);
@@ -63,6 +79,18 @@ struct RepoTab {
 struct Session {
     tabs: Vec<PathBuf>,
     active: usize,
+    /// Appearance chosen in Settings; absent means the dark default.
+    #[serde(default)]
+    theme: ThemeChoice,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    Light,
+    #[default]
+    Dark,
+    System,
 }
 
 pub struct RandoriApp {
@@ -71,7 +99,9 @@ pub struct RandoriApp {
     logo: Arc<Image>,
     /// Whether open tabs are saved and restored (off for screenshots).
     persist: bool,
+    theme: ThemeChoice,
     _activation: Subscription,
+    _appearance: Subscription,
 }
 
 impl RandoriApp {
@@ -82,6 +112,7 @@ impl RandoriApp {
         paths: Vec<PathBuf>,
         revset: Option<String>,
         persist: bool,
+        theme_override: Option<ThemeChoice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -92,19 +123,27 @@ impl RandoriApp {
                 app.snapshot_active(cx);
             }
         });
-        let mut app = Self {
-            tabs: Vec::new(),
-            active: 0,
-            logo: Arc::new(Image::from_bytes(ImageFormat::Png, LOGO.to_vec())),
-            persist,
-            _activation,
-        };
-
+        // "Follow system" re-applies the theme when macOS / the desktop switches.
+        let _appearance = cx.observe_window_appearance(window, |app, window, cx| {
+            if app.theme == ThemeChoice::System {
+                Theme::sync_system_appearance(Some(window), cx);
+            }
+        });
         let session = if persist {
             load_session()
         } else {
             Session::default()
         };
+        let mut app = Self {
+            tabs: Vec::new(),
+            active: 0,
+            logo: Arc::new(Image::from_bytes(ImageFormat::Png, LOGO.to_vec())),
+            persist,
+            theme: theme_override.unwrap_or(session.theme),
+            _activation,
+            _appearance,
+        };
+        app.apply_theme(window, cx);
         // A workspace that was moved or deleted is dropped from the session
         // instead of coming back as an error tab on every launch.
         let (existing, missing) = split_existing(session.tabs);
@@ -217,6 +256,161 @@ impl RandoriApp {
         cx.notify();
     }
 
+    fn apply_theme(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.theme {
+            ThemeChoice::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+            ThemeChoice::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+            ThemeChoice::System => Theme::sync_system_appearance(Some(window), cx),
+        }
+    }
+
+    fn set_theme(&mut self, theme: ThemeChoice, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme = theme;
+        self.apply_theme(window, cx);
+        self.save_session();
+        cx.notify();
+    }
+
+    /// ⌘K: every command of the window and the selected workspace, searchable.
+    /// A confirmed item runs its action from the revision list, the same path a
+    /// menu item or key binding takes.
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::repo_view::actions as repo;
+        let mut commands: Vec<(&'static str, IconName, Box<dyn Action>)> = Vec::new();
+        if !self.tabs.is_empty() {
+            commands.extend([
+                (
+                    "New change",
+                    IconName::Plus,
+                    Box::new(repo::NewChild) as Box<dyn Action>,
+                ),
+                (
+                    "Edit revision",
+                    IconName::Pencil,
+                    Box::new(repo::EditRevision),
+                ),
+                (
+                    "Describe revision",
+                    IconName::TextCursorInput,
+                    Box::new(repo::DescribeRevision),
+                ),
+                (
+                    "Create bookmark",
+                    IconName::Bookmark,
+                    Box::new(repo::CreateBookmark),
+                ),
+                (
+                    "Abandon revision",
+                    IconName::Trash,
+                    Box::new(repo::AbandonRevision),
+                ),
+                (
+                    "Duplicate revision",
+                    IconName::Copy,
+                    Box::new(repo::DuplicateRevision),
+                ),
+                (
+                    "Back out revision",
+                    IconName::Undo,
+                    Box::new(repo::BackoutRevision),
+                ),
+                (
+                    "Squash file into parent",
+                    IconName::ArrowDownToLine,
+                    Box::new(repo::SquashFile),
+                ),
+                (
+                    "Discard file changes",
+                    IconName::FileX,
+                    Box::new(repo::RestoreFile),
+                ),
+                (
+                    "Squash selected hunk into parent",
+                    IconName::ArrowDownToLine,
+                    Box::new(repo::SquashHunk),
+                ),
+                ("Push bookmarks", IconName::Upload, Box::new(repo::Push)),
+                ("Fetch", IconName::CloudDownload, Box::new(repo::Fetch)),
+                ("Undo", IconName::Undo2, Box::new(repo::Undo)),
+                ("Redo", IconName::Redo2, Box::new(repo::Redo)),
+                (
+                    "Reload revisions",
+                    IconName::RefreshCw,
+                    Box::new(repo::Reload),
+                ),
+                ("Edit revset", IconName::Search, Box::new(repo::FocusRevset)),
+                (
+                    "Show or hide bookmarks",
+                    IconName::PanelLeft,
+                    Box::new(repo::ToggleSidebar),
+                ),
+            ]);
+        }
+        commands.extend([
+            (
+                "Open workspace",
+                IconName::FolderOpen,
+                Box::new(actions::OpenRepository) as Box<dyn Action>,
+            ),
+            ("Close tab", IconName::X, Box::new(actions::CloseTab)),
+            (
+                "Next tab",
+                IconName::ChevronRight,
+                Box::new(actions::NextTab),
+            ),
+            (
+                "Previous tab",
+                IconName::ChevronLeft,
+                Box::new(actions::PreviousTab),
+            ),
+            ("Light theme", IconName::Sun, Box::new(actions::ThemeLight)),
+            ("Dark theme", IconName::Moon, Box::new(actions::ThemeDark)),
+            (
+                "Follow system theme",
+                IconName::Monitor,
+                Box::new(actions::ThemeSystem),
+            ),
+        ]);
+
+        let items: Vec<CommandItem> = commands
+            .iter()
+            .map(|(label, icon, _)| CommandItem::new().label(*label).icon(*icon))
+            .collect();
+        let actions: Rc<Vec<Box<dyn Action>>> =
+            Rc::new(commands.into_iter().map(|(_, _, action)| action).collect());
+        let palette = cx.new(|cx| CommandState::new(window, cx));
+        let target = self.active_view();
+
+        {
+            let palette = palette.clone();
+            window.defer(cx, move |window, cx| {
+                palette.update(cx, |state, cx| state.focus(window, cx));
+            });
+        }
+        window.open_dialog(cx, move |dialog, _, _| {
+            let actions = actions.clone();
+            let target = target.clone();
+            dialog.p_0().w(px(560.)).child(
+                Command::new(&palette)
+                    .bordered(false)
+                    .placeholder("Type a command")
+                    .max_h(px(420.))
+                    .items(items.clone())
+                    .on_confirm(move |index, window, cx| {
+                        let Some(action) = actions.get(index.row).map(|a| a.boxed_clone()) else {
+                            return;
+                        };
+                        window.close_dialog(cx);
+                        // Run from the revision list so workspace commands reach it.
+                        if let Some(view) = &target {
+                            view.update(cx, |view, cx| view.focus_log(window, cx));
+                        }
+                        window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
+                    }),
+            )
+        });
+    }
+
     fn snapshot_active(&mut self, cx: &mut Context<Self>) {
         if let Some(view) = self.active_view() {
             view.update(cx, |view, cx| view.snapshot(cx));
@@ -265,6 +459,7 @@ impl RandoriApp {
         let session = Session {
             tabs: self.tabs.iter().map(|tab| tab.path.clone()).collect(),
             active: self.active,
+            theme: self.theme,
         };
         if let Err(err) = store_session(&session) {
             log::warn!("cannot save open tabs: {err:#}");
@@ -346,14 +541,39 @@ impl RandoriApp {
                     .tooltip("Open a workspace")
                     .on_click(cx.listener(|app, _, window, cx| app.prompt_open(window, cx))),
             )
-            .child(div().flex_1())
             .child(
+                Button::new("rail-palette")
+                    .ghost()
+                    .icon(IconName::Command)
+                    .tooltip("Command palette (⌘K)")
+                    .on_click(cx.listener(|app, _, window, cx| app.open_palette(window, cx))),
+            )
+            .child(div().flex_1())
+            .child({
+                let theme = self.theme;
                 Button::new("rail-settings")
                     .ghost()
                     .icon(IconName::Settings)
                     .tooltip("Settings")
-                    .disabled(true),
-            )
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                        menu.label("Appearance")
+                            .menu_with_check(
+                                "Light",
+                                theme == ThemeChoice::Light,
+                                Box::new(actions::ThemeLight),
+                            )
+                            .menu_with_check(
+                                "Dark",
+                                theme == ThemeChoice::Dark,
+                                Box::new(actions::ThemeDark),
+                            )
+                            .menu_with_check(
+                                "Follow system",
+                                theme == ThemeChoice::System,
+                                Box::new(actions::ThemeSystem),
+                            )
+                    })
+            })
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -398,6 +618,20 @@ impl Render for RandoriApp {
             .on_action(
                 cx.listener(|app, _: &actions::NextTab, window, cx| app.cycle(1, window, cx)),
             )
+            .on_action(
+                cx.listener(|app, _: &actions::OpenCommandPalette, window, cx| {
+                    app.open_palette(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|app, _: &actions::ThemeLight, window, cx| {
+                app.set_theme(ThemeChoice::Light, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &actions::ThemeDark, window, cx| {
+                app.set_theme(ThemeChoice::Dark, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &actions::ThemeSystem, window, cx| {
+                app.set_theme(ThemeChoice::System, window, cx)
+            }))
             .on_action(
                 cx.listener(|app, _: &actions::PreviousTab, window, cx| app.cycle(-1, window, cx)),
             )
