@@ -557,3 +557,16 @@ fn write_setting_sets_and_removes_a_key() {
             .contains("mark-unpushed-bookmarks = true")
     );
 }
+
+#[test]
+fn write_value_sets_a_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let values: jj_lib::config::ConfigValue = ["/a", "/b c"].into_iter().collect();
+    write_value_to(&path, "gg.ui.recent-workspaces", Some(values)).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains(r#"recent-workspaces = ["/a", "/b c"]"#),
+        "{text}"
+    );
+}

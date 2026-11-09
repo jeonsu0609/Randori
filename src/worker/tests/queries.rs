@@ -1,6 +1,6 @@
 use super::{mkid, mkrepo, revs};
 use crate::messages::{
-    RevSet, StoreRef,
+    RevSet, StoreRef, TreePath,
     queries::{LogCoordinates, LogLine, RevsResult},
 };
 use crate::worker::{WorkerSession, queries};
@@ -977,4 +977,148 @@ mod revisions_immutability {
 
         Ok(())
     }
+}
+
+fn tree_path(path: &str) -> TreePath {
+    TreePath {
+        repo_path: path.to_owned(),
+        relative_path: "".into(),
+    }
+}
+
+#[tokio::test]
+async fn file_at_revision() -> Result<()> {
+    let repo = mkrepo();
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+
+    // main renamed c.txt to d.txt
+    let renamed = queries::query_file(&ws, &revs::main_bookmark(), &tree_path("d.txt")).await?;
+    assert!(!renamed.missing && !renamed.binary);
+    assert!(!renamed.text.is_empty());
+
+    let absent =
+        queries::query_file(&ws, &revs::main_bookmark(), &tree_path("no-such.txt")).await?;
+    assert!(absent.missing);
+
+    // a conflicted file reads with markers, as the diff shows it
+    let conflicted =
+        queries::query_file(&ws, &revs::conflict_bookmark(), &tree_path("b.txt")).await?;
+    assert!(conflicted.text.contains("<<<<<<<"), "{}", conflicted.text);
+    Ok(())
+}
+
+#[tokio::test]
+async fn annotation_covers_every_line() -> Result<()> {
+    let repo = mkrepo();
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+
+    let path = tree_path("b.txt");
+    let file = queries::query_file(&ws, &revs::resolve_conflict(), &path).await?;
+    let blame = queries::query_annotation(&ws, &revs::resolve_conflict(), &path).await?;
+
+    assert_eq!(blame.lines.len(), file.text.lines().count());
+    assert_eq!(blame.lines.join("\n"), file.text.trim_end_matches('\n'));
+    let mut next = 0;
+    for block in &blame.blocks {
+        assert_eq!(block.start, next, "blocks are contiguous");
+        assert!(block.len > 0);
+        next += block.len;
+    }
+    assert_eq!(next, blame.lines.len());
+    // every line comes from a revision that changed the file
+    let history = queries::query_file_history(&ws, &revs::resolve_conflict(), &path, 100)?;
+    for block in &blame.blocks {
+        assert!(
+            history
+                .iter()
+                .any(|header| header.id.commit.hex == block.header.id.commit.hex),
+            "{} is not in the file's history",
+            block.header.id.commit.hex
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_history_is_newest_first_and_only_touches_the_file() -> Result<()> {
+    let repo = mkrepo();
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+
+    let path = tree_path("b.txt");
+    let history = queries::query_file_history(&ws, &revs::resolve_conflict(), &path, 50)?;
+    assert!(!history.is_empty());
+    assert_eq!(
+        history[0].id.commit.hex,
+        revs::resolve_conflict().commit.hex
+    );
+    let unrelated = queries::query_file_history(
+        &ws,
+        &revs::resolve_conflict(),
+        &tree_path("no-such.txt"),
+        50,
+    )?;
+    assert!(unrelated.is_empty());
+    // a path that needs escaping still parses
+    let odd = queries::query_file_history(
+        &ws,
+        &revs::resolve_conflict(),
+        &tree_path("a \"quoted\\ name.txt"),
+        50,
+    )?;
+    assert!(odd.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn annotation_apart_matches_the_worker_and_does_not_snapshot() -> Result<()> {
+    let repo = mkrepo();
+    let path = tree_path("b.txt");
+    let expected = {
+        let mut session = WorkerSession::default();
+        let ws = session.load_workspace(repo.path()).await?;
+        queries::query_annotation(&ws, &revs::resolve_conflict(), &path).await?
+    };
+    // a file the working copy has not recorded yet: a snapshot would take it in
+    std::fs::write(repo.path().join("untracked-new.txt"), "x")?;
+    let op_heads = || -> Result<Vec<std::ffi::OsString>> {
+        let mut names: Vec<_> = std::fs::read_dir(repo.path().join(".jj/repo/op_heads/heads"))?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<_>>()?;
+        names.sort();
+        Ok(names)
+    };
+    let before = op_heads()?;
+
+    let apart = crate::worker::annotate_apart(repo.path(), &revs::resolve_conflict(), &path)?;
+
+    assert_eq!(apart.lines, expected.lines);
+    assert_eq!(apart.blocks.len(), expected.blocks.len());
+    for (a, b) in apart.blocks.iter().zip(&expected.blocks) {
+        assert_eq!((a.start, a.len), (b.start, b.len));
+        assert_eq!(a.header.id.commit.hex, b.header.id.commit.hex);
+    }
+    // the same head operation: nothing was snapshotted
+    assert_eq!(op_heads()?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn headers_know_which_revisions_are_immutable() -> Result<()> {
+    let repo = mkrepo();
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+    let headers = queries::query_headers(&ws, "all()", 100)?;
+    for header in &headers {
+        let one = queries::query_revision(&ws, &header.id)?.expect("revision");
+        assert_eq!(
+            header.is_immutable, one.is_immutable,
+            "{}",
+            header.id.change.hex
+        );
+    }
+    assert!(headers.iter().any(|h| h.is_immutable) && headers.iter().any(|h| !h.is_immutable));
+    Ok(())
 }

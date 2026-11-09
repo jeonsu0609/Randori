@@ -79,6 +79,31 @@ pub enum SessionEvent {
         tx: Sender<Result<messages::queries::RevsResult>>,
         set: messages::RevSet,
     },
+    /// Read one file as it is in a revision.
+    QueryFile {
+        tx: Sender<Result<messages::queries::FileContent>>,
+        id: messages::RevId,
+        path: messages::TreePath,
+    },
+    /// The revision that last changed each line of a file (blame).
+    QueryAnnotation {
+        tx: Sender<Result<messages::queries::FileAnnotation>>,
+        id: messages::RevId,
+        path: messages::TreePath,
+    },
+    /// Revisions that changed a file, among a revision's ancestors.
+    QueryFileHistory {
+        tx: Sender<Result<Vec<messages::RevHeader>>>,
+        id: messages::RevId,
+        path: messages::TreePath,
+        limit: usize,
+    },
+    /// Headers of the revisions in a revset, without touching the log's paging.
+    QueryHeaders {
+        tx: Sender<Result<Vec<messages::RevHeader>>>,
+        revset: String,
+        limit: usize,
+    },
     /// List Git remotes, optionally filtered to those tracking a bookmark.
     QueryRemotes {
         tx: Sender<Result<Vec<String>>>,
@@ -287,6 +312,21 @@ impl Session for WorkspaceSession<'_> {
                     tx,
                     tracking_bookmark,
                 } => tx.send(queries::query_remotes(&self, tracking_bookmark))?,
+                SessionEvent::QueryHeaders { tx, revset, limit } => {
+                    tx.send(queries::query_headers(&self, &revset, limit))?
+                }
+                SessionEvent::QueryFile { tx, id, path } => {
+                    tx.send(queries::query_file(&self, &id, &path).await)?
+                }
+                SessionEvent::QueryAnnotation { tx, id, path } => {
+                    tx.send(queries::query_annotation(&self, &id, &path).await)?
+                }
+                SessionEvent::QueryFileHistory {
+                    tx,
+                    id,
+                    path,
+                    limit,
+                } => tx.send(queries::query_file_history(&self, &id, &path, limit))?,
                 SessionEvent::QueryLog {
                     tx,
                     query: revset_string,

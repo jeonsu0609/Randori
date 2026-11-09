@@ -18,7 +18,8 @@ use jj_cli::config::{ConfigEnv, config_from_environment, default_config_layers};
 use jj_cli::ui::Ui;
 use jj_lib::{
     config::{
-        ConfigFile, ConfigGetError, ConfigLayer, ConfigNamePathBuf, ConfigSource, StackedConfig,
+        ConfigFile, ConfigGetError, ConfigLayer, ConfigNamePathBuf, ConfigSource, ConfigValue,
+        StackedConfig,
     },
     dsl_util::{AliasDeclarationParser, AliasesMap},
     fileset::FilesetAliasesMap,
@@ -151,6 +152,22 @@ pub fn resolve_repo_path(dir: Option<&Path>) -> Option<PathBuf> {
 /// one `jj config set --user` edits. Returns that file. Open workspaces keep
 /// the settings they were loaded with; callers apply the change themselves.
 pub fn write_user_setting(name: &str, value: Option<bool>) -> Result<PathBuf> {
+    write_user_value(name, value.map(ConfigValue::from))
+}
+
+/// Sets a list of strings (for example `gg.ui.recent-workspaces`) in the
+/// user's jj config file. Returns that file.
+pub fn write_user_list(name: &str, values: &[String]) -> Result<PathBuf> {
+    write_user_value(name, Some(values.iter().map(String::as_str).collect()))
+}
+
+fn write_user_value(name: &str, value: Option<ConfigValue>) -> Result<PathBuf> {
+    // each write reads the file, edits it and writes it back; two at once
+    // (a setting and the recent workspaces) would lose one of the edits
+    static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = WRITES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_env = ConfigEnv::from_environment();
     let mut raw_config = config_from_environment(default_config_layers());
     config_env.reload_user_config(&mut raw_config)?;
@@ -161,12 +178,17 @@ pub fn write_user_setting(name: &str, value: Option<bool>) -> Result<PathBuf> {
         .next()
         .map(|file| file.path().to_owned())
         .ok_or_else(|| anyhow!("no user config file for jj"))?;
-    write_setting_to(&path, name, value)?;
+    write_value_to(&path, name, value)?;
     Ok(path)
 }
 
 /// [`write_user_setting`] for a known file.
 pub fn write_setting_to(path: &Path, name: &str, value: Option<bool>) -> Result<()> {
+    write_value_to(path, name, value.map(ConfigValue::from))
+}
+
+/// Sets (or, with `None`, removes) `name` in the config file at `path`.
+pub fn write_value_to(path: &Path, name: &str, value: Option<ConfigValue>) -> Result<()> {
     let mut file = ConfigFile::load_or_empty(ConfigSource::User, path)?;
     let name: ConfigNamePathBuf = name.parse().map_err(|err| anyhow!("{name}: {err}"))?;
     match value {

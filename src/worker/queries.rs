@@ -1,11 +1,19 @@
-use std::{borrow::Borrow, collections::HashSet, io::Write, mem, ops::Range, pin::Pin};
+use std::{
+    borrow::Borrow,
+    collections::{HashMap, HashSet},
+    io::Write,
+    mem,
+    ops::Range,
+    pin::Pin,
+};
 
 use anyhow::{Result, anyhow};
-use futures_util::{AsyncReadExt, Stream, StreamExt, try_join};
+use futures_util::{AsyncReadExt, Stream, StreamExt, TryStreamExt as _, try_join};
 use gix::bstr::ByteVec;
 use itertools::Itertools;
 use jj_cli::diff_util::LineDiffOptions;
 use jj_lib::{
+    annotate::FileAnnotator,
     backend::{CommitId, MergedTreeValueExt as _},
     conflict_labels::ConflictLabels,
     conflicts::{
@@ -25,17 +33,18 @@ use jj_lib::{
     ref_name::{RefNameBuf, RemoteNameBuf, RemoteRefSymbol},
     repo::Repo,
     repo_path::RepoPath,
-    revset::{Revset, RevsetContainingFn, RevsetEvaluationError},
+    revset::{
+        Revset, RevsetContainingFn, RevsetEvaluationError, RevsetExpression, RevsetStreamExt as _,
+    },
     rewrite,
     tree_merge::MergeOptions,
 };
 use pollster::FutureExt as _;
 
 use crate::messages::{
-    ChangeHunk, ChangeLocation, ChangeRange, MultilineString, RevSet, queries::*,
+    ChangeHunk, ChangeLocation, ChangeRange, MultilineString, RevHeader, RevId, RevSet, TreePath,
+    queries::*,
 };
-#[cfg(test)]
-use crate::messages::{RevHeader, RevId};
 
 use super::{WorkspaceSession, git_util::get_git_remote_names};
 
@@ -845,4 +854,178 @@ fn diff_by_line<'input, T: AsRef<[u8]> + ?Sized + 'input>(
 
 fn commit_id_identity(commit_id: &CommitId) -> &CommitId {
     commit_id
+}
+
+/// Files larger than this are not read whole for the file view or blame.
+const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Reads `path` as it is in the revision `id`.
+pub async fn query_file(
+    ws: &WorkspaceSession<'_>,
+    id: &RevId,
+    path: &TreePath,
+) -> Result<FileContent> {
+    let commit = ws.resolve_commit_id(&id.commit)?;
+    let repo_path = RepoPath::from_internal_string(&path.repo_path)?;
+    let tree = commit.tree();
+    let value = tree.path_value(repo_path).await?;
+    if value.is_absent() {
+        return Ok(FileContent {
+            text: String::new(),
+            binary: false,
+            missing: true,
+        });
+    }
+    let value =
+        conflicts::materialize_tree_value(ws.repo().store(), repo_path, value, tree.labels())
+            .await?;
+    let (bytes, binary) = read_whole(repo_path, value).await?;
+    Ok(FileContent {
+        text: if binary {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        },
+        binary,
+        missing: false,
+    })
+}
+
+/// The revision that last changed each line of `path` as it is in `id`, the
+/// way `jj file annotate` finds it (every revision is in the domain).
+pub async fn query_annotation(
+    ws: &WorkspaceSession<'_>,
+    id: &RevId,
+    path: &TreePath,
+) -> Result<FileAnnotation> {
+    let commit = ws.resolve_commit_id(&id.commit)?;
+    let repo_path = RepoPath::from_internal_string(&path.repo_path)?;
+    let mut annotator = FileAnnotator::from_commit(&commit, repo_path).await?;
+    let starting = annotator.to_annotation();
+    let text_start: &[u8] = starting.text();
+    if text_start[..8000.min(text_start.len())].contains(&b'\0') {
+        return Ok(FileAnnotation {
+            lines: Vec::new(),
+            blocks: Vec::new(),
+            binary: true,
+        });
+    }
+    if text_start.len() > MAX_FILE_BYTES {
+        return Err(anyhow!("{} is too large to annotate", path.repo_path));
+    }
+    annotator
+        .compute(ws.repo(), &RevsetExpression::all())
+        .await?;
+    let annotation = annotator.to_annotation();
+
+    let mut lines = Vec::new();
+    let mut runs: Vec<(CommitId, usize, usize)> = Vec::new();
+    for (origin, line) in annotation.lines() {
+        // Err: the line comes from outside the domain; its commit is still the answer
+        let commit_id = origin.unwrap_or_else(|id| id).clone();
+        let text = String::from_utf8_lossy(line);
+        lines.push(text.trim_end_matches(['\n', '\r']).to_owned());
+        match runs.last_mut() {
+            Some((id, _, len)) if *id == commit_id => *len += 1,
+            _ => runs.push((commit_id, lines.len() - 1, 1)),
+        }
+    }
+    // blame does not show immutability, so skip that check for every block
+    let mut headers: HashMap<CommitId, RevHeader> = HashMap::new();
+    let mut blocks = Vec::with_capacity(runs.len());
+    for (commit_id, start, len) in runs {
+        let header = match headers.get(&commit_id) {
+            Some(header) => header.clone(),
+            None => {
+                let header = ws.format_header(&ws.get_commit(&commit_id)?, Some(false))?;
+                headers.insert(commit_id.clone(), header.clone());
+                header
+            }
+        };
+        blocks.push(AnnotationBlock { start, len, header });
+    }
+    Ok(FileAnnotation {
+        lines,
+        blocks,
+        binary: false,
+    })
+}
+
+/// Revisions that changed `path`, newest first, among the ancestors of `id`
+/// (the file's history as seen from that revision).
+pub fn query_file_history(
+    ws: &WorkspaceSession<'_>,
+    id: &RevId,
+    path: &TreePath,
+    limit: usize,
+) -> Result<Vec<RevHeader>> {
+    let revset = format!(
+        "::{} & files(root-file:{})",
+        id.commit.hex,
+        revset_string_literal(&path.repo_path)
+    );
+    query_headers(ws, &revset, limit)
+}
+
+/// Headers of the first `limit` revisions of `revset`, newest first. Unlike
+/// a log query it keeps no paging state, so it can run beside the log.
+pub fn query_headers(
+    ws: &WorkspaceSession<'_>,
+    revset: &str,
+    limit: usize,
+) -> Result<Vec<RevHeader>> {
+    let revset = ws.evaluate_revset_str(revset)?;
+    // one evaluation of immutable_heads() for every header, as the log does
+    let immutable = ws.evaluate_immutable()?;
+    let is_immutable = immutable.containing_fn();
+    let mut stream = revset.stream().commits(ws.repo().store());
+    let mut headers = Vec::new();
+    while headers.len() < limit {
+        match stream.try_next().block_on()? {
+            Some(commit) => {
+                let known = is_immutable(commit.id()).block_on()?;
+                headers.push(ws.format_header(&commit, Some(known))?)
+            }
+            None => break,
+        }
+    }
+    Ok(headers)
+}
+
+/// A revset string literal for `text`, escaped the way jj's parser reads it.
+fn revset_string_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// File bytes and whether they are binary; other values read as
+/// `get_value_contents` shows them.
+async fn read_whole(path: &RepoPath, value: MaterializedTreeValue) -> Result<(Vec<u8>, bool)> {
+    match value {
+        MaterializedTreeValue::File(MaterializedFileValue { mut reader, .. }) => {
+            let mut contents = vec![];
+            reader.read_to_end(&mut contents).await?;
+            if contents.len() > MAX_FILE_BYTES {
+                return Err(anyhow!(
+                    "{} is too large to show",
+                    path.as_internal_file_string()
+                ));
+            }
+            // same heuristic git uses
+            let binary = contents[..8000.min(contents.len())].contains(&b'\0');
+            Ok((contents, binary))
+        }
+        other => Ok((get_value_contents(path, other).await?, false)),
+    }
 }

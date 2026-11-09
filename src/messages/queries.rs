@@ -95,3 +95,31 @@ pub struct LogPage {
     pub rows: Vec<LogRow>,
     pub has_more: bool,
 }
+
+/// One file as it is in one revision, for a full-file view.
+#[derive(Serialize, Debug)]
+pub struct FileContent {
+    /// The text; empty when `binary` or `missing`. Conflicted files come with
+    /// git-style conflict markers.
+    pub text: String,
+    pub binary: bool,
+    /// The revision has no file at this path.
+    pub missing: bool,
+}
+
+/// A file's lines grouped by the revision that last changed them (blame).
+#[derive(Serialize, Debug)]
+pub struct FileAnnotation {
+    pub lines: Vec<String>,
+    /// Consecutive lines from one revision, in file order.
+    pub blocks: Vec<AnnotationBlock>,
+    pub binary: bool,
+}
+
+#[derive(Serialize, Debug)]
+pub struct AnnotationBlock {
+    /// First line of the block, zero-based.
+    pub start: usize,
+    pub len: usize,
+    pub header: RevHeader,
+}

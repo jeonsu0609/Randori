@@ -44,6 +44,35 @@ use git_util::AuthContext;
 pub use gui_util::WorkspaceSession;
 pub use session::{Session, SessionEvent};
 
+/// Blame for `path` in revision `id`, computed on the calling thread from a
+/// load of its own: the workspace's worker stays free for the rest of the UI
+/// while a long history is walked. The load reads the repository at its
+/// latest operation and never snapshots the working copy, so it cannot race
+/// the worker's snapshots.
+pub fn annotate_apart(
+    workspace: &std::path::Path,
+    id: &crate::messages::RevId,
+    path: &crate::messages::TreePath,
+) -> anyhow::Result<crate::messages::queries::FileAnnotation> {
+    struct NoEvents;
+    impl EventSink for NoEvents {
+        fn send(&self, _: &str, _: serde_json::Value) {}
+    }
+    let repo_path = crate::config::resolve_repo_path(Some(workspace));
+    let (settings, ..) = crate::config::read_config(repo_path.as_deref())?;
+    let mut session = WorkerSession::new(
+        Arc::new(NoEvents),
+        Some(workspace.to_owned()),
+        settings,
+        false,
+        false,
+    );
+    pollster::block_on(async {
+        let ws = session.load_workspace(workspace).await?;
+        queries::query_annotation(&ws, id, path).await
+    })
+}
+
 /// A repository-modifying operation (e.g. abandon, rebase, bookmark create).
 ///
 /// Concrete mutation types live in [`crate::messages`] and are deserialized
