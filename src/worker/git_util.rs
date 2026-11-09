@@ -156,6 +156,18 @@ pub fn get_git_remote_names(git_repo: &gix::Repository) -> Vec<String> {
         .collect()
 }
 
+/// Fetch URL of every remote that has one, in [`get_git_remote_names`] order.
+pub fn get_git_remote_urls(git_repo: &gix::Repository) -> Vec<(String, String)> {
+    get_git_remote_names(git_repo)
+        .into_iter()
+        .filter_map(|name| {
+            let remote = git_repo.try_find_remote(name.as_str())?.ok()?;
+            let url = remote.url(gix::remote::Direction::Fetch)?;
+            Some((name, url.to_bstring().to_string()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Write};

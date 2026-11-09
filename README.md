@@ -19,21 +19,27 @@ you move, split and recombine freely. That is how jj treats history.
 > **Status:** early development. Randori reads and edits jj workspaces —
 > tabs, graph log, diffs, describe, new, edit, abandon, bookmarks, rebase by
 > drag and drop, file and hunk squashes, push, fetch, undo and redo, a command
-> palette and appearance settings. Conflicts open in your merge tool; an
-> in-app conflict editor is not built yet.
+> palette, appearance settings and the GitHub pull requests of the workspace.
+> Conflicts open in your merge tool; an in-app conflict editor is not built yet.
 
 ## The window
 
 | Region | What it shows |
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
-| Toolbar | Workspace path, a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
+| Toolbar | Workspace path, **Mine / All branches**, a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
 | Rail | Revisions, Open, the command palette (`⌘K`) and Settings (appearance: light, dark or follow the system; remembered) |
-| Bookmarks | Local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click to jump to the revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
-| Revisions | The commit graph with fixed columns: change id, bookmarks and description, author, relative time, commit id. The hollow ring is the working copy (`@`); squares are immutable revisions. Right-click for revision commands; drag a revision onto another to rebase it there |
+| Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
+| Revisions | A branch / tag column, the commit graph and fixed columns: change id, description, author, relative time. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's avatar (GitHub picture or initials); rounded squares are immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights |
 | Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Status bar | Worker state, the running jj operation and its progress, the last operation, the working copy and the number of loaded revisions |
+
+**Mine** is jj's own log (`revsets.log`): your changes that are not in trunk
+yet, and trunk. Changes on other people's branches are immutable to jj and stay
+out of it. **All branches** shows every visible commit (`all()`), every branch
+and tag like GitKraken's graph. The last scope you pick is remembered, and a
+revset you type selects neither.
 
 Each tab runs its own jj worker thread (jj-lib is not thread-safe), so a slow
 fetch in one workspace never blocks another. Edits made outside Randori, in an
@@ -66,6 +72,24 @@ operation log, and git credentials are asked for when a remote needs them.
 | Push | `⌘⇧P` pushes the selection's bookmarks (an untracked bookmark goes to `origin`, or the only remote) |
 | Fetch | `⌘⇧F` fetches every remote |
 | Undo / redo | `⌘Z` / `⌘⇧Z` in the revision list |
+
+### Pull requests
+
+When a workspace has a GitHub remote (`origin`, or else the first remote on
+github.com or a GitHub Enterprise host), the side panel lists its open pull
+requests, newest activity first: author, number and title, head → base branch,
+the review decision and the checks of the head commit. Click one to select its
+head revision (switching to **All branches** if it is not loaded), or open it on
+GitHub. The list refreshes every minute, when the window comes back to the front
+(at most every 30 seconds) and from **Refresh pull requests** in the palette.
+The same query brings the avatars of recent authors on the default branch and
+on the pull requests' base branches.
+
+Randori uses the token you already have: `GH_TOKEN` or `GITHUB_TOKEN`
+(`GH_ENTERPRISE_TOKEN` for Enterprise hosts), or else the GitHub CLI's
+(`gh auth token`). It is kept in memory, never written or logged, and sent only
+to that host's GraphQL API over HTTPS. Without one the section shows how to
+sign in (`gh auth login`); nothing else needs it.
 
 ![Creating a bookmark](doc/randori/bookmark-dialog.png)
 
@@ -148,7 +172,8 @@ instead of the whole Lucide set:
 | Release, default profile, every icon | 47.7 MB executable |
 | Release, used icons only | 46.7 MB executable |
 | Release, LTO + `codegen-units = 1` + strip | 29.4 MB executable |
-| `Randori.dmg` (compressed disk image) | 14.3 MB |
+| The same, with the HTTP client for GitHub | 32.3 MB executable |
+| `Randori.dmg` (compressed disk image) | 15.8 MB |
 
 A release build takes about three minutes on an M-series Mac; `cargo run`
 stays fast because the debug profile is unchanged.
@@ -189,8 +214,10 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                    inspector    revision details, changed files, diff
                    ops          jj mutations (new, describe, abandon, push, rebase, …)
                    pick         choosing a target revision from the keyboard
+                   pulls        the pull requests section
                    dnd, menus   drag payloads, context menus
-                 graph          graph lanes drawn per virtual-list row
+                 graph          graph lanes, branch colours and avatars per virtual-list row
+                 github         GitHub remotes, token lookup, pull request and avatar query
                  worker         one jj worker thread per tab
                  assets         embedded icons
       │  SessionEvent requests over a channel per tab, push events back through EventSink

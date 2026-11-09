@@ -5,6 +5,7 @@
 
 mod app_view;
 mod assets;
+mod github;
 mod graph;
 mod repo_view;
 mod worker;
@@ -119,6 +120,14 @@ fn main() -> Result<()> {
         .with_assets(assets::RandoriAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            // GitHub avatars (`img(url)`) and the pull request queries.
+            match reqwest_client::ReqwestClient::user_agent(concat!(
+                "Randori/",
+                env!("CARGO_PKG_VERSION")
+            )) {
+                Ok(client) => cx.set_http_client(std::sync::Arc::new(client)),
+                Err(err) => log::warn!("no HTTP client, GitHub features are off: {err:#}"),
+            }
             repo_view::bind_keys(cx);
             app_view::bind_keys(cx);
 

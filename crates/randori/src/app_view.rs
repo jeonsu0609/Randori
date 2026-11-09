@@ -87,6 +87,9 @@ struct Session {
     /// Appearance chosen in Settings; absent means the dark default.
     #[serde(default)]
     theme: ThemeChoice,
+    /// "All branches" was the last scope picked; new tabs open with it.
+    #[serde(default)]
+    all_branches: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq)]
@@ -108,6 +111,8 @@ pub struct RandoriApp {
     theme: ThemeChoice,
     /// Appearance chosen in Settings, which is what the session remembers.
     saved_theme: ThemeChoice,
+    /// Log scope new tabs start with (the last one picked).
+    all_branches: bool,
     /// Focus for the window itself, so its keys (⌘K, ⌘O) work with no tab open.
     focus: FocusHandle,
     _activation: Subscription,
@@ -151,6 +156,7 @@ impl RandoriApp {
             persist,
             theme: theme_override.unwrap_or(session.theme),
             saved_theme: session.theme,
+            all_branches: session.all_branches,
             focus: cx.focus_handle(),
             _activation,
             _appearance,
@@ -222,6 +228,11 @@ impl RandoriApp {
             return Ok(ix);
         }
 
+        // `--revset` wins; otherwise the last scope picked.
+        let revset = revset.or_else(|| {
+            self.all_branches
+                .then(|| crate::repo_view::ALL_BRANCHES_QUERY.to_owned())
+        });
         let repo_path = gg_lib::config::resolve_repo_path(Some(&path));
         let (settings, _, _, _) =
             gg_lib::read_config(repo_path.as_deref()).context("reading jj config")?;
@@ -229,8 +240,13 @@ impl RandoriApp {
         let view =
             cx.new(|cx| RepoView::new(worker, events, Some(path.clone()), revset, window, cx));
         let _events = cx.subscribe(&view, |app, view, event: &RepoViewEvent, _| {
-            if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.view == view) {
-                tab.failed = matches!(event, RepoViewEvent::LoadFailed);
+            match event {
+                RepoViewEvent::Loaded | RepoViewEvent::LoadFailed => {
+                    if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.view == view) {
+                        tab.failed = matches!(event, RepoViewEvent::LoadFailed);
+                    }
+                }
+                RepoViewEvent::ScopeChanged { all } => app.all_branches = *all,
             }
             app.save_session();
         });
@@ -377,6 +393,21 @@ impl RandoriApp {
                     Box::new(repo::Reload),
                 ),
                 ("Edit revset", IconName::Search, Box::new(repo::FocusRevset)),
+                (
+                    "Show my work (jj log)",
+                    IconName::GitCommitHorizontal,
+                    Box::new(repo::ShowMyWork),
+                ),
+                (
+                    "Show all branches",
+                    IconName::GitBranch,
+                    Box::new(repo::ShowAllBranches),
+                ),
+                (
+                    "Refresh pull requests",
+                    IconName::RefreshCw,
+                    Box::new(repo::RefreshPullRequests),
+                ),
                 (
                     "Show or hide bookmarks",
                     IconName::PanelLeft,
@@ -576,6 +607,7 @@ impl RandoriApp {
         if !self.persist {
             return;
         }
+        let failed: Vec<bool> = self.tabs.iter().map(|tab| tab.failed).collect();
         let session = Session {
             tabs: self
                 .tabs
@@ -583,8 +615,9 @@ impl RandoriApp {
                 .filter(|tab| !tab.failed)
                 .map(|tab| tab.path.clone())
                 .collect(),
-            active: self.active,
+            active: saved_active(&failed, self.active),
             theme: self.saved_theme,
+            all_branches: self.all_branches,
         };
         if let Err(err) = store_session(&session) {
             log::warn!("cannot save open tabs: {err:#}");
@@ -784,6 +817,18 @@ fn workspace_root(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// The selected tab's index among the tabs that are saved (failed tabs are
+/// not); a failed selection falls back to the saved tab before it.
+fn saved_active(failed: &[bool], active: usize) -> usize {
+    let kept_before = failed.iter().take(active).filter(|f| !**f).count();
+    let active_kept = failed.get(active).is_some_and(|f| !*f);
+    if active_kept {
+        kept_before
+    } else {
+        kept_before.saturating_sub(1)
+    }
+}
+
 /// Splits saved tab paths into directories that still exist and ones that do not.
 fn split_existing(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
     paths.into_iter().partition(|path| path.is_dir())
@@ -829,5 +874,19 @@ mod tests {
         let (existing, missing) = split_existing(vec![here.clone(), gone.clone()]);
         assert_eq!(existing, vec![here]);
         assert_eq!(missing, vec![gone]);
+    }
+
+    #[test]
+    fn saved_active_counts_only_saved_tabs() {
+        // [ok, failed] with the failed one selected: one tab saved, select it.
+        assert_eq!(saved_active(&[false, true], 1), 0);
+        // [failed, ok] with the ok one selected: it becomes the first.
+        assert_eq!(saved_active(&[true, false], 1), 0);
+        // [ok, failed, ok] selecting the last: second saved tab.
+        assert_eq!(saved_active(&[false, true, false], 2), 1);
+        // nothing failed: unchanged.
+        assert_eq!(saved_active(&[false, false, false], 2), 2);
+        // everything failed: nothing to select, stays in range of an empty list.
+        assert_eq!(saved_active(&[true, true], 1), 0);
     }
 }

@@ -32,9 +32,10 @@ pub(super) struct RowData {
     pub(super) id: RevId,
     pub(super) change_prefix: SharedString,
     pub(super) change_rest: SharedString,
-    pub(super) commit: SharedString,
     pub(super) summary: Option<SharedString>,
     pub(super) author: SharedString,
+    /// For the author's avatar; lowercase, as avatars are keyed.
+    pub(super) author_email: SharedString,
     pub(super) time: SharedString,
     pub(super) refs: Vec<RefChip>,
     pub(super) is_working_copy: bool,
@@ -77,7 +78,6 @@ impl RowData {
                 .take(6)
                 .collect::<String>()
                 .into(),
-            commit: short_id(&rev.id.commit.prefix, &rev.id.commit.rest, 8).into(),
             summary: rev
                 .description
                 .lines
@@ -85,6 +85,7 @@ impl RowData {
                 .filter(|line| !line.trim().is_empty())
                 .map(|line| SharedString::from(line.clone())),
             author: rev.author.name.clone().into(),
+            author_email: rev.author.email.to_ascii_lowercase().into(),
             time: relative_time(rev.author.timestamp, now).into(),
             refs: ref_chips(&rev.refs),
             is_working_copy: rev.is_working_copy,

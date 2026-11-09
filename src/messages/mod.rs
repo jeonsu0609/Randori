@@ -200,6 +200,8 @@ pub enum RepoConfig {
     Workspace {
         absolute_path: DisplayPath,
         git_remotes: Vec<String>,
+        /// `(name, fetch URL)` of each remote in `git_remotes`.
+        git_remote_urls: Vec<(String, String)>,
         query_choices: HashMap<String, String>,
         latest_query: String,
         status: RepoStatus,

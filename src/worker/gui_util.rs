@@ -55,7 +55,10 @@ use jj_lib::{
 use pollster::FutureExt as _;
 use thiserror::Error;
 
-use super::{WorkerSession, git_util::get_git_remote_names};
+use super::{
+    WorkerSession,
+    git_util::{get_git_remote_names, get_git_remote_urls},
+};
 
 use crate::{
     config::{self, GGSettings, read_config},
@@ -751,9 +754,9 @@ impl WorkspaceSession<'_> {
     pub(crate) fn format_config(&self) -> Result<messages::RepoConfig> {
         let absolute_path = self.workspace.workspace_root().into();
 
-        let git_remotes = match self.git_repo() {
-            Some(repo) => get_git_remote_names(&repo),
-            None => vec![],
+        let (git_remotes, git_remote_urls) = match self.git_repo() {
+            Some(repo) => (get_git_remote_names(&repo), get_git_remote_urls(&repo)),
+            None => (vec![], vec![]),
         };
 
         let default_revset =
@@ -791,6 +794,7 @@ impl WorkspaceSession<'_> {
         Ok(messages::RepoConfig::Workspace {
             absolute_path,
             git_remotes,
+            git_remote_urls,
             query_choices,
             latest_query,
             status: self.format_status(),

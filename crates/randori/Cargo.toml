@@ -32,6 +32,10 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 # gpui-kit needs no edit here. If gpui-kit ever leaves 0.3, the screenshot build
 # fails to compile instead of silently testing a different gpui.
 gpui-pre = { version = "0.3", features = ["test-support"], optional = true }
+# GPUI's HTTP client (the gpui release gpui-kit pins), for GitHub pull
+# requests and avatar images.
+reqwest_client = { version = "0.3", package = "gpui-pre-reqwest-client" }
+http_client = { version = "0.3", package = "gpui-pre-http-client" }
 
 [features]
 # `randori --screenshot out.png` renders the first screen offscreen (README images, visual checks).

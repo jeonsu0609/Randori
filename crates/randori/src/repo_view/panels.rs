@@ -48,6 +48,22 @@ impl RepoView {
                     .child(path),
             )
             .child(div().flex_1())
+            .when(ready, |bar| {
+                // A typed revset is neither scope, so neither tab is selected.
+                let scope = self.log_scope().map(usize::from);
+                bar.child(
+                    TabBar::new("log-scope")
+                        .segmented()
+                        .xsmall()
+                        .when_some(scope, |tabs, ix| tabs.selected_index(ix))
+                        .on_click(cx.listener(|view, ix: &usize, window, cx| {
+                            view.set_log_scope(*ix == 1, window, cx)
+                        }))
+                        .child("Mine")
+                        .child("All branches"),
+                )
+                .child(div().w_2())
+            })
             .child(
                 div().w_72().child(
                     Input::new(&self.revset)
@@ -92,6 +108,7 @@ impl RepoView {
             )
     }
     pub(super) fn render_refs_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let pulls = self.render_pulls(cx);
         let theme = cx.theme();
         let filter = self.ref_filter;
         let visible: Vec<&RefItem> = self
@@ -110,6 +127,7 @@ impl RepoView {
             .size_full()
             .min_h_0()
             .bg(theme.sidebar)
+            .children(pulls)
             .child(
                 h_flex()
                     .h_10()

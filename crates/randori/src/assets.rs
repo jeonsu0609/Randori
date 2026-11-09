@@ -10,11 +10,16 @@ use gpui_kit::{AssetSource, Result, SharedString};
 gpui_kit::assets::icon_assets!(pub AppIcons, [
     ArrowDownToLine,
     Bookmark,
+    ChevronDown,
     ChevronLeft,
     ChevronRight,
+    CircleCheck,
+    CircleDot,
+    CircleX,
     CloudDownload,
     Command,
     Copy,
+    ExternalLink,
     File,
     FileDiff,
     FileInput,
@@ -83,6 +88,7 @@ mod tests {
             include_str!("repo_view/ops.rs"),
             include_str!("repo_view/panels.rs"),
             include_str!("repo_view/pick.rs"),
+            include_str!("repo_view/pulls.rs"),
         );
         let mut missing = Vec::new();
         for (ix, _) in source.match_indices("IconName::") {

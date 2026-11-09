@@ -41,8 +41,10 @@ thread-safe). The session progresses through states: `WorkerSession` →
   - `inspector.rs`: revision details, changed files and the diff
   - `ops.rs`: every jj mutation the UI runs, and how results are applied
   - `pick.rs`: pick mode, choosing a target revision from the keyboard
+  - `pulls.rs`: the pull requests section, its background refresh, and the avatars it brings back
   - `dnd.rs`, `menus.rs`: drag payloads, context menus
-- **`crates/randori/src/graph.rs`**: draws the worker's graph layout per virtual-list row.
+- **`crates/randori/src/graph.rs`**: draws the worker's graph layout per virtual-list row. `branch_colors` gives each branch one palette colour (a node inherits the child above it in its lane; a lane change takes the right-hand endpoint's colour); nodes are author avatars (`graph::avatar`).
+- **`crates/randori/src/github.rs`**: GitHub remotes (`GitHubRepo::pick`), the token lookup (`GH_TOKEN` / `GITHUB_TOKEN`, then `gh auth token`; never stored or logged), the one GraphQL query and its parser. HTTP goes through GPUI's client, set in `main.rs` (`reqwest_client`), which also loads avatar images.
 - **`crates/randori/src/assets.rs`**: the icons the app embeds. Only listed icons ship; a new `IconName::Foo` must be added to `icon_assets!` or it draws nothing (the `every_used_icon_is_embedded` test catches this, and needs new submodules added to its file list).
 
 ## Adding New Mutations
@@ -109,6 +111,14 @@ Drag payloads are in `repo_view/dnd.rs` (`DraggedRevision`, `DraggedRef`,
 (`repo_view/pick.rs`, started by `R`, the context menus or the palette). While
 a pick is open, `run_mutation` and the dialogs refuse other commands
 (`blocked_by_pick`), so nothing changes the repository underneath an open pick.
+
+### Log Scope
+
+"Mine" is the workspace's `query_choices["default"]` (jj's `revsets.log`) and
+"All branches" is `repo_view::ALL_BRANCHES_QUERY` (`all()`). The selected tab is
+derived from the current revset (`RepoView::log_scope`), so a typed revset
+selects neither. The last pick is saved in the session (`all_branches`) and
+applies to tabs opened later, unless `--revset` is given.
 
 ### GG Hunk Ranges
 

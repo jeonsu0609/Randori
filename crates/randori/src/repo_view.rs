@@ -53,6 +53,7 @@ mod model;
 mod ops;
 mod panels;
 mod pick;
+mod pulls;
 
 use crate::worker::{Worker, WorkerEvent};
 use dnd::*;
@@ -73,6 +74,9 @@ pub mod actions {
             FocusLog,
             Reload,
             ToggleSidebar,
+            ShowMyWork,
+            ShowAllBranches,
+            RefreshPullRequests,
             // revisions
             NewChild,
             EditRevision,
@@ -108,6 +112,10 @@ pub mod actions {
         ]
     );
 }
+
+/// Revset of the "All branches" scope: every visible commit, which in a git
+/// repository is everything reachable from a branch, tag or workspace.
+pub const ALL_BRANCHES_QUERY: &str = "all()";
 
 /// Key context of the revision list; arrow and vi keys apply only there.
 const LOG_CONTEXT: &str = "RandoriLog";
@@ -166,6 +174,10 @@ enum LoadState {
 struct WorkspaceInfo {
     path: SharedString,
     query: String,
+    /// jj's log revset (`revsets.log`), the "Mine" scope.
+    default_query: String,
+    /// `(name, fetch URL)` of every git remote, for the GitHub section.
+    remote_urls: Vec<(String, String)>,
     operation: SharedString,
     /// Git remotes, for fetch.
     remotes: Vec<String>,
@@ -231,6 +243,12 @@ pub struct RepoView {
     dialog_subscription: Option<Subscription>,
     /// Change id and text last loaded into the description editor.
     description_for: Option<(String, String)>,
+    /// Author avatars by email, shared with the list closure.
+    avatars: Rc<HashMap<String, SharedString>>,
+    /// Pull requests of the workspace's GitHub remote, if it has one.
+    pulls: Option<pulls::Pulls>,
+    /// Commit to select after the next reload (a pull request's head).
+    pending_commit_select: Option<String>,
 }
 
 impl RepoView {
@@ -337,6 +355,9 @@ impl RepoView {
             diff_selection: None,
             pick: None,
             dialog_subscription: None,
+            avatars: Rc::default(),
+            pulls: None,
+            pending_commit_select: None,
         };
         view.wd = workspace.clone();
         view.initial_query = initial_query.clone();
@@ -350,6 +371,7 @@ impl RepoView {
             && !self.detail_loading
             && !self.loading_more
             && self.busy.is_empty()
+            && !self.pulls_fetching()
     }
 
     /// Moves keyboard focus to the revision list (e.g. when its tab is selected).
@@ -400,12 +422,18 @@ impl RepoView {
                         RepoConfig::Workspace {
                             absolute_path,
                             latest_query,
+                            query_choices,
                             status,
                             git_remotes,
+                            git_remote_urls,
                             has_external_diff_tool,
                             has_external_merge_tool,
                             ..
                         } => {
+                            let default_query = query_choices
+                                .get("default")
+                                .cloned()
+                                .unwrap_or_else(|| latest_query.clone());
                             let query = initial_query.unwrap_or(latest_query);
                             let page = worker.query_log(query.clone())?;
                             let path = absolute_path.0;
@@ -413,6 +441,8 @@ impl RepoView {
                                 WorkspaceInfo {
                                     path: display_path(&path).into(),
                                     query,
+                                    default_query,
+                                    remote_urls: git_remote_urls,
                                     operation: status.operation_description.into(),
                                     remotes: git_remotes,
                                     can_redo: status.can_redo,
@@ -437,8 +467,10 @@ impl RepoView {
                         let query = workspace.query.clone();
                         view.revset
                             .update(cx, |state, cx| state.set_value(query, window, cx));
+                        let remote_urls = workspace.remote_urls.clone();
                         view.workspace = Some(workspace);
                         view.replace_rows(page, true, cx);
+                        view.start_pulls(&remote_urls, cx);
                         view.state = LoadState::Ready;
                         view.log_focus.focus(window, cx);
                         cx.emit(RepoViewEvent::Loaded);
@@ -490,6 +522,37 @@ impl RepoView {
         .detach();
     }
 
+    /// Which scope the current revset is: `Some(false)` for jj's own log
+    /// ("Mine"), `Some(true)` for every branch, `None` for a typed revset.
+    pub(super) fn log_scope(&self) -> Option<bool> {
+        let ws = self.workspace.as_ref()?;
+        if ws.query == ALL_BRANCHES_QUERY {
+            Some(true)
+        } else if ws.query == ws.default_query {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Switches between jj's log ("Mine") and every branch, like the branch
+    /// list of GitKraken or Fork. The window remembers the choice.
+    pub(super) fn set_log_scope(&mut self, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ws) = &self.workspace else {
+            return;
+        };
+        let query = if all {
+            ALL_BRANCHES_QUERY.to_owned()
+        } else {
+            ws.default_query.clone()
+        };
+        self.revset
+            .update(cx, |state, cx| state.set_value(query.clone(), window, cx));
+        self.run_query(query, cx);
+        cx.emit(RepoViewEvent::ScopeChanged { all });
+        cx.notify();
+    }
+
     fn run_query(&mut self, query: String, cx: &mut Context<Self>) {
         if let Some(workspace) = &mut self.workspace {
             workspace.query = query;
@@ -532,6 +595,7 @@ impl RepoView {
         if self.workspace.is_none() {
             return;
         }
+        self.refresh_pulls(false, cx);
         let worker = self.worker.clone();
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { worker.snapshot() }).await;
@@ -594,14 +658,18 @@ impl RepoView {
         self.rows = page.rows;
         self.rebuild_derived();
 
-        let selected = self
-            .pending_select
-            .take()
-            .or(previous)
-            .and_then(|hex| {
-                self.rows
-                    .iter()
-                    .position(|row| row.revision.id.change.hex == hex)
+        let pull_head = self.pending_commit_select.take().and_then(|hex| {
+            self.rows
+                .iter()
+                .position(|row| row.revision.id.commit.hex == hex)
+        });
+        let selected = pull_head
+            .or_else(|| {
+                self.pending_select.take().or(previous).and_then(|hex| {
+                    self.rows
+                        .iter()
+                        .position(|row| row.revision.id.change.hex == hex)
+                })
             })
             .or_else(|| {
                 self.rows
@@ -812,6 +880,19 @@ impl Render for RepoView {
                     }
                 }),
             )
+            .on_action(cx.listener(|view, _: &actions::ShowMyWork, window, cx| {
+                view.set_log_scope(false, window, cx)
+            }))
+            .on_action(
+                cx.listener(|view, _: &actions::ShowAllBranches, window, cx| {
+                    view.set_log_scope(true, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::RefreshPullRequests, _, cx| {
+                    view.refresh_pulls(true, cx)
+                }),
+            )
             .on_action(cx.listener(|view, _: &actions::ToggleSidebar, _, cx| {
                 view.sidebar_visible = !view.sidebar_visible;
                 cx.notify();
@@ -989,6 +1070,10 @@ impl RepoView {
 pub enum RepoViewEvent {
     Loaded,
     LoadFailed,
+    /// The user picked "Mine" or "All branches".
+    ScopeChanged {
+        all: bool,
+    },
 }
 
 impl gpui_kit::EventEmitter<RepoViewEvent> for RepoView {}
