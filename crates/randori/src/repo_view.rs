@@ -46,6 +46,7 @@ use gpui_kit::{
 use crate::graph::{Graph, row_height};
 
 mod dnd;
+mod focus;
 mod inspector;
 mod log_list;
 mod menus;
@@ -54,10 +55,12 @@ mod ops;
 mod panels;
 mod pick;
 mod pulls;
+mod switcher;
 
 use crate::settings::{self, DiffLayout, Settings};
 use crate::worker::{Worker, WorkerEvent};
 use dnd::*;
+use focus::{FOCUS_CONTEXT, FocusTab};
 use menus::*;
 use model::*;
 use pick::*;
@@ -78,6 +81,20 @@ pub mod actions {
             ShowMyWork,
             ShowAllBranches,
             RefreshPullRequests,
+            // the full view of one file
+            OpenFileDiff,
+            OpenFileView,
+            OpenFileBlame,
+            OpenFileHistory,
+            CloseFileFocus,
+            NextChange,
+            PreviousChange,
+            NextFile,
+            PreviousFile,
+            // the toolbar's pickers
+            SwitchWorkspace,
+            SwitchBookmark,
+            NextConflict,
             // revisions
             NewChild,
             EditRevision,
@@ -117,6 +134,10 @@ pub mod actions {
 /// Revset of the "All branches" scope: every visible commit, which in a git
 /// repository is everything reachable from a branch, tag or workspace.
 pub const ALL_BRANCHES_QUERY: &str = "all()";
+
+/// How stale the age labels ("3 hours ago") may get before a window
+/// activation rebuilds them.
+const AGE_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Key context of the revision list; arrow and vi keys apply only there.
 const LOG_CONTEXT: &str = "RandoriLog";
@@ -163,6 +184,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(platform_key!("shift-z"), Redo, Some(LOG_CONTEXT)),
         KeyBinding::new(platform_key!("shift-f"), Fetch, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("shift-p"), Push, Some(REPO_CONTEXT)),
+        KeyBinding::new(platform_key!("shift-d"), OpenFileDiff, Some(REPO_CONTEXT)),
+        KeyBinding::new(platform_key!("shift-b"), SwitchBookmark, Some(REPO_CONTEXT)),
+        KeyBinding::new("escape", CloseFileFocus, Some(FOCUS_CONTEXT)),
+        KeyBinding::new("alt-down", NextChange, Some(FOCUS_CONTEXT)),
+        KeyBinding::new("alt-up", PreviousChange, Some(FOCUS_CONTEXT)),
+        KeyBinding::new("]", NextFile, Some(FOCUS_CONTEXT)),
+        KeyBinding::new("[", PreviousFile, Some(FOCUS_CONTEXT)),
     ]);
 }
 
@@ -252,6 +280,20 @@ pub struct RepoView {
     pulls: Option<pulls::Pulls>,
     /// Commit to select after the next reload (a pull request's head).
     pending_commit_select: Option<String>,
+    /// The full view of one file, in place of the revisions and the diff.
+    focus: Option<focus::FileFocus>,
+    /// The revision list's column widths (shared through the settings).
+    columns: settings::ColumnWidths,
+    /// Mutable revisions with conflicts, in the whole repository.
+    conflicts: Vec<RevHeader>,
+    conflicts_task: Option<Task<()>>,
+    conflicts_loading: bool,
+    /// When rows, refs and age labels were last derived from `rows`.
+    derived_at: std::time::Instant,
+    /// A column being resized: which, where the drag started, its width then.
+    column_drag: Option<(log_list::Column, gpui_kit::Pixels, f32)>,
+    /// Where the pointer went down on a column handle.
+    column_press: Option<gpui_kit::Pixels>,
 }
 
 impl RepoView {
@@ -364,6 +406,14 @@ impl RepoView {
             avatars: Rc::default(),
             pulls: None,
             pending_commit_select: None,
+            focus: None,
+            columns: settings::get(cx).display.columns,
+            conflicts: Vec::new(),
+            conflicts_task: None,
+            conflicts_loading: false,
+            derived_at: std::time::Instant::now(),
+            column_drag: None,
+            column_press: None,
         };
         view.wd = workspace.clone();
         view.initial_query = initial_query.clone();
@@ -378,6 +428,7 @@ impl RepoView {
             && !self.loading_more
             && self.busy.is_empty()
             && !self.pulls_fetching()
+            && !self.conflicts_loading
     }
 
     /// Moves keyboard focus to the revision list (e.g. when its tab is selected).
@@ -388,6 +439,16 @@ impl RepoView {
             self.log_focus.focus(window, cx);
         } else {
             self.root_focus.focus(window, cx);
+        }
+    }
+
+    /// Where context menu commands start from: the revision list, or the full
+    /// view while it replaces the list (a handle that is not on screen
+    /// would swallow the command).
+    pub(super) fn command_focus(&self) -> FocusHandle {
+        match &self.focus {
+            Some(focus) => focus.handle.clone(),
+            None => self.log_focus.clone(),
         }
     }
 
@@ -479,7 +540,11 @@ impl RepoView {
                         view.replace_rows(page, true, cx);
                         view.start_pulls(&remote_urls, cx);
                         view.state = LoadState::Ready;
-                        view.log_focus.focus(window, cx);
+                        // only the tab that has the keyboard takes it to its list; a
+                        // tab loading in the background must not steal it
+                        if view.root_focus.is_focused(window) {
+                            view.log_focus.focus(window, cx);
+                        }
                         cx.emit(RepoViewEvent::Loaded);
                     }
                     Err(err) => {
@@ -621,6 +686,11 @@ impl RepoView {
                     }
                     view.reload(cx);
                 }
+                // nothing changed, but the age labels move on with the clock
+                Ok(None) if view.derived_at.elapsed() >= AGE_REFRESH => {
+                    view.rebuild_derived();
+                    cx.notify();
+                }
                 Ok(None) => {}
                 Err(err) => log::warn!("snapshot failed: {err:#}"),
             });
@@ -703,12 +773,18 @@ impl RepoView {
                 self.select_file(None, cx);
             }
         }
+        self.refresh_focus(cx);
+        self.refresh_conflicts(cx);
     }
 
     fn rebuild_derived(&mut self) {
         let now = Local::now();
+        self.derived_at = std::time::Instant::now();
         self.graph = Rc::new(Graph::new(&self.rows));
-        self.row_data = Rc::new(self.rows.iter().map(|row| RowData::new(row, now)).collect());
+        let mut row_data: Vec<RowData> =
+            self.rows.iter().map(|row| RowData::new(row, now)).collect();
+        mark_bucket_starts(&mut row_data);
+        self.row_data = Rc::new(row_data);
         self.refs = self
             .rows
             .iter()
@@ -783,9 +859,17 @@ impl RepoView {
                 view.detail_loading = false;
                 match result {
                     Ok(Some(detail)) => {
-                        let has_files = !detail.files.is_empty();
+                        // after a reload, stay on the file that was selected
+                        let previous = view
+                            .selected_file
+                            .and_then(|ix| view.detail.as_ref()?.files.get(ix))
+                            .map(|file| file.path.clone());
+                        let keep = previous.and_then(|path| {
+                            detail.files.iter().position(|file| file.path == path)
+                        });
+                        let first = (!detail.files.is_empty()).then_some(0);
                         view.detail = Some(detail);
-                        view.select_file(if has_files { Some(0) } else { None }, cx);
+                        view.select_file(keep.or(first), cx);
                     }
                     Ok(None) => {
                         view.detail = None;
@@ -846,6 +930,10 @@ impl RepoView {
         let current = settings::get(cx);
         let mode = diff_mode_of(current.display.diff);
         let github = current.display.github;
+        // a drag in this tab keeps its own widths until it is dropped
+        if self.column_drag.is_none() {
+            self.columns = current.display.columns;
+        }
         self.show_diff_mode(mode, cx);
         if !github {
             // no more requests to GitHub, and no pictures from it
@@ -906,6 +994,10 @@ impl RepoView {
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_description(window, cx);
+        // a resize released outside the window never reaches the drop handler
+        if self.column_drag.is_some() && !cx.has_active_drag() {
+            cx.defer_in(window, |view, _, cx| view.finish_column_resize(cx));
+        }
 
         v_flex()
             .id("repo")
@@ -941,6 +1033,39 @@ impl Render for RepoView {
             .on_action(
                 cx.listener(|view, _: &actions::ShowAllBranches, window, cx| {
                     view.set_log_scope(true, window, cx)
+                }),
+            )
+            // a column resize ends wherever the pointer is let go in the tab
+            .on_drop(
+                cx.listener(|view, _: &log_list::ColumnResize, _, cx| {
+                    view.finish_column_resize(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::SwitchWorkspace, window, cx| {
+                    view.open_workspace_picker(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::SwitchBookmark, window, cx| {
+                    view.open_bookmark_picker(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|view, _: &actions::NextConflict, window, cx| {
+                view.select_next_conflict(window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &actions::OpenFileDiff, window, cx| {
+                view.open_focus(FocusTab::Diff, false, window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &actions::OpenFileView, window, cx| {
+                view.open_focus(FocusTab::File, false, window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &actions::OpenFileBlame, window, cx| {
+                view.open_focus(FocusTab::Blame, false, window, cx)
+            }))
+            .on_action(
+                cx.listener(|view, _: &actions::OpenFileHistory, window, cx| {
+                    view.open_focus(FocusTab::Diff, true, window, cx)
                 }),
             )
             .on_action(
@@ -1161,6 +1286,8 @@ pub enum RepoViewEvent {
     ScopeChanged {
         all: bool,
     },
+    /// The workspace picker chose another workspace (open or recent).
+    OpenWorkspace(PathBuf),
 }
 
 impl gpui_kit::EventEmitter<RepoViewEvent> for RepoView {}

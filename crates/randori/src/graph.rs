@@ -30,9 +30,9 @@ const ROW_HEIGHT: f32 = 34.;
 const LANE_WIDTH: f32 = 20.;
 /// Space before the first lane and after the last.
 const LEADING: f32 = 6.;
-/// Lanes shown before the graph column stops growing. Deeper lanes are
-/// clipped, so a long history of side branches does not push the
-/// description off screen.
+/// Lanes the graph column fits by default; deeper lanes are clipped until
+/// the column is dragged wider, so a long history of side branches does not
+/// push the description off screen.
 const MAX_LANES: usize = 6;
 /// Author avatar on a node, including its lane-coloured ring.
 const AVATAR: f32 = 18.;
@@ -175,7 +175,7 @@ impl Graph {
         (self.max_column + 1).min(MAX_LANES)
     }
 
-    /// Width of the graph column: every lane up to [`MAX_LANES`].
+    /// Default width of the graph column: every lane up to [`MAX_LANES`].
     pub fn width(&self) -> Rems {
         rems((LEADING * 2. + LANE_WIDTH * self.lanes() as f32) / BASE_REM)
     }
@@ -189,18 +189,20 @@ impl Graph {
     /// Horizontal centre of row `row`'s node, from the graph's left edge.
     pub fn node_x(&self, row: usize) -> Rems {
         let column = self.nodes.get(row).map_or(0, |node| node.column);
-        rems(lane_x(column.min(MAX_LANES)) / BASE_REM)
+        rems(lane_x(column) / BASE_REM)
     }
 
     /// Element that paints row `row` of the graph: the edges crossing it,
     /// a connector to the branch / tag column when `has_refs`, and the node
     /// (the author's avatar, `avatar_url` when known, initials otherwise).
+    #[allow(clippy::too_many_arguments)]
     pub fn row_element(
         &self,
         row: usize,
         author: SharedString,
         avatar_url: Option<SharedString>,
         has_refs: bool,
+        width: Rems,
         rem: Pixels,
         cx: &App,
     ) -> AnyElement {
@@ -216,7 +218,11 @@ impl Graph {
                 (self.edges[ix], color)
             })
             .collect();
-        let node = self.nodes.get(row).copied();
+        // a commit with no author (the root) is a plain dot, like a merge
+        let node = self.nodes.get(row).copied().map(|mut node| {
+            node.merge |= author.is_empty();
+            node
+        });
         let lane = self.node_color(row, cx);
         let primary = theme.primary;
         let background = theme.background;
@@ -255,7 +261,6 @@ impl Graph {
 
         let avatar = node
             .filter(|node| !node.merge && node.kind != NodeKind::WorkingCopy)
-            .filter(|node| node.column < MAX_LANES)
             .map(|node| {
                 let ring = match node.kind {
                     NodeKind::Conflict => theme.danger,
@@ -273,7 +278,7 @@ impl Graph {
         div()
             .relative()
             .flex_none()
-            .w(self.width())
+            .w(width)
             .h(row_height())
             .overflow_hidden()
             .child(lines)

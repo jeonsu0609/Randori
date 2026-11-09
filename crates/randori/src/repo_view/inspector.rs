@@ -309,12 +309,23 @@ impl RepoView {
                                     ),
                             ),
                     )
-                    .on_click(cx.listener(move |view, _, _, cx| view.select_file(Some(ix), cx)))
+                    // a double click opens the file's full view, as in GitKraken
+                    .on_click(
+                        cx.listener(move |view, event: &gpui_kit::ClickEvent, window, cx| {
+                            view.select_file(Some(ix), cx);
+                            if view.focus.is_some() {
+                                // the full view follows the file picked here
+                                view.retarget_focus(cx);
+                            } else if event.click_count() >= 2 {
+                                view.open_focus(FocusTab::Diff, false, window, cx);
+                            }
+                        }),
+                    )
                     .on_mouse_down(
                         gpui_kit::MouseButton::Right,
                         cx.listener(move |view, _, window, cx| {
                             view.select_file(Some(ix), cx);
-                            view.log_focus.focus(window, cx);
+                            view.command_focus().focus(window, cx);
                         }),
                     )
                     .on_drag(
@@ -331,7 +342,7 @@ impl RepoView {
                         },
                     )
                     .context_menu({
-                        let focus = self.log_focus.clone();
+                        let focus = self.command_focus();
                         let has_conflict = file.has_conflict;
                         let immutable = header.is_immutable;
                         move |menu, _, _| file_menu(menu, has_conflict, immutable, focus.clone())
@@ -452,7 +463,19 @@ impl RepoView {
                             }))
                             .child("Unified")
                             .child("Split"),
-                    ),
+                    )
+                    .when(file.is_some(), |this| {
+                        this.child(
+                            Button::new("open-full-view")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Maximize2)
+                                .tooltip("Full view: diff, file, blame and history (⇧⌘D)")
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.open_focus(FocusTab::Diff, false, window, cx)
+                                })),
+                        )
+                    }),
             )
             .child(body)
             .into_any_element()

@@ -27,13 +27,23 @@ you move, split and recombine freely. That is how jj treats history.
 | Region | What it shows |
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
-| Toolbar | Workspace path, **Mine / All branches**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
+| Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
 | Rail | Revisions, Open, the command palette (`⌘K`) and Settings (below) |
 | Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
-| Revisions | A branch / tag column, the commit graph and fixed columns: change id, description, author, relative time. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
-| Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights |
+| Revisions | Branch / tag, graph, change id, description and author columns, GitKraken style: drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. Instead of a time on every row, a hairline and a label ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
+| Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Double-click a file (or `⇧⌘D`) for its full view |
 | Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Status bar | Worker state, the running jj operation and its progress, the last operation, the working copy and the number of loaded revisions |
+
+The **workspace** switcher lists the open tabs, then recently opened
+workspaces (`gg.ui.recent-workspaces`, the list GG keeps; off with
+`gg.ui.track-recent-workspaces = false`), then **Open…**. The **bookmark**
+switcher shows the bookmark nearest to the working copy; jj has no current
+branch. Picking another bookmark (`⇧⌘B`) starts a new change on it, `jj new
+<bookmark>`, the closest jj has to a checkout. The conflict count is every
+mutable revision with a conflict (`conflicts() & mutable()`), loaded or not;
+clicking it goes to the next one, switching to **All branches** when it is not
+loaded.
 
 **Mine** is jj's own log (`revsets.log`): your changes that are not in trunk
 yet, and trunk. Changes on other people's branches are immutable to jj and stay
@@ -72,6 +82,22 @@ operation log, and git credentials are asked for when a remote needs them.
 | Push | `⌘⇧P` pushes the selection's bookmarks (an untracked bookmark goes to `origin`, or the only remote) |
 | Fetch | `⌘⇧F` fetches every remote |
 | Undo / redo | `⌘Z` / `⌘⇧Z` in the revision list |
+
+### Full file view
+
+Double-clicking a changed file, the expand button above the diff, `⇧⌘D`, or
+**Open full view**, **Blame** and **File history** in the file's context menu
+open the file on its own, in the place of the revisions and the diff (`Esc`
+goes back):
+
+| Part | What it shows |
+| --- | --- |
+| Diff | The file's diff in that revision, unified or split. Under every hunk, **Squash into parent** and **Discard hunk** (the parent's lines back; `⌘Z` undoes). `⌥↑` `⌥↓` move between changes |
+| File | The whole file as it is in that revision, with line numbers |
+| Blame | Each line with the revision that last changed it, the way `jj file annotate` finds it; click a revision to see its diff of the file. It is computed on a load of its own, so the tab stays usable while a long history is walked |
+| History | Every revision that changed the file among the ancestors of the one you opened, in the side panel's place; pick one to see the file as it was there |
+
+![The file history](doc/randori/file-history.png)
 
 ### Settings
 
@@ -134,6 +160,9 @@ sign in (`gh auth login`); nothing else needs it.
 | `⌘Q` (`Ctrl+Q`) | Anywhere | Quit (asks first when descriptions are unsaved). Closing the window quits too |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Window | Next / previous tab |
 | `⌘K` (`Ctrl+K`) | Window | Command palette |
+| `⇧⌘D` (`Ctrl+Shift+D`) | Workspace | Full view of the selected file |
+| `⇧⌘B` (`Ctrl+Shift+B`) | Workspace | Start a new change on a bookmark |
+| `⌥↑` / `⌥↓`, `[` / `]`, `Esc` | Full view | Previous / next change, previous / next file, back to the revisions |
 
 On Linux and Windows, `⌘` is `Ctrl`. On macOS the menu bar has the same
 commands (Randori, File, View, Window), with Hide (`⌘H`) and Services.
@@ -213,7 +242,7 @@ here** (colocated with git when the folder already is one) and **Try again**
 | `--check` | Open the workspace through the worker, print a summary and exit (no window) |
 | `--select-row <n>` | Select the n-th log row once loaded |
 | `--screenshot <png>` | Render the first screen offscreen and exit; needs `--features screenshot` |
-| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does |
+| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points |
 
 The screenshots above were produced with:
 
@@ -239,6 +268,8 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                    ops          jj mutations (new, describe, abandon, push, rebase, …)
                    pick         choosing a target revision from the keyboard
                    pulls        the pull requests section
+                   focus        a file's full view: diff, file, blame, history
+                   switcher     workspace and bookmark switchers, conflict count
                    dnd, menus   drag payloads, context menus
                  graph          graph lanes, branch colours and avatars per virtual-list row
                  github         GitHub remotes, token lookup, pull request and avatar query

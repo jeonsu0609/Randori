@@ -40,6 +40,11 @@ pub(super) struct RowData {
     /// For the author's avatar; lowercase, as avatars are keyed.
     pub(super) author_email: SharedString,
     pub(super) time: SharedString,
+    /// The coarse age the time separators group by (see [`time_bucket`]).
+    pub(super) bucket: u32,
+    pub(super) bucket_label: SharedString,
+    /// First row of its age group in the log: draws the separator and label.
+    pub(super) bucket_start: bool,
     pub(super) refs: Vec<RefChip>,
     pub(super) is_working_copy: bool,
 }
@@ -69,7 +74,11 @@ pub(super) struct Detail {
 
 impl RowData {
     pub(super) fn new(row: &LogRow, now: DateTime<Local>) -> Self {
-        let rev = &row.revision;
+        Self::from_header(&row.revision, now)
+    }
+
+    /// A row for a revision outside the log (the file history).
+    pub(super) fn from_header(rev: &RevHeader, now: DateTime<Local>) -> Self {
         Self {
             id: rev.id.clone(),
             change_prefix: rev.id.change.prefix.clone().into(),
@@ -90,6 +99,9 @@ impl RowData {
             author: rev.author.name.clone().into(),
             author_email: rev.author.email.to_ascii_lowercase().into(),
             time: relative_time(rev.author.timestamp, now).into(),
+            bucket: time_bucket(rev.author.timestamp, now).0,
+            bucket_label: time_bucket(rev.author.timestamp, now).1.into(),
+            bucket_start: false,
             refs: ref_chips(&rev.refs),
             is_working_copy: rev.is_working_copy,
         }
@@ -300,9 +312,85 @@ pub(super) fn relative_time(timestamp: DateTime<Local>, now: DateTime<Local>) ->
     }
 }
 
+/// The age group of `timestamp`, GitKraken style: each hour up to a day, then
+/// days, weeks, months and years. Returns an ordering key (equal keys are one
+/// group) and the label ("3 hours ago", "a month ago").
+pub(super) fn time_bucket(timestamp: DateTime<Local>, now: DateTime<Local>) -> (u32, String) {
+    let delta = now.signed_duration_since(timestamp);
+    let hours = delta.num_hours();
+    let days = delta.num_days();
+    let plural = |n: i64, unit: &str| {
+        if n == 1 {
+            format!("1 {unit} ago")
+        } else {
+            format!("{n} {unit}s ago")
+        }
+    };
+    // a clock ahead of this one counts as now
+    match () {
+        _ if hours < 1 => (0, "just now".to_owned()),
+        _ if hours < 24 => (100 + hours as u32, plural(hours, "hour")),
+        _ if days < 7 => (200 + days as u32, plural(days, "day")),
+        _ if days < 30 => (300 + (days / 7) as u32, plural(days / 7, "week")),
+        _ if days < 365 => {
+            let months = (days / 30).clamp(1, 11);
+            let label = if months == 1 {
+                "a month ago".to_owned()
+            } else {
+                format!("{months} months ago")
+            };
+            (400 + months as u32, label)
+        }
+        _ => {
+            let years = days / 365;
+            let label = if years == 1 {
+                "a year ago".to_owned()
+            } else {
+                format!("{years} years ago")
+            };
+            (500 + years as u32, label)
+        }
+    }
+}
+
+/// Marks the first row of every age group (and the first row), where the
+/// log draws a separator.
+pub(super) fn mark_bucket_starts(rows: &mut [RowData]) {
+    let mut previous = None;
+    for row in rows {
+        row.bucket_start = previous != Some(row.bucket);
+        previous = Some(row.bucket);
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
-    use super::{StoreRef, ref_chips, unified_start};
+    use super::{StoreRef, ref_chips, time_bucket, unified_start};
+
+    #[test]
+    fn time_buckets_grow_with_age() {
+        use chrono::{Duration, Local};
+        let now = Local::now();
+        let label = |ago: Duration| time_bucket(now - ago, now).1;
+        assert_eq!(label(Duration::minutes(5)), "just now");
+        assert_eq!(label(Duration::minutes(70)), "1 hour ago");
+        assert_eq!(label(Duration::hours(5)), "5 hours ago");
+        assert_eq!(label(Duration::days(1)), "1 day ago");
+        assert_eq!(label(Duration::days(3)), "3 days ago");
+        assert_eq!(label(Duration::days(8)), "1 week ago");
+        assert_eq!(label(Duration::days(28)), "4 weeks ago");
+        assert_eq!(label(Duration::days(40)), "a month ago");
+        assert_eq!(label(Duration::days(200)), "6 months ago");
+        assert_eq!(label(Duration::days(400)), "a year ago");
+        assert_eq!(label(Duration::days(800)), "2 years ago");
+        // a timestamp from a clock ahead of ours
+        assert_eq!(label(Duration::hours(-2)), "just now");
+        // two times in one group share the key
+        assert_eq!(
+            time_bucket(now - Duration::days(9), now).0,
+            time_bucket(now - Duration::days(12), now).0
+        );
+    }
 
     /// `remotes` is how many remotes the repository has.
     fn local(is_synced: bool, tracking: &[&str], remotes: usize) -> StoreRef {

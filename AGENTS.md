@@ -42,11 +42,25 @@ thread-safe). The session progresses through states: `WorkerSession` →
   - `ops.rs`: every jj mutation the UI runs, and how results are applied
   - `pick.rs`: pick mode, choosing a target revision from the keyboard
   - `pulls.rs`: the pull requests section, its background refresh, and the avatars it brings back
+  - `switcher.rs`: the toolbar's workspace picker (open tabs from the `app_view::OpenTabs` global, then `gg.ui.recent-workspaces`) and bookmark picker (`query_headers("bookmarks() | remote_bookmarks()")`; choosing one runs `CreateRevision`, i.e. `jj new <bookmark>`), and the conflict count. Both pickers are `Command` dialogs like the palette
+  - `focus.rs`: the full view of one file (`FileFocus`), in place of the revisions and the diff: Diff with per-hunk `CopyHunk` (discard) and `MoveHunk` (squash) under every hunk via `Diff::annotations`, File (`DiffFile::unchanged`), Blame, and History in the side panel's place. After a reload it follows the shown change to its rewritten commit (`refresh_focus`)
   - `dnd.rs`, `menus.rs`: drag payloads, context menus
 - **`crates/randori/src/graph.rs`**: draws the worker's graph layout per virtual-list row. `branch_colors` gives each branch one palette colour (a node inherits the child above it in its lane; a lane change takes the right-hand endpoint's colour); nodes are author avatars (`graph::avatar`).
 - **`crates/randori/src/settings.rs`**: the `Settings` GPUI global every view reads and observes (`cx.observe_global::<Settings>`), so changes apply to open tabs at once. Display settings are saved in the session; `gg.queries.auto-snapshot` and `gg.ui.mark-unpushed-bookmarks` are written to the jj user config with `gg_lib::config::write_user_setting`. Workers keep the config they were loaded with, so the UI passes the current choice along (`Worker::snapshot(force)`) instead of relying on the worker's copy.
 - **`crates/randori/src/github.rs`**: GitHub remotes (`GitHubRepo::pick`), the token lookup (`GH_TOKEN` / `GITHUB_TOKEN`, then `gh auth token`; never stored or logged), the one GraphQL query and its parser. HTTP goes through GPUI's client, set in `main.rs` (`reqwest_client`), which also loads avatar images.
 - **`crates/randori/src/assets.rs`**: the icons the app embeds. Only listed icons ship; a new `IconName::Foo` must be added to `icon_assets!` or it draws nothing (the `every_used_icon_is_embedded` test catches this, and needs new submodules added to its file list).
+
+## File Queries
+
+`src/worker/queries.rs` answers three per-file queries for the full view:
+`query_file` (contents at a revision, conflicts with git markers),
+`query_annotation` (jj-lib's `FileAnnotator` over `all()`, like `jj file
+annotate`, grouped into blocks) and `query_file_history` (`::<rev> &
+files(root-file:"…")`, newest first). Files over 8 MiB are refused. The UI
+runs blame through `gg_lib::worker::annotate_apart`, which loads the
+workspace on the calling thread without snapshotting, so the tab's worker is
+not held up by a long annotate. `query_headers` evaluates `immutable_heads()`
+once for all the headers it returns.
 
 ## Adding New Mutations
 
@@ -67,6 +81,12 @@ The test repository (`res/test-repo.zip`) contains pre-defined commits. Key test
 - `conflict_bookmark()` - has conflict in b.txt
 - `resolve_conflict()` - resolved the conflict
 
+Tests point `XDG_CONFIG_HOME` at a per-process temporary directory
+(`isolate_user_config`, called by `mkrepo`): jj 0.46 migrates the test
+repository's legacy repo config to `<config>/jj/repos/<id>`, which otherwise
+left one directory in the developer's own jj config per test. Anything that
+changes `XDG_CONFIG_HOME` must put the previous value back (`SetVarGuard`).
+
 Test patterns:
 - `mkid("change_id", "commit_id")` to reference commits
 - `mutation.execute_unboxed(&mut ws).await?` to run mutations
@@ -84,10 +104,11 @@ cargo run -p randori --features screenshot -- \
   --screenshot /tmp/shot.png /path/to/workspace
 ```
 
-`--keys` takes keystrokes and `action:randori::Name` (runs an action the way a
-menu item does). Screenshot runs never read or write the saved session. Use
+`--keys` takes keystrokes, `action:randori::Name` (runs an action the way a
+menu item does) and pointer steps in window points: `click:X;Y`,
+`dblclick:X;Y` and `drag:X1;Y1;X2;Y2` (`;` because `,` separates the steps).
+Screenshots are at 2x, so a point is half a screenshot pixel. Screenshot runs never read or write the saved session. Use
 throwaway workspaces under a placeholder identity (`JJ_USER`, `JJ_EMAIL`).
-Pointer gestures (drag and drop, diff line selection) cannot be driven this way.
 
 ## JJ Version Coupling
 

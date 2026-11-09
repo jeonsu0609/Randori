@@ -245,8 +245,10 @@ impl RandoriApp {
         }
         app.active = active.min(app.tabs.len().saturating_sub(1));
         app.save_session();
-        if app.tabs.is_empty() {
-            app.focus.focus(window, cx);
+        // opening each tab focused it in turn; give the keyboard to the selected one
+        match app.tabs.get(app.active).map(|tab| tab.view.clone()) {
+            Some(view) => view.update(cx, |view, cx| view.focus_log(window, cx)),
+            None => app.focus.focus(window, cx),
         }
         app
     }
@@ -284,17 +286,40 @@ impl RandoriApp {
         let (worker, events) = Worker::spawn(Some(path.clone()), settings)?;
         let view =
             cx.new(|cx| RepoView::new(worker, events, Some(path.clone()), revset, window, cx));
-        let _events = cx.subscribe(&view, |app, view, event: &RepoViewEvent, _| {
-            match event {
-                RepoViewEvent::Loaded | RepoViewEvent::LoadFailed => {
-                    if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.view == view) {
-                        tab.failed = matches!(event, RepoViewEvent::LoadFailed);
+        let _events = cx.subscribe_in(
+            &view,
+            window,
+            |app, view, event: &RepoViewEvent, window, cx| {
+                match event {
+                    RepoViewEvent::Loaded | RepoViewEvent::LoadFailed => {
+                        let loaded = matches!(event, RepoViewEvent::Loaded);
+                        let path = app
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.view == *view)
+                            .map(|tab| {
+                                tab.failed = !loaded;
+                                tab.path.clone()
+                            });
+                        // screenshots must not change the user's recent list
+                        if let Some(path) = path.filter(|_| loaded && app.persist) {
+                            settings::remember_workspace(cx, &path);
+                        }
+                    }
+                    RepoViewEvent::ScopeChanged { all } => app.all_branches = *all,
+                    RepoViewEvent::OpenWorkspace(path) => {
+                        if let Err(err) = app.open_tab(path.clone(), None, window, cx) {
+                            window.push_notification(
+                                Notification::error(format!("{err:#}"))
+                                    .title("Could not open the workspace"),
+                                cx,
+                            );
+                        }
                     }
                 }
-                RepoViewEvent::ScopeChanged { all } => app.all_branches = *all,
-            }
-            app.save_session();
-        });
+                app.save_session();
+            },
+        );
         self.tabs.push(RepoTab {
             title: tab_title(&path),
             path,
@@ -303,6 +328,7 @@ impl RandoriApp {
             _events,
         });
         let ix = self.tabs.len() - 1;
+        self.publish_tabs(cx);
         self.activate(ix, window, cx);
         Ok(ix)
     }
@@ -330,6 +356,7 @@ impl RandoriApp {
         }
         // Dropping the view drops its worker handle; the worker thread then ends.
         self.tabs.remove(ix);
+        self.publish_tabs(cx);
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
         } else if ix < self.active {
@@ -447,6 +474,41 @@ impl RandoriApp {
                     "Show all branches",
                     IconName::GitBranch,
                     Box::new(repo::ShowAllBranches),
+                ),
+                (
+                    "Switch workspace…",
+                    IconName::FolderGit2,
+                    Box::new(repo::SwitchWorkspace),
+                ),
+                (
+                    "Start a new change on a bookmark…",
+                    IconName::GitBranch,
+                    Box::new(repo::SwitchBookmark),
+                ),
+                (
+                    "Go to the next conflict",
+                    IconName::TriangleAlert,
+                    Box::new(repo::NextConflict),
+                ),
+                (
+                    "Open the file's full view",
+                    IconName::Maximize2,
+                    Box::new(repo::OpenFileDiff),
+                ),
+                (
+                    "Blame the file",
+                    IconName::FileText,
+                    Box::new(repo::OpenFileBlame),
+                ),
+                (
+                    "File history",
+                    IconName::GitGraph,
+                    Box::new(repo::OpenFileHistory),
+                ),
+                (
+                    "Show the whole file",
+                    IconName::FileText,
+                    Box::new(repo::OpenFileView),
                 ),
                 (
                     "Refresh pull requests",
@@ -685,6 +747,16 @@ impl RandoriApp {
         .detach();
     }
 
+    /// Tells the tabs which workspaces are open, for their workspace picker.
+    fn publish_tabs(&self, cx: &mut gpui_kit::App) {
+        cx.set_global(OpenTabs(
+            self.tabs
+                .iter()
+                .map(|tab| (tab.path.clone(), tab.title.clone()))
+                .collect(),
+        ));
+    }
+
     fn save_session(&self) {
         if !self.persist {
             return;
@@ -880,6 +952,12 @@ impl Render for RandoriApp {
             )
     }
 }
+
+/// Workspaces open in tabs, as `(root, title)`: the toolbar's workspace
+/// picker lists them.
+pub struct OpenTabs(pub Vec<(PathBuf, SharedString)>);
+
+impl gpui_kit::Global for OpenTabs {}
 
 /// The Settings menu on the rail. Display settings apply at once; the jj ones
 /// are written to the user's jj config (the same keys GG and `jj` read).

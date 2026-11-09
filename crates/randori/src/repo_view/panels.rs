@@ -8,12 +8,8 @@ impl RepoView {
     /// The repository toolbar under the tab strip: panel toggle, workspace,
     /// revset query and the repository commands.
     pub(super) fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let switchers = self.render_switchers(cx);
         let theme = cx.theme();
-        let path = self
-            .workspace
-            .as_ref()
-            .map(|ws| ws.path.clone())
-            .unwrap_or_default();
         let ready = matches!(self.state, LoadState::Ready);
         let can_redo = self.workspace.as_ref().is_some_and(|ws| ws.can_redo);
         let has_selection = self.selected.is_some();
@@ -40,15 +36,7 @@ impl RepoView {
                         cx.notify();
                     })),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .px_1()
-                    .text_xs()
-                    .truncate()
-                    .text_color(theme.muted_foreground)
-                    .child(path),
-            )
+            .child(switchers)
             .child(div().flex_1())
             .when(ready, |bar| {
                 // A typed revset is neither scope, so neither tab is selected.
@@ -296,7 +284,7 @@ impl RepoView {
                                 gpui_kit::MouseButton::Right,
                                 cx.listener(move |view, _, window, cx| {
                                     view.ref_target = Some(store.clone());
-                                    view.log_focus.focus(window, cx);
+                                    view.command_focus().focus(window, cx);
                                 }),
                             )
                             .on_drag(
@@ -312,7 +300,7 @@ impl RepoView {
                                 },
                             )
                             .context_menu({
-                                let focus = self.log_focus.clone();
+                                let focus = self.command_focus();
                                 move |menu, _, _| ref_menu(menu, &menu_ref, focus.clone())
                             })
                     })),
@@ -475,23 +463,35 @@ impl RepoView {
                             resizable_panel()
                                 .size(rem * 18.)
                                 .size_range(rem * 14. ..rem * 28.)
-                                .child(self.render_refs_panel(cx)),
+                                // the full view's file history takes the side panel's place,
+                                // as GitKraken's does; the panel layout stays as it was
+                                .child(match &self.focus {
+                                    Some(focus) if focus.show_history => {
+                                        self.render_history(focus, cx)
+                                    }
+                                    _ => self.render_refs_panel(cx),
+                                }),
                         )
                     })
                     .child(
                         resizable_panel().size_range(rem * 30. ..rem * 200.).child(
-                            v_resizable("center")
-                                .child(
-                                    resizable_panel()
-                                        .size(rem * 26.)
-                                        .size_range(rem * 10. ..rem * 200.)
-                                        .child(self.render_log(cx)),
-                                )
-                                .child(
-                                    resizable_panel()
-                                        .size_range(rem * 8. ..rem * 200.)
-                                        .child(self.render_changes(cx)),
-                                ),
+                            match &self.focus {
+                                // the full view of one file takes the revisions' place
+                                Some(focus) => self.render_focus(focus, cx),
+                                None => v_resizable("center")
+                                    .child(
+                                        resizable_panel()
+                                            .size(rem * 26.)
+                                            .size_range(rem * 10. ..rem * 200.)
+                                            .child(self.render_log(cx)),
+                                    )
+                                    .child(
+                                        resizable_panel()
+                                            .size_range(rem * 8. ..rem * 200.)
+                                            .child(self.render_changes(cx)),
+                                    )
+                                    .into_any_element(),
+                            },
                         ),
                     )
                     .child(

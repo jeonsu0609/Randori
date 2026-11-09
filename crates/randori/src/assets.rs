@@ -13,6 +13,7 @@ gpui_kit::assets::icon_assets!(pub AppIcons, [
     ChevronDown,
     ChevronLeft,
     ChevronRight,
+    ChevronUp,
     CircleCheck,
     CircleDot,
     CircleX,
@@ -23,9 +24,11 @@ gpui_kit::assets::icon_assets!(pub AppIcons, [
     File,
     FileDiff,
     FileInput,
+    FileText,
     FileX,
     FolderGit2,
     FolderOpen,
+    Maximize2,
     GitBranch,
     GitCommitHorizontal,
     GitGraph,
@@ -43,6 +46,7 @@ gpui_kit::assets::icon_assets!(pub AppIcons, [
     Tag,
     TextCursorInput,
     Trash,
+    TriangleAlert,
     Undo,
     Undo2,
     Upload,
@@ -81,6 +85,7 @@ mod tests {
             include_str!("app_view.rs"),
             include_str!("repo_view.rs"),
             include_str!("repo_view/dnd.rs"),
+            include_str!("repo_view/focus.rs"),
             include_str!("repo_view/inspector.rs"),
             include_str!("repo_view/log_list.rs"),
             include_str!("repo_view/menus.rs"),
@@ -89,6 +94,7 @@ mod tests {
             include_str!("repo_view/panels.rs"),
             include_str!("repo_view/pick.rs"),
             include_str!("repo_view/pulls.rs"),
+            include_str!("repo_view/switcher.rs"),
         );
         let mut missing = Vec::new();
         for (ix, _) in source.match_indices("IconName::") {

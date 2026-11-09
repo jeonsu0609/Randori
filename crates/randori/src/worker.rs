@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::mpsc as async_mpsc;
 use gg_lib::messages::mutations::{MutationOptions, MutationResult};
-use gg_lib::messages::queries::{LogPage, RevsResult};
-use gg_lib::messages::{RepoConfig, RepoStatus, RevSet};
+use gg_lib::messages::queries::{FileAnnotation, FileContent, LogPage, RevsResult};
+use gg_lib::messages::{RepoConfig, RepoStatus, RevHeader, RevId, RevSet, TreePath};
 use gg_lib::worker::{EventSink, Mutation, Session as _, SessionEvent, WorkerSession};
 use jj_lib::settings::UserSettings;
 
@@ -180,6 +180,36 @@ impl Worker {
     /// Loads headers, parents and the combined diff for a revision set.
     pub fn query_revisions(&self, set: RevSet) -> Result<RevsResult> {
         self.call(|tx| SessionEvent::QueryRevisions { tx, set })?
+    }
+
+    /// Headers of the first `limit` revisions of `revset`, newest first.
+    pub fn query_headers(&self, revset: String, limit: usize) -> Result<Vec<RevHeader>> {
+        self.call(|tx| SessionEvent::QueryHeaders { tx, revset, limit })?
+    }
+
+    /// One file as it is in revision `id`.
+    pub fn query_file(&self, id: RevId, path: TreePath) -> Result<FileContent> {
+        self.call(|tx| SessionEvent::QueryFile { tx, id, path })?
+    }
+
+    /// The revision that last changed each line of a file in revision `id`.
+    pub fn query_annotation(&self, id: RevId, path: TreePath) -> Result<FileAnnotation> {
+        self.call(|tx| SessionEvent::QueryAnnotation { tx, id, path })?
+    }
+
+    /// Revisions that changed a file, newest first, among the ancestors of `id`.
+    pub fn query_file_history(
+        &self,
+        id: RevId,
+        path: TreePath,
+        limit: usize,
+    ) -> Result<Vec<RevHeader>> {
+        self.call(|tx| SessionEvent::QueryFileHistory {
+            tx,
+            id,
+            path,
+            limit,
+        })?
     }
 
     /// Runs one repository mutation (new, describe, abandon, push, undo, …).

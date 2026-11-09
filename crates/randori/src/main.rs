@@ -184,6 +184,18 @@ fn main() -> Result<()> {
                     for key in keys {
                         // `action:<namespace::Name>` runs an action the way a menu item
                         // does, through the focused element.
+                        // `click:X;Y`, `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` press the
+                        // mouse at window points, the way a pointer would (`;`, since
+                        // `,` separates the steps)
+                        if let Some(events) = pointer_events(&key) {
+                            for event in events {
+                                let _ = window.update(cx, |_, window, cx| {
+                                    window.dispatch_event(event, cx);
+                                });
+                                wait_until_settled(cx, &app).await;
+                            }
+                            continue;
+                        }
                         if let Some(name) = key.strip_prefix("action:") {
                             let _ = window.update(cx, |_, window, cx| {
                                 match cx.build_action(name, None) {
@@ -233,6 +245,84 @@ fn main() -> Result<()> {
 }
 
 /// Waits until the selected tab has loaded (or there is no tab).
+/// Mouse events for a `--keys` pointer step, in window points.
+#[cfg(feature = "screenshot")]
+fn pointer_events(key: &str) -> Option<Vec<gpui_kit::PlatformInput>> {
+    use gpui_kit::{
+        Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, point,
+        px,
+    };
+    let (kind, coords) = key.split_once(':')?;
+    let numbers: Vec<f32> = coords
+        .split(';')
+        .map(|n| n.trim().parse().ok())
+        .collect::<Option<_>>()?;
+    let at = |x: f32, y: f32| point(px(x), px(y));
+    let down_with = |button, position, click_count| {
+        PlatformInput::MouseDown(MouseDownEvent {
+            button,
+            position,
+            modifiers: Modifiers::default(),
+            click_count,
+            first_mouse: false,
+        })
+    };
+    let down = |position, click_count| down_with(MouseButton::Left, position, click_count);
+    let up_with = |button, position, click_count| {
+        PlatformInput::MouseUp(MouseUpEvent {
+            button,
+            position,
+            modifiers: Modifiers::default(),
+            click_count,
+        })
+    };
+    let up = |position, click_count| up_with(MouseButton::Left, position, click_count);
+    let moved = |position, pressed| {
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position,
+            pressed_button: pressed,
+            modifiers: Modifiers::default(),
+        })
+    };
+    match (kind, numbers.as_slice()) {
+        ("click", [x, y]) => {
+            let p = at(*x, *y);
+            Some(vec![moved(p, None), down(p, 1), up(p, 1)])
+        }
+        ("rclick", [x, y]) => {
+            let p = at(*x, *y);
+            Some(vec![
+                moved(p, None),
+                down_with(MouseButton::Right, p, 1),
+                up_with(MouseButton::Right, p, 1),
+            ])
+        }
+        ("dblclick", [x, y]) => {
+            let p = at(*x, *y);
+            Some(vec![
+                moved(p, None),
+                down(p, 1),
+                up(p, 1),
+                down(p, 2),
+                up(p, 2),
+            ])
+        }
+        ("drag", [x1, y1, x2, y2]) => {
+            let (from, to) = (at(*x1, *y1), at(*x2, *y2));
+            let middle = at((x1 + x2) / 2., (y1 + y2) / 2.);
+            let pressed = Some(MouseButton::Left);
+            Some(vec![
+                moved(from, None),
+                down(from, 1),
+                moved(middle, pressed),
+                moved(to, pressed),
+                up(to, 1),
+            ])
+        }
+        _ => None,
+    }
+}
+
 async fn wait_until_settled(cx: &mut gpui_kit::AsyncApp, app: &gpui_kit::Entity<RandoriApp>) {
     loop {
         cx.background_executor()

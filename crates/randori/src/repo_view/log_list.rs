@@ -1,20 +1,63 @@
 //! The revision list: column header, graph rows and the virtual list.
 
+use gpui_kit::{Rems, px};
+
 use super::*;
 
-/// Fixed lanes shared by the log header and every row.
-pub(super) mod lane {
-    /// Branch / tag column, left of the graph like GitKraken's.
-    pub const REFS: f32 = 8.;
-    pub const CHANGE: f32 = 6.5;
-    pub const AUTHOR: f32 = 7.;
-    pub const TIME: f32 = 4.5;
+/// The resizable columns of the revision list. The description takes the
+/// width the others leave.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Column {
+    /// Branch / tag chips, left of the graph like GitKraken's.
+    Refs,
+    Graph,
+    Change,
+    Author,
+}
+
+impl Column {
+    /// Narrowest width in rems, so a column can be found again.
+    fn min(self) -> f32 {
+        match self {
+            Column::Refs | Column::Graph => 2.,
+            Column::Change => 4.,
+            Column::Author => 3.,
+        }
+    }
+
+    /// Columns left of the description grow with a drag to the right; the
+    /// ones right of it grow with a drag to the left.
+    fn grows_right(self) -> bool {
+        matches!(self, Column::Refs | Column::Graph | Column::Change)
+    }
+}
+
+/// Widths of the header and every row, with the graph's automatic width resolved.
+#[derive(Clone, Copy)]
+pub(super) struct Columns {
+    pub(super) refs: Rems,
+    pub(super) graph: Rems,
+    pub(super) change: Rems,
+    pub(super) author: Rems,
+}
+
+/// What a column handle drags; which column is in `RepoView::column_drag`.
+pub(super) struct ColumnResize;
+
+/// Nothing follows the pointer while a column is resized.
+struct ResizeGhost;
+
+impl Render for ResizeGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
 }
 
 // ----- rows ------------------------------------------------------------------------------------
 
 /// One log row. `rem` is the window's rem, which the graph's avatars are
 /// sized by; `avatar` is the author's picture when one is known.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_row(
     row: &RowData,
     graph: &Graph,
@@ -22,6 +65,7 @@ pub(super) fn render_row(
     selected: bool,
     avatar: Option<SharedString>,
     rem: gpui_kit::Pixels,
+    cols: Columns,
     cx: &App,
 ) -> ListItem {
     let theme = cx.theme();
@@ -41,6 +85,18 @@ pub(super) fn render_row(
                 .min_w_0()
                 .flex_1()
                 .text_sm()
+                // where an age group starts, a hairline across the row
+                .when(row.bucket_start && ix > 0, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(1.))
+                            .bg(theme.border),
+                    )
+                })
                 // the row's branch colour, from its node to the end of the row
                 .child(
                     div()
@@ -48,7 +104,8 @@ pub(super) fn render_row(
                         .top_0()
                         .bottom_0()
                         .right_0()
-                        .left(gpui_kit::rems(lane::REFS) + graph.node_x(ix))
+                        // a node clipped by a narrow graph starts the tint at the edge
+                        .left(cols.refs + gpui_kit::rems(graph.node_x(ix).0.min(cols.graph.0)))
                         .bg(color.opacity(0.07)),
                 )
                 // no gap between the two, so the chip's line runs on to its node
@@ -56,19 +113,20 @@ pub(super) fn render_row(
                     h_flex()
                         .flex_none()
                         .h_full()
-                        .child(render_ref_column(row, ix, color, cx))
+                        .child(render_ref_column(row, ix, color, cols.refs, cx))
                         .child(graph.row_element(
                             ix,
                             row.author.clone(),
                             avatar,
                             !row.refs.is_empty(),
+                            cols.graph,
                             rem,
                             cx,
                         )),
                 )
                 .child(
                     h_flex()
-                        .w(gpui_kit::rems(lane::CHANGE))
+                        .w(cols.change)
                         .flex_none()
                         .font_family(theme.mono_font_family.clone())
                         .child(
@@ -104,36 +162,58 @@ pub(super) fn render_row(
                 )
                 .child(
                     div()
-                        .w(gpui_kit::rems(lane::AUTHOR))
+                        .w(cols.author)
                         .flex_none()
                         .truncate()
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(row.author.clone()),
                 )
-                .child(
-                    div()
-                        .w(gpui_kit::rems(lane::TIME))
-                        .flex_none()
-                        .flex()
-                        .justify_end()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(row.time.clone()),
-                ),
+                // the age of a new group, GitKraken style: a label on the hairline
+                // where the group starts, over the row's right end rather than in
+                // a column of its own (row 0 has no line above, so it sits inside)
+                .when(row.bucket_start, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .map(|label| {
+                                if ix == 0 {
+                                    label.top(px(3.))
+                                } else {
+                                    label.top(px(-9.))
+                                }
+                            })
+                            .h(px(18.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded(px(9.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.secondary)
+                            .text_xs()
+                            .whitespace_nowrap()
+                            .text_color(theme.muted_foreground)
+                            .child(row.bucket_label.clone()),
+                    )
+                }),
         )
 }
 
 /// The branch / tag column: the row's first ref as a chip in its branch
 /// colour, `+N` for the rest (all of them in the tooltip), and a line on to
 /// the node.
-fn render_ref_column(row: &RowData, ix: usize, color: gpui_kit::Hsla, cx: &App) -> AnyElement {
+fn render_ref_column(
+    row: &RowData,
+    ix: usize,
+    color: gpui_kit::Hsla,
+    width: Rems,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let Some(first) = row.refs.first() else {
-        return div()
-            .w(gpui_kit::rems(lane::REFS))
-            .flex_none()
-            .into_any_element();
+        return div().w(width).flex_none().into_any_element();
     };
     let icon = match first.kind {
         RefKind::Local => IconName::GitBranch,
@@ -157,7 +237,7 @@ fn render_ref_column(row: &RowData, ix: usize, color: gpui_kit::Hsla, cx: &App) 
     let first_unpushed = mark_unpushed && first.unpushed;
     h_flex()
         .id(("refs", ix))
-        .w(gpui_kit::rems(lane::REFS))
+        .w(width)
         .flex_none()
         .h_full()
         .items_center()
@@ -212,6 +292,14 @@ fn render_ref_column(row: &RowData, ix: usize, color: gpui_kit::Hsla, cx: &App) 
 
 impl RepoView {
     pub(super) fn render_log_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cols = self.columns();
+        let header = [
+            header_cell("Branch / Tag", cols.refs, Column::Refs, false, cx),
+            header_cell("Graph", cols.graph, Column::Graph, false, cx),
+            header_cell("Change", cols.change, Column::Change, false, cx),
+            header_cell("Author", cols.author, Column::Author, false, cx),
+        ];
+        let [refs_cell, graph_cell, change_cell, author_cell] = header;
         let theme = cx.theme();
         let query = self
             .workspace
@@ -251,37 +339,102 @@ impl RepoView {
                     .bg(theme.muted.opacity(0.35))
                     .text_xs()
                     .text_color(theme.muted_foreground)
+                    .on_drag_move(cx.listener(
+                        |view, event: &gpui_kit::DragMoveEvent<ColumnResize>, window, cx| {
+                            view.resize_column(event.event.position.x, window.rem_size(), cx)
+                        },
+                    ))
+                    // no gap between the two, as in the rows
                     .child(
-                        div()
-                            .w(gpui_kit::rems(lane::REFS) + self.graph.width())
+                        h_flex()
                             .flex_none()
-                            .truncate()
-                            .child("Branch / Tag"),
+                            .h_full()
+                            .child(refs_cell)
+                            .child(graph_cell),
                     )
-                    .child(
-                        div()
-                            .w(gpui_kit::rems(lane::CHANGE))
-                            .flex_none()
-                            .child("Change"),
-                    )
+                    .child(change_cell)
                     .child(div().flex_1().min_w_0().truncate().child("Description"))
-                    .child(
-                        div()
-                            .w(gpui_kit::rems(lane::AUTHOR))
-                            .flex_none()
-                            .child("Author"),
-                    )
-                    .child(
-                        div()
-                            .w(gpui_kit::rems(lane::TIME))
-                            .flex_none()
-                            .flex()
-                            .justify_end()
-                            .child("Updated"),
-                    ),
+                    .child(author_cell),
             )
     }
+
+    /// Resolved widths of the columns.
+    pub(super) fn columns(&self) -> Columns {
+        let c = self.columns;
+        let rems = gpui_kit::rems;
+        Columns {
+            refs: rems(c.refs),
+            graph: c.graph.map(rems).unwrap_or_else(|| self.graph.width()),
+            change: rems(c.change),
+            author: rems(c.author),
+        }
+    }
+
+    fn column_width(&self, column: Column) -> f32 {
+        let cols = self.columns();
+        match column {
+            Column::Refs => cols.refs.0,
+            Column::Graph => cols.graph.0,
+            Column::Change => cols.change.0,
+            Column::Author => cols.author.0,
+        }
+    }
+
+    fn start_column_resize(&mut self, column: Column, x: gpui_kit::Pixels) {
+        self.column_drag = Some((column, x, self.column_width(column)));
+    }
+
+    fn resize_column(
+        &mut self,
+        x: gpui_kit::Pixels,
+        rem: gpui_kit::Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((column, start_x, start)) = self.column_drag else {
+            return;
+        };
+        let moved = f32::from(x - start_x) / f32::from(rem);
+        let width = if column.grows_right() {
+            start + moved
+        } else {
+            start - moved
+        }
+        .clamp(column.min(), 60.);
+        let c = &mut self.columns;
+        match column {
+            Column::Refs => c.refs = width,
+            Column::Graph => c.graph = Some(width),
+            Column::Change => c.change = width,
+            Column::Author => c.author = width,
+        }
+        cx.notify();
+    }
+
+    /// Saves the dragged widths, which every tab then uses.
+    pub(super) fn finish_column_resize(&mut self, cx: &mut Context<Self>) {
+        if self.column_drag.take().is_some() {
+            let columns = self.columns;
+            settings::update_display(cx, |display| display.columns = columns);
+        }
+    }
+
+    /// A double click on a handle puts the column back to its default width
+    /// (the graph back to fitting its lanes).
+    fn reset_column(&mut self, column: Column, cx: &mut Context<Self>) {
+        let default = settings::ColumnWidths::default();
+        let c = &mut self.columns;
+        match column {
+            Column::Refs => c.refs = default.refs,
+            Column::Graph => c.graph = default.graph,
+            Column::Change => c.change = default.change,
+            Column::Author => c.author = default.author,
+        }
+        let columns = self.columns;
+        settings::update_display(cx, |display| display.columns = columns);
+    }
+
     pub(super) fn render_log(&self, cx: &mut Context<Self>) -> AnyElement {
+        let cols = self.columns();
         let rows = self.row_data.clone();
         let graph = self.graph.clone();
         let focus = self.log_focus.clone();
@@ -352,6 +505,7 @@ impl RepoView {
                                         selected == Some(ix),
                                         avatar,
                                         rem,
+                                        cols,
                                         cx,
                                     )
                                     .on_click(move |_, _, cx| {
@@ -437,4 +591,78 @@ impl RepoView {
             )
             .into_any_element()
     }
+}
+
+/// A header cell with a drag handle on the edge next to the description side
+/// (right of the left columns, left of the right ones). Drag to resize, double
+/// click to restore the default width.
+fn header_cell(
+    label: &'static str,
+    width: Rems,
+    column: Column,
+    align_end: bool,
+    cx: &mut Context<RepoView>,
+) -> AnyElement {
+    let theme = cx.theme();
+    let (line, hover) = (theme.border, theme.primary);
+    // between the branch / tag and graph columns there is no gap, so the
+    // handle straddles the edge; elsewhere it sits in the gap
+    let outside = if column == Column::Refs {
+        px(4.)
+    } else {
+        px(8.)
+    };
+    let handle = div()
+        .id(("column-resize", column as usize))
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .w(px(8.))
+        .map(|handle| {
+            if column.grows_right() {
+                handle.right(-outside)
+            } else {
+                handle.left(-outside)
+            }
+        })
+        .flex()
+        .justify_center()
+        .cursor(gpui_kit::CursorStyle::ResizeColumn)
+        .hover(move |style| style.bg(hover.opacity(0.25)))
+        .child(div().w(px(1.)).h_full().bg(line))
+        .on_mouse_down(
+            gpui_kit::MouseButton::Left,
+            cx.listener(move |view, event: &gpui_kit::MouseDownEvent, _, cx| {
+                if event.click_count >= 2 {
+                    view.reset_column(column, cx);
+                } else {
+                    // where the drag below measures from
+                    view.column_press = Some(event.position.x);
+                }
+            }),
+        )
+        // the resize starts with the drag itself, so a press that never
+        // becomes a drag leaves nothing behind
+        .on_drag(ColumnResize, {
+            let view = cx.entity().downgrade();
+            move |_, _, window, cx| {
+                let moved_to = window.mouse_position().x;
+                let _ = view.update(cx, |view, _| {
+                    let x = view.column_press.take().unwrap_or(moved_to);
+                    view.start_column_resize(column, x)
+                });
+                cx.new(|_| ResizeGhost)
+            }
+        });
+    div()
+        .relative()
+        .w(width)
+        .flex_none()
+        .h_full()
+        .flex()
+        .items_center()
+        .when(align_end, |cell| cell.justify_end())
+        .child(div().min_w_0().truncate().child(label))
+        .child(handle)
+        .into_any_element()
 }

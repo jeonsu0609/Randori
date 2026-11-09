@@ -39,7 +39,12 @@ pub(super) fn file_menu(
     } else {
         menu
     };
-    let menu = menu.menu("Open in diff tool", Box::new(DiffInTool));
+    let menu = menu
+        .menu("Open full view", Box::new(OpenFileDiff))
+        .menu("Blame", Box::new(OpenFileBlame))
+        .menu("File history", Box::new(OpenFileHistory))
+        .separator()
+        .menu("Open in diff tool", Box::new(DiffInTool));
     if immutable {
         menu
     } else {

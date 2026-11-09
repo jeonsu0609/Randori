@@ -30,6 +30,29 @@ pub const PULL_REFRESH_CHOICES: [(u64, &str); 4] = [
     (0, "Only when asked"),
 ];
 
+/// Widths of the revision list's columns, in rems (they scale with the
+/// interface). The description takes what is left.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnWidths {
+    pub refs: f32,
+    /// `None` sizes the graph to its lanes.
+    pub graph: Option<f32>,
+    pub change: f32,
+    pub author: f32,
+}
+
+impl Default for ColumnWidths {
+    fn default() -> Self {
+        Self {
+            refs: 8.,
+            graph: None,
+            change: 6.5,
+            author: 7.,
+        }
+    }
+}
+
 /// The part saved with the session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,6 +63,8 @@ pub struct DisplaySettings {
     pub github: bool,
     /// Seconds between pull request refreshes; 0 refreshes only when asked.
     pub pull_refresh_secs: u64,
+    /// The revision list's column widths, as last dragged.
+    pub columns: ColumnWidths,
 }
 
 impl Default for DisplaySettings {
@@ -48,6 +73,7 @@ impl Default for DisplaySettings {
             diff: DiffLayout::Unified,
             github: true,
             pull_refresh_secs: 60,
+            columns: ColumnWidths::default(),
         }
     }
 }
@@ -59,27 +85,39 @@ pub struct Settings {
     pub auto_snapshot: Option<bool>,
     /// `gg.ui.mark-unpushed-bookmarks`.
     pub mark_unpushed: bool,
+    /// `gg.ui.recent-workspaces`, newest first, as GG keeps it.
+    pub recent: Vec<String>,
+    /// `gg.ui.track-recent-workspaces`.
+    pub track_recent: bool,
 }
 
 impl Global for Settings {}
 
+/// Recent workspaces GG keeps (and Randori, the same way).
+const RECENT_KEY: &str = "gg.ui.recent-workspaces";
+const RECENT_LIMIT: usize = 10;
+
 impl Settings {
     /// The session's display settings plus the `gg.*` values in jj's user config.
     pub fn load(display: DisplaySettings) -> Self {
-        let (auto_snapshot, mark_unpushed) = match gg_lib::read_config(None) {
-            Ok((settings, ..)) => (
-                settings.query_auto_snapshot(),
-                settings.ui_mark_unpushed_bookmarks(),
-            ),
+        match gg_lib::read_config(None) {
+            Ok((settings, ..)) => Self {
+                display,
+                auto_snapshot: settings.query_auto_snapshot(),
+                mark_unpushed: settings.ui_mark_unpushed_bookmarks(),
+                recent: settings.ui_recent_workspaces(),
+                track_recent: settings.ui_track_recent_workspaces(),
+            },
             Err(err) => {
                 log::warn!("reading jj config for settings: {err:#}");
-                (None, true)
+                Self {
+                    display,
+                    auto_snapshot: None,
+                    mark_unpushed: true,
+                    recent: Vec::new(),
+                    track_recent: false,
+                }
             }
-        };
-        Self {
-            display,
-            auto_snapshot,
-            mark_unpushed,
         }
     }
 }
@@ -91,6 +129,30 @@ pub fn get(cx: &App) -> &Settings {
 /// Changes a display setting; observers (the views, the session) follow.
 pub fn update_display(cx: &mut App, change: impl FnOnce(&mut DisplaySettings)) {
     cx.update_global::<Settings, _>(|settings, _| change(&mut settings.display));
+}
+
+/// Puts `path` first in the recent workspaces and writes the list to the jj
+/// config, unless `gg.ui.track-recent-workspaces` is off.
+pub fn remember_workspace(cx: &mut App, path: &std::path::Path) {
+    if !get(cx).track_recent {
+        return;
+    }
+    let path = path.display().to_string();
+    let mut recent = get(cx).recent.clone();
+    if recent.first() == Some(&path) {
+        return;
+    }
+    recent.retain(|other| other != &path);
+    recent.insert(0, path);
+    recent.truncate(RECENT_LIMIT);
+    cx.update_global::<Settings, _>(|settings, _| settings.recent = recent.clone());
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(err) = gg_lib::config::write_user_list(RECENT_KEY, &recent) {
+                log::warn!("saving recent workspaces: {err:#}");
+            }
+        })
+        .detach();
 }
 
 /// Writes `gg.queries.auto-snapshot` and applies it to open tabs.
