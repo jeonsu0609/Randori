@@ -23,9 +23,11 @@ gpui-kit = "0.9.0"
 jj-lib = "0.46.0"
 anyhow = "1.0.100"
 chrono = "0.4.44"
+etcetera = "0.11.0"
 futures = "0.3.31"
 log = "0.4"
 pollster = "1.0.1"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.150"
 # Only for `--screenshot`; same major version gpui renders into.
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }

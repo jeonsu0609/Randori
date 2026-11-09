@@ -7,6 +7,7 @@
 // same workspace on purpose, so the warning does not apply here.
 #![allow(deprecated)]
 
+mod app_view;
 mod graph;
 mod repo_view;
 mod worker;
@@ -17,11 +18,13 @@ use anyhow::Result;
 use gpui_kit::component::{Theme, ThemeMode, TitleBar};
 use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, px, size};
 
+use app_view::RandoriApp;
 use repo_view::RepoView;
 use worker::Worker;
 
-const USAGE: &str = "Usage: randori [options] [workspace]
-Opens the jj workspace at the given path (default: current directory).
+const USAGE: &str = "Usage: randori [options] [workspace...]
+Opens each jj workspace in a tab, after the tabs of the previous session.
+With no workspace and no saved tabs, opens the current directory.
 
 Options:
   --revset <query>     start with this revset instead of the workspace default
@@ -33,7 +36,7 @@ Options:
 
 #[derive(Default)]
 struct Args {
-    workspace: Option<PathBuf>,
+    workspaces: Vec<PathBuf>,
     revset: Option<String>,
     light: bool,
     check: bool,
@@ -85,23 +88,28 @@ fn parse_args() -> Args {
                     .collect()
             }
             Some(flag) if flag.starts_with('-') => fail(),
-            _ if args.workspace.is_none() => args.workspace = Some(PathBuf::from(arg)),
-            _ => fail(),
+            _ => args.workspaces.push(PathBuf::from(arg)),
         }
     }
     args
 }
 
 fn main() -> Result<()> {
+    // git and ssh run this binary as their askpass helper (GG_ASKPASS_SOCKET is
+    // set); it relays the prompt to the window that started the operation.
+    if let Some(result) = gg_lib::askpass::run_askpass() {
+        return result;
+    }
+
     let args = parse_args();
 
-    // Same resolution as GG: an explicit path, or the current directory.
-    let repo_path = gg_lib::config::resolve_repo_path(args.workspace.as_deref());
-    let (settings, _, _, _) = gg_lib::read_config(repo_path.as_deref())?;
-    let (worker, events) = Worker::spawn(args.workspace.clone(), settings)?;
-
     if args.check {
-        return run_check(&worker, args.workspace, args.revset);
+        // Same resolution as GG: an explicit path, or the current directory.
+        let workspace = args.workspaces.first().cloned();
+        let repo_path = gg_lib::config::resolve_repo_path(workspace.as_deref());
+        let (settings, _, _, _) = gg_lib::read_config(repo_path.as_deref())?;
+        let (worker, _events) = Worker::spawn(workspace.clone(), settings)?;
+        return run_check(&worker, workspace, args.revset);
     }
 
     #[cfg(not(feature = "screenshot"))]
@@ -114,6 +122,7 @@ fn main() -> Result<()> {
         .run(move |cx| {
             gpui_kit::init(cx);
             repo_view::bind_keys(cx);
+            app_view::bind_keys(cx);
             Theme::change(
                 if args.light {
                     ThemeMode::Light
@@ -130,10 +139,12 @@ fn main() -> Result<()> {
                 app_id: Some("io.github.jeonsu0609.randori".into()),
                 ..TitleBar::window_options()
             };
-            let workspace = args.workspace.clone();
+            let workspaces = args.workspaces.clone();
             let revset = args.revset.clone();
-            let (window, view) = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| RepoView::new(worker, events, workspace, revset, window, cx))
+            // Screenshots must not replace the user's saved tabs with sample workspaces.
+            let persist = args.screenshot.is_none();
+            let (window, app) = gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| RandoriApp::new(workspaces, revset, persist, window, cx))
             })
             .expect("failed to open the main window");
             cx.activate(true);
@@ -143,10 +154,12 @@ fn main() -> Result<()> {
             let keys = args.keys.clone();
             cx.spawn(async move |cx| {
                 // Wait for the workspace to load, then apply one-shot startup options.
-                wait_until(cx, &view, |v| v.is_settled()).await;
-                if let Some(row) = select_row {
+                wait_until_settled(cx, &app).await;
+                if let Some(row) = select_row
+                    && let Some(view) = app.read_with(cx, |app, _| app.active_view())
+                {
                     view.update(cx, |v, cx| v.select_row(row, cx));
-                    wait_until(cx, &view, |v| v.is_settled()).await;
+                    wait_until_settled(cx, &app).await;
                 }
                 #[cfg(feature = "screenshot")]
                 if let Some(path) = screenshot {
@@ -161,9 +174,11 @@ fn main() -> Result<()> {
                         let _ = window.update(cx, |_, window, cx| {
                             window.dispatch_keystroke(keystroke, cx);
                         });
-                        wait_until(cx, &view, |v| v.is_settled()).await;
+                        wait_until_settled(cx, &app).await;
                     }
-                    let selected = view.read_with(cx, |v, _| v.selected_row());
+                    let selected = app
+                        .read_with(cx, |app, _| app.active_view())
+                        .and_then(|view| view.read_with(cx, |v, _| v.selected_row()));
                     println!("selected row: {selected:?}");
                     // Let layout and the diff settle for a few frames before capturing.
                     cx.background_executor()
@@ -188,16 +203,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn wait_until(
-    cx: &mut gpui_kit::AsyncApp,
-    view: &gpui_kit::Entity<RepoView>,
-    ready: impl Fn(&RepoView) -> bool,
-) {
+/// Waits until the selected tab has loaded (or there is no tab).
+async fn wait_until_settled(cx: &mut gpui_kit::AsyncApp, app: &gpui_kit::Entity<RandoriApp>) {
     loop {
         cx.background_executor()
             .timer(std::time::Duration::from_millis(100))
             .await;
-        if view.read_with(cx, |v, _| ready(v)) {
+        let settled = match app.read_with(cx, |app, _| app.active_view()) {
+            Some(view) => view.read_with(cx, |v: &RepoView, _| v.is_settled()),
+            None => true,
+        };
+        if settled {
             return;
         }
     }

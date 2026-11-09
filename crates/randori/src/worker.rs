@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::mpsc as async_mpsc;
+use gg_lib::messages::mutations::{MutationOptions, MutationResult};
 use gg_lib::messages::queries::{LogPage, RevsResult};
 use gg_lib::messages::{RepoConfig, RepoStatus, RevSet};
-use gg_lib::worker::{EventSink, Session as _, SessionEvent, WorkerSession};
+use gg_lib::worker::{EventSink, Mutation, Session as _, SessionEvent, WorkerSession};
 use jj_lib::settings::UserSettings;
 
 /// A session that lived this long counts as healthy; the restart delay resets.
@@ -52,6 +53,9 @@ impl EventSink for ChannelSink {
 #[derive(Clone)]
 pub struct Worker {
     tx: mpsc::Sender<SessionEvent>,
+    /// Liveness token. The thread holds only a weak reference, so once every
+    /// handle is gone (the tab closed) it stops instead of restarting.
+    _alive: Arc<()>,
 }
 
 impl Worker {
@@ -64,13 +68,11 @@ impl Worker {
         let (event_tx, event_rx) = async_mpsc::unbounded();
         let sink: Arc<dyn EventSink> = Arc::new(ChannelSink(event_tx));
 
-        // Keep a sender alive inside the thread: if every handle is dropped the
-        // channel would disconnect and the restart loop below would spin.
-        let keepalive = tx.clone();
+        let alive = Arc::new(());
+        let liveness = Arc::downgrade(&alive);
         thread::Builder::new()
             .name("jj-worker".into())
             .spawn(move || {
-                let _keepalive = keepalive;
                 let mut failures = 0u32;
                 loop {
                     let started = Instant::now();
@@ -79,10 +81,14 @@ impl Worker {
                         workspace.clone(),
                         settings.clone(),
                         false,
-                        false,
+                        // Ask the user for git credentials through Randori's dialog
+                        // (main() serves as the askpass helper).
+                        true,
                     );
                     match pollster::block_on(session.handle_events(&rx)) {
                         Ok(()) => break,
+                        // Every handle was dropped: the channel closed on purpose.
+                        Err(_) if liveness.upgrade().is_none() => break,
                         Err(err) => {
                             // Same policy as GG: restart the worker and tell the UI.
                             log::warn!("worker restarted: {err:#}");
@@ -106,7 +112,7 @@ impl Worker {
             })
             .context("failed to start the jj worker thread")?;
 
-        Ok((Self { tx }, event_rx))
+        Ok((Self { tx, _alive: alive }, event_rx))
     }
 
     /// Sends one request and blocks until the worker answers.
@@ -139,6 +145,16 @@ impl Worker {
     /// Loads headers, parents and the combined diff for a revision set.
     pub fn query_revisions(&self, set: RevSet) -> Result<RevsResult> {
         self.call(|tx| SessionEvent::QueryRevisions { tx, set })?
+    }
+
+    /// Runs one repository mutation (new, describe, abandon, push, undo, …).
+    /// Immutable revisions are protected: GG answers with a precondition error.
+    pub fn mutate(&self, mutation: Box<dyn Mutation + Send + Sync>) -> Result<MutationResult> {
+        self.call(|tx| SessionEvent::ExecuteMutation {
+            tx,
+            mutation,
+            options: MutationOptions::default(),
+        })
     }
 
     /// Records working-copy changes made outside Randori (editors, the jj CLI).

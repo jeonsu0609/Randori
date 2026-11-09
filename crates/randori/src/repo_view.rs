@@ -12,21 +12,21 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use chrono::{DateTime, Local};
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
 use gg_lib::messages::queries::{ChangeKind, LogPage, LogRow, RevChange, RevsResult};
-use gg_lib::messages::{RepoConfig, RevHeader, RevSet, StoreRef};
+use gg_lib::messages::{RepoConfig, RevHeader, RevId, RevSet, StoreRef};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, StyledExt as _, TitleBar,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffFile, DiffMode, DiffState},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     list::ListItem,
+    menu::{ContextMenuExt as _, PopupMenu},
     resizable::{h_resizable, resizable_panel, v_resizable},
     scroll::{ScrollableElement as _, Scrollbar},
     spinner::Spinner,
@@ -36,16 +36,16 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Image, ImageFormat,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollStrategy, SharedString,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, ScrollStrategy, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
-    Window, div, img, prelude::FluentBuilder as _, uniform_list,
+    Window, div, prelude::FluentBuilder as _, uniform_list,
 };
 
 use crate::graph::{Graph, row_height};
-use crate::worker::{Worker, WorkerEvent};
 
-const LOGO: &[u8] = include_bytes!("../assets/icon/randori-128.png");
+mod ops;
+use crate::worker::{Worker, WorkerEvent};
 
 /// Keyboard actions of the main window.
 pub mod actions {
@@ -60,12 +60,33 @@ pub mod actions {
             FocusLog,
             Reload,
             ToggleSidebar,
+            // revisions
+            NewChild,
+            EditRevision,
+            DescribeRevision,
+            SaveDescription,
+            DuplicateRevision,
+            AbandonRevision,
+            BackoutRevision,
+            CreateBookmark,
+            // bookmarks (on the ref the context menu was opened on)
+            PushBookmark,
+            RenameBookmark,
+            DeleteRef,
+            ToggleTrackBookmark,
+            // repository
+            Undo,
+            Redo,
+            Fetch,
+            Push,
         ]
     );
 }
 
 /// Key context of the revision list; arrow and vi keys apply only there.
 const LOG_CONTEXT: &str = "RandoriLog";
+/// Key context of one repository tab.
+const REPO_CONTEXT: &str = "RandoriRepo";
 
 /// `cmd-<key>` on macOS, `ctrl-<key>` elsewhere.
 macro_rules! platform_key {
@@ -90,10 +111,20 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", SelectFirst, Some(LOG_CONTEXT)),
         KeyBinding::new("end", SelectLast, Some(LOG_CONTEXT)),
         KeyBinding::new("/", FocusRevset, Some(LOG_CONTEXT)),
-        KeyBinding::new(platform_key!("l"), FocusRevset, Some("Randori")),
-        KeyBinding::new("escape", FocusLog, Some("Randori")),
-        KeyBinding::new(platform_key!("r"), Reload, Some("Randori")),
-        KeyBinding::new(platform_key!("b"), ToggleSidebar, Some("Randori")),
+        KeyBinding::new("n", NewChild, Some(LOG_CONTEXT)),
+        KeyBinding::new("e", EditRevision, Some(LOG_CONTEXT)),
+        KeyBinding::new("d", DescribeRevision, Some(LOG_CONTEXT)),
+        KeyBinding::new("b", CreateBookmark, Some(LOG_CONTEXT)),
+        KeyBinding::new("backspace", AbandonRevision, Some(LOG_CONTEXT)),
+        KeyBinding::new("delete", AbandonRevision, Some(LOG_CONTEXT)),
+        KeyBinding::new(platform_key!("l"), FocusRevset, Some(REPO_CONTEXT)),
+        KeyBinding::new("escape", FocusLog, Some(REPO_CONTEXT)),
+        KeyBinding::new(platform_key!("r"), Reload, Some(REPO_CONTEXT)),
+        KeyBinding::new(platform_key!("b"), ToggleSidebar, Some(REPO_CONTEXT)),
+        KeyBinding::new(platform_key!("z"), Undo, Some(LOG_CONTEXT)),
+        KeyBinding::new(platform_key!("shift-z"), Redo, Some(LOG_CONTEXT)),
+        KeyBinding::new(platform_key!("shift-f"), Fetch, Some(REPO_CONTEXT)),
+        KeyBinding::new(platform_key!("shift-p"), Push, Some(REPO_CONTEXT)),
     ]);
 }
 
@@ -115,10 +146,13 @@ enum LoadState {
 }
 
 struct WorkspaceInfo {
-    name: SharedString,
     path: SharedString,
     query: String,
     operation: SharedString,
+    /// Git remotes, for fetch.
+    remotes: Vec<String>,
+    /// Whether the last undo can be redone.
+    can_redo: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -132,6 +166,8 @@ enum RefKind {
 struct RefChip {
     name: SharedString,
     kind: RefKind,
+    /// The ref as GG reports it, for bookmark operations.
+    store: StoreRef,
 }
 
 /// One row of the bookmarks panel.
@@ -145,6 +181,7 @@ struct RefItem {
 
 /// The parts of a log row the virtual list needs, copied so the list closure owns them.
 struct RowData {
+    id: RevId,
     change_prefix: SharedString,
     change_rest: SharedString,
     commit: SharedString,
@@ -195,10 +232,23 @@ pub struct RepoView {
     sidebar_visible: bool,
     /// Focus for the revision list; arrow keys and j/k move the selection.
     log_focus: FocusHandle,
-    logo: Arc<Image>,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
     detail_task: Option<Task<()>>,
+    /// Label of the mutation in flight, shown in the status bar.
+    busy: Option<SharedString>,
+    /// Latest progress message from a git fetch or push.
+    progress: Option<SharedString>,
+    /// Change to select after the next reload (from a mutation result).
+    pending_select: Option<String>,
+    /// Bookmark or tag the last context menu was opened on.
+    ref_target: Option<StoreRef>,
+    /// Inspector editor for the selected revision's description.
+    description_input: Entity<TextareaState>,
+    /// Keeps the open one-field dialog's Enter handler alive.
+    dialog_subscription: Option<Subscription>,
+    /// Change id and text last loaded into the description editor.
+    description_for: Option<(String, String)>,
 }
 
 impl RepoView {
@@ -238,9 +288,27 @@ impl RepoView {
 
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(DiffMode::Unified));
 
+        let description_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(3, 10)
+                .placeholder("Describe this change")
+        });
+        let mut _subscriptions = _subscriptions;
+        _subscriptions.push(cx.subscribe_in(
+            &description_input,
+            window,
+            |view: &mut Self, _, event: &InputEvent, window, cx| match event {
+                // ⌘↩ / Ctrl+↩ saves; a plain Enter is a newline.
+                InputEvent::PressEnter {
+                    secondary: true, ..
+                } => view.save_description(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        ));
+
         // Pick up edits made outside Randori whenever the window comes back to the front,
         // the same moment GG snapshots the working copy.
-        let mut _subscriptions = _subscriptions;
         _subscriptions.push(cx.observe_window_activation(window, |view, window, cx| {
             if window.is_window_active() {
                 view.snapshot(cx);
@@ -268,10 +336,16 @@ impl RepoView {
             revset,
             sidebar_visible: true,
             log_focus: cx.focus_handle(),
-            logo: Arc::new(Image::from_bytes(ImageFormat::Png, LOGO.to_vec())),
             _events,
             _subscriptions,
             detail_task: None,
+            busy: None,
+            progress: None,
+            pending_select: None,
+            ref_target: None,
+            description_input,
+            description_for: None,
+            dialog_subscription: None,
         };
         view.open(workspace, initial_query, window, cx);
         view
@@ -282,6 +356,12 @@ impl RepoView {
         matches!(self.state, LoadState::Ready | LoadState::Failed(_))
             && !self.detail_loading
             && !self.loading_more
+            && self.busy.is_none()
+    }
+
+    /// Moves keyboard focus to the revision list (e.g. when its tab is selected).
+    pub fn focus_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.log_focus.focus(window, cx);
     }
 
     /// Index of the selected log row (reported by `--keys`).
@@ -316,21 +396,19 @@ impl RepoView {
                             absolute_path,
                             latest_query,
                             status,
+                            git_remotes,
                             ..
                         } => {
                             let query = initial_query.unwrap_or(latest_query);
                             let page = worker.query_log(query.clone())?;
                             let path = absolute_path.0;
-                            let name = std::path::Path::new(&path)
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.clone());
                             Ok((
                                 WorkspaceInfo {
-                                    name: name.into(),
                                     path: display_path(&path).into(),
                                     query,
                                     operation: status.operation_description.into(),
+                                    remotes: git_remotes,
+                                    can_redo: status.can_redo,
                                 },
                                 page,
                             ))
@@ -466,7 +544,10 @@ impl RepoView {
         self.rows = page.rows;
         self.rebuild_derived();
 
-        let selected = previous
+        let selected = self
+            .pending_select
+            .take()
+            .or(previous)
             .and_then(|hex| {
                 self.rows
                     .iter()
@@ -674,85 +755,113 @@ impl RepoView {
                     cx.notify();
                 }
             }
+            "gg://progress" => {
+                self.progress = match payload.get("type").and_then(|value| value.as_str()) {
+                    Some("Progress") => payload
+                        .get("overall_percent")
+                        .and_then(|value| value.as_u64())
+                        .map(|percent| format!("{percent}%").into()),
+                    Some("Message") => payload
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .map(|text| text.trim().to_owned().into()),
+                    _ => None,
+                };
+                cx.notify();
+            }
             other => log::debug!("unhandled worker event {other}"),
         }
     }
 
     // ----- regions -------------------------------------------------------------------------
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (name, path) = match &self.workspace {
-            Some(ws) => (ws.name.clone(), ws.path.clone()),
-            None => ("Randori".into(), SharedString::default()),
+    /// The repository toolbar under the tab strip: panel toggle, workspace,
+    /// revset query and the repository commands.
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let path = self
+            .workspace
+            .as_ref()
+            .map(|ws| ws.path.clone())
+            .unwrap_or_default();
+        let ready = matches!(self.state, LoadState::Ready);
+        let can_redo = self.workspace.as_ref().is_some_and(|ws| ws.can_redo);
+        let has_selection = self.selected.is_some();
+        let command = |id: &'static str, icon: IconName, tooltip: &'static str| {
+            Button::new(id).ghost().small().icon(icon).tooltip(tooltip)
         };
-        TitleBar::new().child(
-            h_flex()
-                .size_full()
-                .pr_3()
-                .gap_2()
-                .child(
-                    Button::new("toggle-sidebar")
-                        .ghost()
-                        .small()
-                        .icon(IconName::PanelLeft)
-                        .selected(self.sidebar_visible)
-                        .tooltip("Toggle bookmarks")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.sidebar_visible = !view.sidebar_visible;
-                            cx.notify();
-                        })),
-                )
-                .child(div().text_sm().font_medium().child(name))
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_xs()
-                        .truncate()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(path),
-                )
-                .child(div().flex_1())
-                .child(
-                    div().w_80().child(
-                        Input::new(&self.revset)
-                            .small()
-                            .prefix(gpui_kit::component::Icon::new(IconName::Search).xsmall())
-                            .cleanable(true),
-                    ),
-                )
-                .child(
-                    Button::new("refresh")
-                        .ghost()
-                        .small()
-                        .icon(IconName::RefreshCw)
-                        .tooltip("Reload revisions")
-                        .on_click(cx.listener(|view, _, _, cx| view.reload(cx))),
-                ),
-        )
-    }
 
-    fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let item = |id: &'static str, icon: IconName, label: &'static str, active: bool| {
-            Button::new(id)
-                .ghost()
-                .icon(icon)
-                .selected(active)
-                .tooltip(label)
-        };
-        v_flex()
-            .h_full()
-            .w_12()
+        h_flex()
+            .h_10()
             .flex_none()
-            .items_center()
-            .py_3()
-            .gap_2()
-            .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().border)
-            .child(img(self.logo.clone()).size_7().mb_2())
-            .child(item("rail-log", IconName::GitGraph, "Revisions", true))
+            .px_2()
+            .gap_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                Button::new("toggle-sidebar")
+                    .ghost()
+                    .small()
+                    .icon(IconName::PanelLeft)
+                    .selected(self.sidebar_visible)
+                    .tooltip("Show or hide bookmarks")
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.sidebar_visible = !view.sidebar_visible;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .px_1()
+                    .text_xs()
+                    .truncate()
+                    .text_color(theme.muted_foreground)
+                    .child(path),
+            )
             .child(div().flex_1())
-            .child(item("rail-settings", IconName::Settings, "Settings", false).disabled(true))
+            .child(
+                div().w_72().child(
+                    Input::new(&self.revset)
+                        .small()
+                        .prefix(gpui_kit::component::Icon::new(IconName::Search).xsmall())
+                        .cleanable(true),
+                ),
+            )
+            .child(div().w_2())
+            .child(
+                command(
+                    "new-change",
+                    IconName::Plus,
+                    "New change on the selection (N)",
+                )
+                .disabled(!ready || !has_selection)
+                .on_click(cx.listener(|view, _, window, cx| view.new_child(window, cx))),
+            )
+            .child(
+                command("undo", IconName::Undo2, "Undo the last operation")
+                    .disabled(!ready)
+                    .on_click(cx.listener(|view, _, window, cx| view.undo(window, cx))),
+            )
+            .child(
+                command("redo", IconName::Redo2, "Redo")
+                    .disabled(!ready || !can_redo)
+                    .on_click(cx.listener(|view, _, window, cx| view.redo(window, cx))),
+            )
+            .child(
+                command("fetch", IconName::CloudDownload, "Fetch from all remotes")
+                    .disabled(!ready)
+                    .on_click(cx.listener(|view, _, window, cx| view.fetch_all(window, cx))),
+            )
+            .child(
+                command("push", IconName::Upload, "Push the selection's bookmarks")
+                    .disabled(!ready || !has_selection)
+                    .on_click(cx.listener(|view, _, window, cx| view.push_selected(window, cx))),
+            )
+            .child(
+                command("refresh", IconName::RefreshCw, "Reload revisions")
+                    .on_click(cx.listener(|view, _, _, cx| view.reload(cx))),
+            )
     }
 
     fn render_refs_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -822,6 +931,8 @@ impl RepoView {
                     })
                     .children(visible.into_iter().enumerate().map(|(ix, item)| {
                         let row = item.row;
+                        let store = item.chip.store.clone();
+                        let menu_ref = item.chip.store.clone();
                         let icon = match item.chip.kind {
                             RefKind::Local => IconName::GitBranch,
                             RefKind::Remote => IconName::CloudDownload,
@@ -883,6 +994,29 @@ impl RepoView {
                                     ),
                             )
                             .on_click(cx.listener(move |view, _, _, cx| view.select(row, cx)))
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Right,
+                                cx.listener(move |view, _, window, cx| {
+                                    view.ref_target = Some(store.clone());
+                                    view.log_focus.focus(window, cx);
+                                }),
+                            )
+                            .on_drag(
+                                DraggedRef {
+                                    store: item.chip.store.clone(),
+                                    label: item.chip.name.clone(),
+                                },
+                                |dragged, _, _, cx| {
+                                    cx.new(|_| DragChip {
+                                        label: format!("Move {}", dragged.label).into(),
+                                        icon: IconName::Bookmark,
+                                    })
+                                },
+                            )
+                            .context_menu({
+                                let focus = self.log_focus.clone();
+                                move |menu, _, _| ref_menu(menu, &menu_ref, focus.clone())
+                            })
                     })),
             )
             .into_any_element()
@@ -964,6 +1098,7 @@ impl RepoView {
     fn render_log(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.row_data.clone();
         let graph = self.graph.clone();
+        let focus = self.log_focus.clone();
         let selected = self.selected;
         let owner = cx.entity().downgrade();
 
@@ -1002,10 +1137,71 @@ impl RepoView {
                             range
                                 .map(|ix| {
                                     let owner = owner.clone();
+                                    let menu_owner = owner.clone();
+                                    let drop_owner = owner.clone();
+                                    let focus = focus.clone();
                                     render_row(&rows[ix], &graph, ix, selected == Some(ix), cx)
                                         .on_click(move |_, _, cx| {
                                             let _ =
                                                 owner.update(cx, |view, cx| view.select(ix, cx));
+                                        })
+                                        // Right-click selects the row first, so the menu acts on it.
+                                        .on_mouse_down(
+                                            gpui_kit::MouseButton::Right,
+                                            move |_, window, cx| {
+                                                let _ = menu_owner.update(cx, |view, cx| {
+                                                    view.select(ix, cx);
+                                                    view.log_focus.focus(window, cx);
+                                                });
+                                            },
+                                        )
+                                        .on_drag(
+                                            DraggedRevision {
+                                                id: rows[ix].id.clone(),
+                                                label: rows[ix].change_prefix.clone(),
+                                            },
+                                            |dragged, _, _, cx| {
+                                                cx.new(|_| DragChip {
+                                                    label: format!("Rebase {}", dragged.label)
+                                                        .into(),
+                                                    icon: IconName::GitCommitHorizontal,
+                                                })
+                                            },
+                                        )
+                                        .drag_over::<DraggedRevision>(|style, _, _, cx| {
+                                            style.bg(cx.theme().primary.opacity(0.18))
+                                        })
+                                        .drag_over::<DraggedRef>(|style, _, _, cx| {
+                                            style.bg(cx.theme().primary.opacity(0.18))
+                                        })
+                                        .on_drop({
+                                            let owner = drop_owner.clone();
+                                            move |dragged: &DraggedRevision, window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.rebase_onto(
+                                                        dragged.id.clone(),
+                                                        ix,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        })
+                                        .on_drop({
+                                            let owner = drop_owner.clone();
+                                            move |dragged: &DraggedRef, window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.move_ref_to(
+                                                        dragged.store.clone(),
+                                                        ix,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        })
+                                        .context_menu(move |menu, _, _| {
+                                            revision_menu(menu, focus.clone())
                                         })
                                         .into_any_element()
                                 })
@@ -1188,21 +1384,55 @@ impl RepoView {
                                 this.child(Tag::danger().small().child("Conflict"))
                             }),
                     )
-                    .child(match subject {
-                        Some(subject) => div().text_base().font_medium().child(subject.to_owned()),
-                        None => div()
-                            .text_base()
-                            .italic()
-                            .text_color(theme.muted_foreground)
-                            .child("(no description set)"),
-                    })
-                    .when(!body.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_sm()
+                    // Immutable history is read-only; anything else is described in place.
+                    .when(header.is_immutable, |this| {
+                        this.child(match subject {
+                            Some(subject) => {
+                                div().text_base().font_medium().child(subject.to_owned())
+                            }
+                            None => div()
+                                .text_base()
+                                .italic()
                                 .text_color(theme.muted_foreground)
-                                .child(body.clone()),
-                        )
+                                .child("(no description set)"),
+                        })
+                        .when(!body.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(body.clone()),
+                            )
+                        })
+                    })
+                    .when(!header.is_immutable, |this| {
+                        let dirty = self.description_dirty(cx);
+                        this.child(Textarea::new(&self.description_input).small())
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(if dirty {
+                                                "Unsaved · ⌘↩ to save"
+                                            } else {
+                                                "Press D to edit"
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("save-description")
+                                            .small()
+                                            .label("Save")
+                                            .when(dirty, |button| button.primary())
+                                            .disabled(!dirty || self.busy.is_some())
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.save_description(window, cx)
+                                            })),
+                                    ),
+                            )
                     })
                     .when(!refs.is_empty(), |this| {
                         this.child(
@@ -1404,14 +1634,29 @@ impl RepoView {
                     .text_xs()
                     .child(div().size_2().rounded_full().bg(state_color))
                     .child(state_label)
-                    .when_some(self.workspace.as_ref(), |this, ws| {
+                    // A running jj operation replaces the last-operation note.
+                    .when_some(self.busy.clone(), |this, busy| {
                         this.child(div().text_color(theme.muted_foreground).child("·"))
-                            .child(
-                                div()
-                                    .text_color(theme.muted_foreground)
-                                    .child(ws.operation.clone()),
-                            )
-                    }),
+                            .child(Spinner::new().xsmall())
+                            .child(busy)
+                            .when_some(self.progress.clone(), |this, progress| {
+                                this.child(div().text_color(theme.muted_foreground).child(progress))
+                            })
+                    })
+                    .when_some(
+                        self.workspace.as_ref().filter(|_| self.busy.is_none()),
+                        |this, ws| {
+                            this.child(div().text_color(theme.muted_foreground).child("·"))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .max_w_128()
+                                        .truncate()
+                                        .text_color(theme.muted_foreground)
+                                        .child(ws.operation.clone()),
+                                )
+                        },
+                    ),
             )
             .right(
                 h_flex()
@@ -1521,9 +1766,11 @@ impl RepoView {
 
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_description(window, cx);
+
         v_flex()
-            .id("randori")
-            .key_context("Randori")
+            .id("repo")
+            .key_context(REPO_CONTEXT)
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
@@ -1539,22 +1786,191 @@ impl Render for RepoView {
                 view.sidebar_visible = !view.sidebar_visible;
                 cx.notify();
             }))
-            .child(self.render_title_bar(cx))
+            .on_action(
+                cx.listener(|view, _: &actions::NewChild, window, cx| view.new_child(window, cx)),
+            )
+            .on_action(cx.listener(|view, _: &actions::EditRevision, window, cx| {
+                view.edit_selected(window, cx)
+            }))
+            .on_action(
+                cx.listener(|view, _: &actions::DescribeRevision, window, cx| {
+                    view.description_input
+                        .update(cx, |state, cx| state.focus(window, cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::SaveDescription, window, cx| {
+                    view.save_description(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::DuplicateRevision, window, cx| {
+                    view.duplicate_selected(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::AbandonRevision, window, cx| {
+                    view.confirm_abandon(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::BackoutRevision, window, cx| {
+                    view.backout_selected(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::CreateBookmark, window, cx| {
+                    view.prompt_create_bookmark(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|view, _: &actions::PushBookmark, window, cx| {
+                view.push_ref_target(window, cx)
+            }))
+            .on_action(
+                cx.listener(|view, _: &actions::RenameBookmark, window, cx| {
+                    view.prompt_rename_bookmark(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|view, _: &actions::DeleteRef, window, cx| {
+                view.delete_ref_target(window, cx)
+            }))
+            .on_action(
+                cx.listener(|view, _: &actions::ToggleTrackBookmark, window, cx| {
+                    view.toggle_track_ref_target(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|view, _: &actions::Undo, window, cx| view.undo(window, cx)))
+            .on_action(cx.listener(|view, _: &actions::Redo, window, cx| view.redo(window, cx)))
+            .on_action(
+                cx.listener(|view, _: &actions::Fetch, window, cx| view.fetch_all(window, cx)),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::Push, window, cx| view.push_selected(window, cx)),
+            )
+            .child(self.render_toolbar(cx))
             .child(
-                h_flex()
+                div()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_rail(cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .child(self.render_body(window, cx)),
-                    ),
+                    .min_w_0()
+                    .flex()
+                    .child(self.render_body(window, cx)),
             )
             .child(self.render_status_bar(cx))
+    }
+}
+
+impl RepoView {
+    /// Loads the selected revision's description into the editor when the
+    /// selection changes. For the same change it follows jj's text (e.g. after
+    /// a save or a snapshot) only while the user has no unsaved edits.
+    fn sync_description(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(header) = self.detail.as_ref().map(|detail| &detail.header) else {
+            return;
+        };
+        let change = header.id.change.hex.clone();
+        let text = header.description.lines.join("\n").trim_end().to_owned();
+        if let Some((loaded_change, loaded_text)) = &self.description_for
+            && *loaded_change == change
+        {
+            let editing = self.description_input.read(cx).value().trim_end() != loaded_text;
+            if editing || *loaded_text == text {
+                return;
+            }
+        }
+        self.description_input
+            .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+        self.description_for = Some((change, text));
+    }
+
+    /// True when the editor differs from the selected revision's description.
+    fn description_dirty(&self, cx: &App) -> bool {
+        self.detail.as_ref().is_some_and(|detail| {
+            let saved = detail.header.description.lines.join("\n");
+            self.description_input.read(cx).value().trim_end() != saved.trim_end()
+        })
+    }
+}
+
+// ----- drag and drop ---------------------------------------------------------------------------
+
+/// A revision being dragged; dropping it on another revision rebases it there.
+#[derive(Clone)]
+struct DraggedRevision {
+    id: RevId,
+    label: SharedString,
+}
+
+/// A bookmark or tag being dragged; dropping it on a revision moves it there.
+#[derive(Clone)]
+struct DraggedRef {
+    store: StoreRef,
+    label: SharedString,
+}
+
+/// The chip that follows the pointer during a drag.
+struct DragChip {
+    label: SharedString,
+    icon: IconName,
+}
+
+impl Render for DragChip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.primary)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .text_xs()
+            .shadow_md()
+            .child(gpui_kit::component::Icon::new(self.icon).xsmall())
+            .child(self.label.clone())
+    }
+}
+
+// ----- context menus ---------------------------------------------------------------------------
+
+/// Commands for the selected revision. Items dispatch actions to the repository
+/// tab, so the menu shows the same key bindings as the keyboard.
+fn revision_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
+    use actions::*;
+    menu.action_context(focus)
+        .menu("New change", Box::new(NewChild))
+        .menu("Edit", Box::new(EditRevision))
+        .menu("Describe", Box::new(DescribeRevision))
+        .separator()
+        .menu("Create bookmark…", Box::new(CreateBookmark))
+        .menu("Push bookmarks", Box::new(Push))
+        .separator()
+        .menu("Duplicate", Box::new(DuplicateRevision))
+        .menu("Back out", Box::new(BackoutRevision))
+        .separator()
+        .menu("Abandon…", Box::new(AbandonRevision))
+}
+
+/// Commands for a bookmark or tag in the bookmarks panel.
+fn ref_menu(menu: PopupMenu, store: &StoreRef, focus: FocusHandle) -> PopupMenu {
+    use actions::*;
+    let menu = menu.action_context(focus);
+    match store {
+        StoreRef::LocalBookmark { .. } => menu
+            .menu("Push", Box::new(PushBookmark))
+            .menu("Rename…", Box::new(RenameBookmark))
+            .separator()
+            .menu("Delete", Box::new(DeleteRef)),
+        StoreRef::RemoteBookmark { is_tracked, .. } => menu
+            .menu(
+                if *is_tracked { "Untrack" } else { "Track" },
+                Box::new(ToggleTrackBookmark),
+            )
+            .separator()
+            .menu("Delete", Box::new(DeleteRef)),
+        StoreRef::Tag { .. } => menu.menu("Delete", Box::new(DeleteRef)),
     }
 }
 
@@ -1674,6 +2090,7 @@ impl RowData {
     fn new(row: &LogRow, now: DateTime<Local>) -> Self {
         let rev = &row.revision;
         Self {
+            id: rev.id.clone(),
             change_prefix: rev.id.change.prefix.clone().into(),
             change_rest: rev
                 .id
@@ -1765,6 +2182,7 @@ fn ref_chips(refs: &[StoreRef]) -> Vec<RefChip> {
             StoreRef::LocalBookmark { bookmark_name, .. } => Some(RefChip {
                 name: bookmark_name.clone().into(),
                 kind: RefKind::Local,
+                store: r.clone(),
             }),
             // A remote ref that is in sync with its local bookmark adds no information.
             StoreRef::RemoteBookmark {
@@ -1776,18 +2194,22 @@ fn ref_chips(refs: &[StoreRef]) -> Vec<RefChip> {
             } if !(*is_synced && *is_tracked) => Some(RefChip {
                 name: format!("{bookmark_name}@{remote_name}").into(),
                 kind: RefKind::Remote,
+                store: r.clone(),
             }),
             StoreRef::RemoteBookmark { .. } => None,
             StoreRef::Tag { tag_name } => Some(RefChip {
                 name: tag_name.clone().into(),
                 kind: RefKind::Tag,
+                store: r.clone(),
             }),
         })
         .collect()
 }
 
 /// Builds a git-style patch for one file so gpui-kit's `Diff` can parse it.
-/// GG's hunk ranges start at 0; unified diff headers start at 1.
+/// GG's hunk ranges are already 1-based (its copy of jj's hunker starts at
+/// `1..1`); a unified header only differs for an empty side, which names the
+/// line before the hunk (`-0,0` for an added file).
 fn unified_patch(change: &RevChange) -> String {
     let path = &change.path.repo_path;
     let old = if matches!(change.kind, ChangeKind::Added) {
@@ -1804,13 +2226,7 @@ fn unified_patch(change: &RevChange) -> String {
     for hunk in &change.hunks {
         let from = &hunk.location.from_file;
         let to = &hunk.location.to_file;
-        let start = |range: &gg_lib::messages::ChangeRange| {
-            if range.len == 0 {
-                range.start
-            } else {
-                range.start + 1
-            }
-        };
+        let start = |range: &gg_lib::messages::ChangeRange| unified_start(range.start, range.len);
         patch.push_str(&format!(
             "@@ -{},{} +{},{} @@\n",
             start(from),
@@ -1826,6 +2242,15 @@ fn unified_patch(change: &RevChange) -> String {
     patch
 }
 
+/// Unified-diff start line for a 1-based GG range.
+fn unified_start(start: usize, len: usize) -> usize {
+    if len == 0 {
+        start.saturating_sub(1)
+    } else {
+        start
+    }
+}
+
 fn relative_time(timestamp: DateTime<Local>, now: DateTime<Local>) -> String {
     let delta = now.signed_duration_since(timestamp);
     let minutes = delta.num_minutes();
@@ -1835,5 +2260,20 @@ fn relative_time(timestamp: DateTime<Local>, now: DateTime<Local>) -> String {
         m if m < 60 * 24 => format!("{}h ago", m / 60),
         m if m < 60 * 24 * 30 => format!("{}d ago", m / (60 * 24)),
         _ => timestamp.format("%Y-%m-%d").to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unified_start;
+
+    /// Values taken from `jj diff --git` on the same commits.
+    #[test]
+    fn unified_start_matches_jj() {
+        // Modified hunk at line 381: `@@ -381,3 +381,5 @@`
+        assert_eq!(unified_start(381, 3), 381);
+        // Added file: `@@ -0,0 +1,3 @@` (GG reports 1..1 then 1..4)
+        assert_eq!(unified_start(1, 0), 0);
+        assert_eq!(unified_start(1, 3), 1);
     }
 }

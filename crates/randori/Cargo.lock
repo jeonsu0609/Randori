@@ -7776,6 +7776,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "etcetera",
  "futures 0.3.34",
  "gg-cli",
  "gpui-kit",
@@ -7785,6 +7786,7 @@ dependencies = [
  "jj-lib",
  "log",
  "pollster 1.0.1",
+ "serde",
  "serde_json",
 ]
 
