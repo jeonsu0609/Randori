@@ -31,16 +31,35 @@ path = "src/lib.rs"
 [[bin]]
 name = "gg"
 path = "src/main.rs"
+required-features = ["gui"]
 
 # custom-protocol is magic - tauri build adds it, tauri dev removes. it's on by default so that cargo run works
 [features]
-default = ["custom-protocol"]
+default = ["gui", "custom-protocol"]
 app = []
-custom-protocol = ["tauri/custom-protocol"]
+custom-protocol = ["gui", "tauri/custom-protocol"]
 ts-rs = ["dep:ts-rs"]
+# Randori: the Tauri app (`gg` binary, web mode, `RunOptions`). Off for crates that
+# only need the jj worker, such as the gpui frontend in crates/randori.
+gui = [
+    "dep:tauri-build",
+    "dep:tauri",
+    "dep:tauri-codegen",
+    "dep:tauri-macros",
+    "dep:tauri-plugin",
+    "dep:tauri-runtime",
+    "dep:tauri-runtime-wry",
+    "dep:tauri-utils",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-http",
+    "dep:tauri-plugin-shell",
+    "dep:tauri-plugin-window-state",
+    "dep:tauri-plugin-log",
+    "dep:tauri-plugin-single-instance",
+]
 
 [build-dependencies]
-tauri-build = { version = "2.0.0", features = ["config-toml"] }
+tauri-build = { version = "2.0.0", features = ["config-toml"], optional = true }
 
 [dev-dependencies]
 assert_matches = "1.5"
@@ -50,18 +69,18 @@ tower = "0.5.2"
 zip = "6.0"
 
 [dependencies]
-tauri = { version = "2.0.0", features = ["config-toml"] }
-tauri-codegen = "2.0.0"
-tauri-macros = "2.0.0"
-tauri-plugin = "2.0.0"
-tauri-runtime = "2.0.0"
-tauri-runtime-wry = "2.0.0"
-tauri-utils = "2.0.0"
-tauri-plugin-dialog = "2.0.0"
-tauri-plugin-http = "2.0.0"
-tauri-plugin-shell = "2.0.0"
-tauri-plugin-window-state = "2.0.0"
-tauri-plugin-log = "2.0.0"
+tauri = { version = "2.0.0", features = ["config-toml"], optional = true }
+tauri-codegen = { version = "2.0.0", optional = true }
+tauri-macros = { version = "2.0.0", optional = true }
+tauri-plugin = { version = "2.0.0", optional = true }
+tauri-runtime = { version = "2.0.0", optional = true }
+tauri-runtime-wry = { version = "2.0.0", optional = true }
+tauri-utils = { version = "2.0.0", optional = true }
+tauri-plugin-dialog = { version = "2.0.0", optional = true }
+tauri-plugin-http = { version = "2.0.0", optional = true }
+tauri-plugin-shell = { version = "2.0.0", optional = true }
+tauri-plugin-window-state = { version = "2.0.0", optional = true }
+tauri-plugin-log = { version = "2.0.0", optional = true }
 
 jj-lib = { version = "0.46.0", features = ["watchman"] }
 jj-cli = "0.46.0"
@@ -112,7 +131,7 @@ gtk = "0.18"
 
 # not linux, see open_forwarded_launch()
 [target."cfg(any(target_os = \"macos\", windows))".dependencies]
-tauri-plugin-single-instance = "2.4.5"
+tauri-plugin-single-instance = { version = "2.4.5", optional = true }
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.61", features = [
