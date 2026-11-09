@@ -96,6 +96,8 @@ pub enum SessionEvent {
     /// Snapshot the working copy if it has changed since the last check.
     /// Returns `Some` when the working-copy commit was updated.
     ExecuteSnapshot {
+        /// Snapshot even when `gg.queries.auto-snapshot` (as loaded) says not to.
+        force: bool,
         tx: Sender<Option<messages::RepoStatus>>,
     },
     /// Run a mutation (e.g. abandon, rebase, bookmark create) against the
@@ -151,7 +153,7 @@ impl Session for WorkerSession {
             log::debug!("WorkerSession handling {evt:?}");
             match evt {
                 Ok(SessionEvent::EndSession) => return Ok(()),
-                Ok(SessionEvent::ExecuteSnapshot { tx }) => {
+                Ok(SessionEvent::ExecuteSnapshot { tx, .. }) => {
                     tx.send(None)?;
                 }
                 Ok(SessionEvent::ReadConfigArray { key, tx }) => {
@@ -309,14 +311,14 @@ impl Session for WorkspaceSession<'_> {
                     let revset_string = self.session.latest_query.as_deref();
                     handle_query(&mut state, &self, tx, rx, revset_string, None).await?;
                 }
-                SessionEvent::ExecuteSnapshot { tx } => {
+                SessionEvent::ExecuteSnapshot { force, tx } => {
                     let updated_head = self.load_at_head().await?; // alternatively, this could be folded into snapshot so that it's done by all mutations
                     let auto_update_stale = self
                         .data
                         .workspace_settings
                         .get_bool("snapshot.auto-update-stale")
                         .unwrap_or(false);
-                    if self.import_and_snapshot(false, auto_update_stale).await? || updated_head {
+                    if self.import_and_snapshot(force, auto_update_stale).await? || updated_head {
                         tx.send(Some(self.format_status()))?;
                     } else {
                         tx.send(None)?;

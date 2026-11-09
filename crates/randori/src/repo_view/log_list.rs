@@ -140,13 +140,21 @@ fn render_ref_column(row: &RowData, ix: usize, color: gpui_kit::Hsla, cx: &App) 
         RefKind::Remote => IconName::CloudDownload,
         RefKind::Tag => IconName::Tag,
     };
+    let mark_unpushed = crate::settings::get(cx).mark_unpushed;
     let all: SharedString = row
         .refs
         .iter()
-        .map(|chip| chip.name.as_ref())
+        .map(|chip| {
+            if mark_unpushed && chip.unpushed {
+                format!("{} (not pushed)", chip.name)
+            } else {
+                chip.name.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
         .into();
+    let first_unpushed = mark_unpushed && first.unpushed;
     h_flex()
         .id(("refs", ix))
         .w(gpui_kit::rems(lane::REFS))
@@ -176,7 +184,14 @@ fn render_ref_column(row: &RowData, ix: usize, color: gpui_kit::Hsla, cx: &App) 
                         .xsmall()
                         .text_color(color),
                 )
-                .child(div().min_w_0().truncate().child(first.name.clone())),
+                .child(div().min_w_0().truncate().child(first.name.clone()))
+                .when(first_unpushed, |chip| {
+                    chip.child(
+                        gpui_kit::component::Icon::new(IconName::Upload)
+                            .xsmall()
+                            .text_color(theme.warning),
+                    )
+                }),
         )
         .when(row.refs.len() > 1, |this| {
             this.child(

@@ -10,8 +10,9 @@ use gpui_kit::component::{WindowExt as _, notification::Notification};
 use super::*;
 use crate::github::{self, Checks, FetchError, GitHubRepo, PullRequest, Review};
 
-/// Background refresh while the tab is open.
-const REFRESH_EVERY: Duration = Duration::from_secs(60);
+/// How often the background loop checks whether a refresh is due; the
+/// interval itself is a setting.
+const TICK: Duration = Duration::from_secs(15);
 /// Window focus and tab switches refresh at most this often.
 const MIN_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -42,7 +43,8 @@ impl RepoView {
     /// Starts (or keeps) the pull request section for the workspace's GitHub
     /// remote; workspaces without one show no section.
     pub(super) fn start_pulls(&mut self, remotes: &[(String, String)], cx: &mut Context<Self>) {
-        let Some(repo) = GitHubRepo::pick(remotes) else {
+        let Some(repo) = GitHubRepo::pick(remotes).filter(|_| settings::get(cx).display.github)
+        else {
             self.pulls = None;
             return;
         };
@@ -52,11 +54,13 @@ impl RepoView {
         }
         let _timer = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(REFRESH_EVERY).await;
-                if this
-                    .update(cx, |view, cx| view.refresh_pulls(true, cx))
-                    .is_err()
-                {
+                cx.background_executor().timer(TICK).await;
+                let tab_open = this.update(cx, |view, cx| {
+                    if view.pulls_refresh_due(cx) {
+                        view.refresh_pulls(true, cx)
+                    }
+                });
+                if tab_open.is_err() {
                     break;
                 }
             }
@@ -86,7 +90,9 @@ impl RepoView {
         let recent = pulls
             .last_fetch
             .is_some_and(|at| at.elapsed() < MIN_INTERVAL);
-        if pulls.fetching || (!force && recent) {
+        // "Only when asked" also skips the refresh on window focus
+        let manual = settings::get(cx).display.pull_refresh_secs == 0;
+        if pulls.fetching || (!force && (recent || manual)) {
             return;
         }
         pulls.fetching = true;
@@ -168,6 +174,17 @@ impl RepoView {
             });
         })
         .detach();
+    }
+
+    /// The refresh interval setting has passed since the last fetch.
+    fn pulls_refresh_due(&self, cx: &App) -> bool {
+        let secs = settings::get(cx).display.pull_refresh_secs;
+        self.pulls.as_ref().is_some_and(|pulls| {
+            secs > 0
+                && pulls
+                    .last_fetch
+                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(secs))
+        })
     }
 
     pub(super) fn pulls_fetching(&self) -> bool {

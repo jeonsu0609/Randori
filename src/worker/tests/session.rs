@@ -297,7 +297,10 @@ async fn query_log_multi_resume_missing_edge() -> Result<()> {
         query: "vnstymnv | wnpusytq | ywknyuol".to_owned(),
     })?;
     // leaves the query session, which must then resume from the right place
-    tx.send(SessionEvent::ExecuteSnapshot { tx: tx_snapshot })?;
+    tx.send(SessionEvent::ExecuteSnapshot {
+        force: false,
+        tx: tx_snapshot,
+    })?;
     tx.send(SessionEvent::QueryLogNextPage { tx: tx_page2 })?;
     tx.send(SessionEvent::EndSession)?;
 

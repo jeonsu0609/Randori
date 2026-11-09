@@ -194,8 +194,9 @@ impl Worker {
 
     /// Records working-copy changes made outside Randori (editors, the jj CLI).
     /// Returns the new repository status when the working copy changed.
-    pub fn snapshot(&self) -> Result<Option<RepoStatus>> {
-        self.call(|tx| SessionEvent::ExecuteSnapshot { tx })
+    /// `force` snapshots even when the workspace's loaded config would not.
+    pub fn snapshot(&self, force: bool) -> Result<Option<RepoStatus>> {
+        self.call(|tx| SessionEvent::ExecuteSnapshot { force, tx })
     }
 }
 

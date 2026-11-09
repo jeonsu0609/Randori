@@ -16,6 +16,9 @@ pub(super) struct RefChip {
     pub(super) kind: RefKind,
     /// The ref as GG reports it, for bookmark operations.
     pub(super) store: StoreRef,
+    /// A local bookmark its remotes do not have yet (shown when
+    /// `gg.ui.mark-unpushed-bookmarks` is on).
+    pub(super) unpushed: bool,
 }
 
 /// One row of the bookmarks panel.
@@ -202,10 +205,19 @@ pub(super) fn display_path(path: &str) -> String {
 pub(super) fn ref_chips(refs: &[StoreRef]) -> Vec<RefChip> {
     refs.iter()
         .filter_map(|r| match r {
-            StoreRef::LocalBookmark { bookmark_name, .. } => Some(RefChip {
+            StoreRef::LocalBookmark {
+                bookmark_name,
+                is_synced,
+                tracking_remotes,
+                potential_remotes,
+                ..
+            } => Some(RefChip {
                 name: bookmark_name.clone().into(),
                 kind: RefKind::Local,
                 store: r.clone(),
+                // moved since it was pushed, or the repository has remotes and
+                // none of them tracks it
+                unpushed: !*is_synced || (tracking_remotes.is_empty() && *potential_remotes > 0),
             }),
             // A remote ref that is in sync with its local bookmark adds no information.
             StoreRef::RemoteBookmark {
@@ -218,12 +230,14 @@ pub(super) fn ref_chips(refs: &[StoreRef]) -> Vec<RefChip> {
                 name: format!("{bookmark_name}@{remote_name}").into(),
                 kind: RefKind::Remote,
                 store: r.clone(),
+                unpushed: false,
             }),
             StoreRef::RemoteBookmark { .. } => None,
             StoreRef::Tag { tag_name } => Some(RefChip {
                 name: tag_name.clone().into(),
                 kind: RefKind::Tag,
                 store: r.clone(),
+                unpushed: false,
             }),
         })
         .collect()
@@ -288,7 +302,32 @@ pub(super) fn relative_time(timestamp: DateTime<Local>, now: DateTime<Local>) ->
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::unified_start;
+    use super::{StoreRef, ref_chips, unified_start};
+
+    /// `remotes` is how many remotes the repository has.
+    fn local(is_synced: bool, tracking: &[&str], remotes: usize) -> StoreRef {
+        StoreRef::LocalBookmark {
+            bookmark_name: "feature".into(),
+            has_conflict: false,
+            is_synced,
+            tracking_remotes: tracking.iter().map(|r| r.to_string()).collect(),
+            available_remotes: tracking.len(),
+            potential_remotes: remotes,
+        }
+    }
+
+    #[test]
+    fn unpushed_bookmarks() {
+        let unpushed = |r: StoreRef| ref_chips(&[r])[0].unpushed;
+        // pushed and in sync
+        assert!(!unpushed(local(true, &["origin"], 1)));
+        // moved since the last push
+        assert!(unpushed(local(false, &["origin"], 1)));
+        // never pushed to the remote that exists
+        assert!(unpushed(local(true, &[], 1)));
+        // no remote at all: nothing to push to
+        assert!(!unpushed(local(true, &[], 0)));
+    }
 
     /// Values taken from `jj diff --git` on the same commits.
     #[test]

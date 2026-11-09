@@ -17,7 +17,9 @@ use anyhow::{Result, anyhow};
 use jj_cli::config::{ConfigEnv, config_from_environment, default_config_layers};
 use jj_cli::ui::Ui;
 use jj_lib::{
-    config::{ConfigGetError, ConfigLayer, ConfigNamePathBuf, ConfigSource, StackedConfig},
+    config::{
+        ConfigFile, ConfigGetError, ConfigLayer, ConfigNamePathBuf, ConfigSource, StackedConfig,
+    },
     dsl_util::{AliasDeclarationParser, AliasesMap},
     fileset::FilesetAliasesMap,
     revset::RevsetAliasesMap,
@@ -145,6 +147,42 @@ pub fn resolve_repo_path(dir: Option<&Path>) -> Option<PathBuf> {
 /// non-native `gg.*` keys are extracted as jj overrides (see module docs).
 ///
 /// Returns `(settings, revset_aliases, preset_query_choices)`.
+/// Sets (or, with `None`, removes) a boolean in the user's jj config file, the
+/// one `jj config set --user` edits. Returns that file. Open workspaces keep
+/// the settings they were loaded with; callers apply the change themselves.
+pub fn write_user_setting(name: &str, value: Option<bool>) -> Result<PathBuf> {
+    let config_env = ConfigEnv::from_environment();
+    let mut raw_config = config_from_environment(default_config_layers());
+    config_env.reload_user_config(&mut raw_config)?;
+    let path = config_env
+        .user_config_files(&raw_config)
+        .map_err(|err| anyhow!("{err:?}"))?
+        .into_iter()
+        .next()
+        .map(|file| file.path().to_owned())
+        .ok_or_else(|| anyhow!("no user config file for jj"))?;
+    write_setting_to(&path, name, value)?;
+    Ok(path)
+}
+
+/// [`write_user_setting`] for a known file.
+pub fn write_setting_to(path: &Path, name: &str, value: Option<bool>) -> Result<()> {
+    let mut file = ConfigFile::load_or_empty(ConfigSource::User, path)?;
+    let name: ConfigNamePathBuf = name.parse().map_err(|err| anyhow!("{name}: {err}"))?;
+    match value {
+        Some(value) => {
+            file.set_value(name.clone(), value)
+                .map_err(|err| anyhow!("{err}"))?;
+        }
+        None => {
+            file.delete_value(name.clone())
+                .map_err(|err| anyhow!("{err}"))?;
+        }
+    }
+    file.save()?;
+    Ok(())
+}
+
 pub fn read_config(
     repo_path: Option<&Path>,
 ) -> Result<(

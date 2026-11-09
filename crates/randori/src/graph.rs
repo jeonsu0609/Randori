@@ -261,9 +261,10 @@ impl Graph {
                     NodeKind::Conflict => theme.danger,
                     _ => lane,
                 };
-                // Square corners mark immutable history, as in jj's own log.
-                let square = node.kind == NodeKind::Immutable;
-                avatar(&author, avatar_url, px(AVATAR * scale), ring, square, cx)
+                // Immutable history keeps the round shape with a quieter ring,
+                // so every node is one shape whatever the picture is.
+                let immutable = node.kind == NodeKind::Immutable;
+                avatar(&author, avatar_url, px(AVATAR * scale), ring, immutable, cx)
                     .absolute()
                     .left(px((lane_x(node.column) - AVATAR / 2.) * scale))
                     .top(px((ROW_HEIGHT - AVATAR) / 2. * scale))
@@ -281,15 +282,15 @@ impl Graph {
     }
 }
 
-/// An author's avatar: their picture when `url` is known (and loads),
-/// otherwise their initials on `ring`'s colour, inside a `ring`-coloured
-/// border. `size` is the outer diameter; `square` rounds only the corners.
+/// An author's avatar, always round: their picture when `url` is known (and
+/// loads), otherwise their initials on `ring`'s colour, inside a
+/// `ring`-coloured border. `size` is the outer diameter; `quiet` dims the ring.
 pub fn avatar(
     name: &str,
     url: Option<SharedString>,
     size: Pixels,
     ring: Hsla,
-    square: bool,
+    quiet: bool,
     cx: &App,
 ) -> gpui_kit::Div {
     let theme = cx.theme();
@@ -298,6 +299,7 @@ pub fn avatar(
     let face = move || {
         div()
             .size_full()
+            .rounded_full()
             .flex()
             .items_center()
             .justify_center()
@@ -307,13 +309,15 @@ pub fn avatar(
             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
             .child(initials.clone())
     };
+    // The picture is clipped to a circle itself: a square image inside a
+    // rounded box would show its corners past the ring.
     div()
         .flex_none()
         .size(size)
-        .rounded(if square { size * 0.25 } else { size })
+        .rounded_full()
         .overflow_hidden()
         .border(size * (RING / AVATAR))
-        .border_color(ring)
+        .border_color(if quiet { ring.opacity(0.5) } else { ring })
         .bg(theme.background)
         .map(|this| match url {
             // Pictures with transparency are drawn for GitHub's white page;
@@ -325,11 +329,14 @@ pub fn avatar(
                     theme.background
                 };
                 let loading = face.clone();
-                this.bg(paper).child(
-                    img(url)
-                        .size_full()
-                        .with_loading(move || loading().into_any_element())
-                        .with_fallback(move || face().into_any_element()),
+                this.child(
+                    div().size_full().rounded_full().bg(paper).child(
+                        img(url)
+                            .size_full()
+                            .rounded_full()
+                            .with_loading(move || loading().into_any_element())
+                            .with_fallback(move || face().into_any_element()),
+                    ),
                 )
             }
             None => this.child(face()),

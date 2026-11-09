@@ -16,7 +16,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     command::{Command, CommandItem, CommandState},
     h_flex,
-    menu::DropdownMenu as _,
+    menu::{DropdownMenu as _, PopupMenu},
     notification::Notification,
     tab::{Tab, TabBar},
     v_flex,
@@ -30,6 +30,7 @@ use gpui_kit::{
 use serde::{Deserialize, Serialize};
 
 use crate::repo_view::{RepoView, RepoViewEvent};
+use crate::settings::{self, DiffLayout, DisplaySettings, PULL_REFRESH_CHOICES, Settings};
 use crate::worker::Worker;
 
 const LOGO: &[u8] = include_bytes!("../assets/icon/randori-128.png");
@@ -47,6 +48,10 @@ pub mod actions {
             ThemeLight,
             ThemeDark,
             ThemeSystem,
+            Quit,
+            Hide,
+            HideOthers,
+            ShowAll,
         ]
     );
 }
@@ -67,6 +72,16 @@ pub fn bind_keys(cx: &mut gpui_kit::App) {
         KeyBinding::new("ctrl-tab", NextTab, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(APP_CONTEXT)),
     ]);
+    // global: they work with nothing focused, and from the menu bar
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+        ]);
+    } else {
+        cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
+    }
 }
 
 struct RepoTab {
@@ -90,6 +105,9 @@ struct Session {
     /// "All branches" was the last scope picked; new tabs open with it.
     #[serde(default)]
     all_branches: bool,
+    /// Diff layout and GitHub; the `gg.*` settings live in jj's config.
+    #[serde(default)]
+    settings: DisplaySettings,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq)]
@@ -117,6 +135,9 @@ pub struct RandoriApp {
     focus: FocusHandle,
     _activation: Subscription,
     _appearance: Subscription,
+    /// Display settings as last saved, so the session can be written without `cx`.
+    display: DisplaySettings,
+    _settings: Subscription,
 }
 
 impl RandoriApp {
@@ -144,11 +165,33 @@ impl RandoriApp {
                 Theme::sync_system_appearance(Some(window), cx);
             }
         });
+        // The close button asks first when descriptions would be lost; closing
+        // the last window quits (see `main`).
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |app, cx| {
+                if app.unsaved_descriptions(cx) == 0 {
+                    app.save_session();
+                    true
+                } else {
+                    app.request_quit(window, cx);
+                    false
+                }
+            })
+            .unwrap_or(true)
+        });
         let session = if persist {
             load_session()
         } else {
             Session::default()
         };
+        // before any tab opens: views read it when they are created
+        cx.set_global(Settings::load(session.settings.clone()));
+        let _settings = cx.observe_global::<Settings>(|app: &mut Self, cx| {
+            app.display = settings::get(cx).display.clone();
+            app.save_session();
+            cx.notify();
+        });
         let mut app = Self {
             tabs: Vec::new(),
             active: 0,
@@ -160,6 +203,8 @@ impl RandoriApp {
             focus: cx.focus_handle(),
             _activation,
             _appearance,
+            display: session.settings.clone(),
+            _settings,
         };
         app.apply_theme(window, cx);
         // A workspace that was moved or deleted is dropped from the session
@@ -525,8 +570,45 @@ impl RandoriApp {
     }
 
     /// Closes a tab, asking first when it holds descriptions that were not saved.
+    /// Descriptions typed but not saved, across every tab.
+    fn unsaved_descriptions(&self, cx: &gpui_kit::App) -> usize {
+        self.tabs
+            .iter()
+            .map(|tab| tab.view.read(cx).unsaved_descriptions(cx))
+            .sum()
+    }
+
+    /// Quits, after confirming when descriptions would be lost.
+    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let unsaved = self.unsaved_descriptions(cx);
+        if unsaved == 0 {
+            self.save_session();
+            cx.quit();
+            return;
+        }
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            alert
+                .title("Quit Randori?")
+                .description(format!(
+                    "{unsaved} unsaved description{} will be lost.",
+                    if unsaved == 1 { "" } else { "s" }
+                ))
+                .confirm()
+                .ok_text("Quit")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(|_, _, cx| {
+                    cx.quit();
+                    true
+                })
+        });
+    }
+
     fn request_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else {
+            // ⌘W with no tab left closes the window, which quits.
+            if self.tabs.is_empty() {
+                window.remove_window();
+            }
             return;
         };
         let unsaved = tab.view.read(cx).unsaved_descriptions(cx);
@@ -618,6 +700,7 @@ impl RandoriApp {
             active: saved_active(&failed, self.active),
             theme: self.saved_theme,
             all_branches: self.all_branches,
+            settings: self.display.clone(),
         };
         if let Err(err) = store_session(&session) {
             log::warn!("cannot save open tabs: {err:#}");
@@ -713,23 +796,8 @@ impl RandoriApp {
                     .ghost()
                     .icon(IconName::Settings)
                     .tooltip("Settings")
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                        menu.label("Appearance")
-                            .menu_with_check(
-                                "Light",
-                                theme == ThemeChoice::Light,
-                                Box::new(actions::ThemeLight),
-                            )
-                            .menu_with_check(
-                                "Dark",
-                                theme == ThemeChoice::Dark,
-                                Box::new(actions::ThemeDark),
-                            )
-                            .menu_with_check(
-                                "Follow system",
-                                theme == ThemeChoice::System,
-                                Box::new(actions::ThemeSystem),
-                            )
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, cx| {
+                        settings_menu(menu, theme, cx)
                     })
             })
     }
@@ -771,6 +839,9 @@ impl Render for RandoriApp {
             .on_action(cx.listener(|app, _: &actions::OpenRepository, window, cx| {
                 app.prompt_open(window, cx)
             }))
+            .on_action(
+                cx.listener(|app, _: &actions::Quit, window, cx| app.request_quit(window, cx)),
+            )
             .on_action(cx.listener(|app, _: &actions::CloseTab, window, cx| {
                 app.request_close_tab(app.active, window, cx)
             }))
@@ -808,6 +879,103 @@ impl Render for RandoriApp {
                     })),
             )
     }
+}
+
+/// The Settings menu on the rail. Display settings apply at once; the jj ones
+/// are written to the user's jj config (the same keys GG and `jj` read).
+fn settings_menu(menu: PopupMenu, theme: ThemeChoice, cx: &gpui_kit::App) -> PopupMenu {
+    use gpui_kit::component::menu::PopupMenuItem;
+    let current = settings::get(cx);
+    let display = current.display.clone();
+    let auto_snapshot = current.auto_snapshot;
+    let mark_unpushed = current.mark_unpushed;
+
+    // A jj config write can fail (no writable config); say so instead of
+    // pretending the setting changed.
+    fn report(result: anyhow::Result<()>, window: &mut Window, cx: &mut gpui_kit::App) {
+        if let Err(err) = result {
+            window.push_notification(
+                Notification::error(format!("{err:#}")).title("Could not change the jj config"),
+                cx,
+            );
+        }
+    }
+
+    let mut menu = menu
+        .label("Appearance")
+        .menu_with_check(
+            "Light",
+            theme == ThemeChoice::Light,
+            Box::new(actions::ThemeLight),
+        )
+        .menu_with_check(
+            "Dark",
+            theme == ThemeChoice::Dark,
+            Box::new(actions::ThemeDark),
+        )
+        .menu_with_check(
+            "Follow system",
+            theme == ThemeChoice::System,
+            Box::new(actions::ThemeSystem),
+        )
+        .separator()
+        .label("Diffs open as");
+    for (layout, label) in [
+        (DiffLayout::Unified, "Unified"),
+        (DiffLayout::Split, "Split"),
+    ] {
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .checked(display.diff == layout)
+                .on_click(move |_, _, cx| settings::update_display(cx, |d| d.diff = layout)),
+        );
+    }
+    menu = menu
+        .separator()
+        .label("Snapshot when Randori comes to the front");
+    for (value, label) in [
+        (None, "Automatic (off in repositories over 100k commits)"),
+        (Some(true), "Always"),
+        (Some(false), "Never"),
+    ] {
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .checked(auto_snapshot == value)
+                .on_click(move |_, window, cx| {
+                    let result = settings::set_auto_snapshot(cx, value);
+                    report(result, window, cx)
+                }),
+        );
+    }
+    menu = menu
+        .separator()
+        .label("Bookmarks")
+        .item(
+            PopupMenuItem::new("Mark bookmarks that are not pushed")
+                .checked(mark_unpushed)
+                .on_click(move |_, window, cx| {
+                    let result = settings::set_mark_unpushed(cx, !mark_unpushed);
+                    report(result, window, cx)
+                }),
+        )
+        .separator()
+        .label("GitHub")
+        .item(
+            PopupMenuItem::new("Pull requests and avatars")
+                .checked(display.github)
+                .on_click(|_, _, cx| settings::update_display(cx, |d| d.github = !d.github)),
+        );
+    for (secs, label) in PULL_REFRESH_CHOICES {
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .checked(display.pull_refresh_secs == secs)
+                .disabled(!display.github)
+                .on_click(move |_, _, cx| {
+                    settings::update_display(cx, |d| d.pull_refresh_secs = secs)
+                }),
+        );
+    }
+    menu
 }
 
 /// The nearest ancestor that holds a `.jj` directory.

@@ -27,10 +27,10 @@ you move, split and recombine freely. That is how jj treats history.
 | Region | What it shows |
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
-| Toolbar | Workspace path, **Mine / All branches**, a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
-| Rail | Revisions, Open, the command palette (`⌘K`) and Settings (appearance: light, dark or follow the system; remembered) |
+| Toolbar | Workspace path, **Mine / All branches**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
+| Rail | Revisions, Open, the command palette (`⌘K`) and Settings (below) |
 | Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
-| Revisions | A branch / tag column, the commit graph and fixed columns: change id, description, author, relative time. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's avatar (GitHub picture or initials); rounded squares are immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Right-click for revision commands; drag a revision onto another to rebase it there |
+| Revisions | A branch / tag column, the commit graph and fixed columns: change id, description, author, relative time. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights |
 | Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Status bar | Worker state, the running jj operation and its progress, the last operation, the working copy and the number of loaded revisions |
@@ -73,6 +73,27 @@ operation log, and git credentials are asked for when a remote needs them.
 | Fetch | `⌘⇧F` fetches every remote |
 | Undo / redo | `⌘Z` / `⌘⇧Z` in the revision list |
 
+### Settings
+
+The rail's Settings menu. Display settings are saved with Randori's session;
+the jj ones are the `[gg]` keys GG reads, written to your jj user config (the
+file `jj config set --user` edits), so the jj CLI and GG agree with Randori.
+Changes apply to open tabs at once.
+
+| Setting | Saved in | Effect |
+| --- | --- | --- |
+| Appearance | session | Light, dark or follow the system |
+| Diffs open as | session | Unified or split; the diff header's switch changes it too |
+| Snapshot when Randori comes to the front | `gg.queries.auto-snapshot` | Automatic (jj's default: off in repositories over `gg.queries.large-repo-heuristic`, 100k commits), always or never |
+| Mark bookmarks that are not pushed | `gg.ui.mark-unpushed-bookmarks` | Upload mark on local bookmarks that moved since their push, or that no remote tracks |
+| Pull requests and avatars | session | Turns the GitHub section and avatar requests off |
+| Pull request refresh | session | Every minute, 5 or 15 minutes, or only when asked |
+
+**Presets** lists GG's revset presets: the `[gg.presets]` table of your jj
+config, or GG's own (tracked bookmarks, remote bookmarks, all revisions) when
+it is empty. Kebab-case names become titles (`local-bookmarks` → "Local
+Bookmarks").
+
 ### Pull requests
 
 When a workspace has a GitHub remote (`origin`, or else the first remote on
@@ -80,8 +101,9 @@ github.com or a GitHub Enterprise host), the side panel lists its open pull
 requests, newest activity first: author, number and title, head → base branch,
 the review decision and the checks of the head commit. Click one to select its
 head revision (switching to **All branches** if it is not loaded), or open it on
-GitHub. The list refreshes every minute, when the window comes back to the front
-(at most every 30 seconds) and from **Refresh pull requests** in the palette.
+GitHub. The list refreshes on the interval chosen in Settings (every minute by
+default), when the window comes back to the front (at most every 30 seconds)
+and from **Refresh pull requests** in the palette.
 The same query brings the avatars of recent authors on the default branch and
 on the pull requests' base branches.
 
@@ -108,11 +130,13 @@ sign in (`gh auth login`); nothing else needs it.
 | `⌘R` (`Ctrl+R`) | Workspace | Reload |
 | `⌘B` (`Ctrl+B`) | Workspace | Show or hide the bookmarks panel |
 | `⌘O` (`Ctrl+O`) | Window | Open a workspace in a new tab |
-| `⌘W` (`Ctrl+W`) | Window | Close the tab |
+| `⌘W` (`Ctrl+W`) | Window | Close the tab; with no tab open, close the window |
+| `⌘Q` (`Ctrl+Q`) | Anywhere | Quit (asks first when descriptions are unsaved). Closing the window quits too |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Window | Next / previous tab |
 | `⌘K` (`Ctrl+K`) | Window | Command palette |
 
-On Linux and Windows, `⌘` is `Ctrl`.
+On Linux and Windows, `⌘` is `Ctrl`. On macOS the menu bar has the same
+commands (Randori, File, View, Window), with Hide (`⌘H`) and Services.
 
 The layout follows the professional workstation style of
 [Longbridge Pro](https://longbridge.com/desktop), the application GPUI Kit was

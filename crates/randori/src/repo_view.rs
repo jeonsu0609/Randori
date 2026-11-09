@@ -55,6 +55,7 @@ mod panels;
 mod pick;
 mod pulls;
 
+use crate::settings::{self, DiffLayout, Settings};
 use crate::worker::{Worker, WorkerEvent};
 use dnd::*;
 use menus::*;
@@ -178,6 +179,8 @@ struct WorkspaceInfo {
     default_query: String,
     /// `(name, fetch URL)` of every git remote, for the GitHub section.
     remote_urls: Vec<(String, String)>,
+    /// `gg.presets` (or GG's built-in ones) as `(title, revset)`.
+    presets: Vec<(SharedString, String)>,
     operation: SharedString,
     /// Git remotes, for fetch.
     remotes: Vec<String>,
@@ -286,7 +289,8 @@ impl RepoView {
             },
         )];
 
-        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(DiffMode::Unified));
+        let diff_mode = diff_mode_of(settings::get(cx).display.diff);
+        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(diff_mode));
         let diff_events = cx.subscribe(&diff, |view: &mut Self, _, event: &DiffEvent, cx| {
             match event {
                 DiffEvent::SelectionEnded(range) => view.diff_selection = Some(range.clone()),
@@ -302,6 +306,8 @@ impl RepoView {
                 .placeholder("Describe this change")
         });
         let mut _subscriptions = _subscriptions;
+        _subscriptions
+            .push(cx.observe_global::<Settings>(|view: &mut Self, cx| view.apply_settings(cx)));
         _subscriptions.push(diff_events);
         _subscriptions.push(cx.subscribe_in(
             &description_input,
@@ -336,7 +342,7 @@ impl RepoView {
             detail_loading: false,
             selected_file: None,
             diff,
-            diff_mode: DiffMode::Unified,
+            diff_mode,
             revset,
             sidebar_visible: true,
             log_focus: cx.focus_handle(),
@@ -443,6 +449,7 @@ impl RepoView {
                                     query,
                                     default_query,
                                     remote_urls: git_remote_urls,
+                                    presets: preset_list(&query_choices),
                                     operation: status.operation_description.into(),
                                     remotes: git_remotes,
                                     can_redo: status.can_redo,
@@ -596,9 +603,17 @@ impl RepoView {
             return;
         }
         self.refresh_pulls(false, cx);
+        // The setting as it is now; the worker holds the config it loaded with.
+        let force = match settings::get(cx).auto_snapshot {
+            Some(false) => return,
+            Some(true) => true,
+            None => false,
+        };
         let worker = self.worker.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { worker.snapshot() }).await;
+            let result = cx
+                .background_spawn(async move { worker.snapshot(force) })
+                .await;
             let _ = this.update(cx, |view, cx| match result {
                 Ok(Some(status)) => {
                     if let Some(workspace) = &mut view.workspace {
@@ -806,9 +821,49 @@ impl RepoView {
         cx.notify();
     }
 
+    /// The diff header's switch: changes this tab and the layout new diffs open in.
     fn set_diff_mode(&mut self, mode: DiffMode, cx: &mut Context<Self>) {
+        self.show_diff_mode(mode, cx);
+        let layout = if mode == DiffMode::Split {
+            DiffLayout::Split
+        } else {
+            DiffLayout::Unified
+        };
+        settings::update_display(cx, |display| display.diff = layout);
+    }
+
+    fn show_diff_mode(&mut self, mode: DiffMode, cx: &mut Context<Self>) {
+        if self.diff_mode == mode {
+            return;
+        }
         self.diff_mode = mode;
         self.diff.update(cx, |state, cx| state.set_mode(mode, cx));
+        cx.notify();
+    }
+
+    /// Follows a settings change made in this or another tab.
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let current = settings::get(cx);
+        let mode = diff_mode_of(current.display.diff);
+        let github = current.display.github;
+        self.show_diff_mode(mode, cx);
+        if !github {
+            // no more requests to GitHub, and no pictures from it
+            self.pulls = None;
+            self.avatars = Rc::default();
+        } else if self.pulls.is_none()
+            && let Some(urls) = self.workspace.as_ref().map(|ws| ws.remote_urls.clone())
+        {
+            self.start_pulls(&urls, cx);
+        }
+        cx.notify();
+    }
+
+    /// Runs `query` from the presets menu.
+    pub(super) fn set_query(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.revset
+            .update(cx, |state, cx| state.set_value(query.clone(), window, cx));
+        self.run_query(query, cx);
         cx.notify();
     }
 
@@ -1063,6 +1118,38 @@ impl RepoView {
             self.description_input.read(cx).value().trim_end() != saved.trim_end()
         })
     }
+}
+
+fn diff_mode_of(layout: DiffLayout) -> DiffMode {
+    match layout {
+        DiffLayout::Unified => DiffMode::Unified,
+        DiffLayout::Split => DiffMode::Split,
+    }
+}
+
+/// GG's query choices without the default (that is "Mine"), titled the way GG
+/// shows them: `tracked-bookmarks` → "Tracked Bookmarks".
+fn preset_list(choices: &HashMap<String, String>) -> Vec<(SharedString, String)> {
+    let mut presets: Vec<(SharedString, String)> = choices
+        .iter()
+        .filter(|(name, _)| name.as_str() != "default")
+        .map(|(name, revset)| {
+            let title: Vec<String> = name
+                .split('-')
+                .filter(|word| !word.is_empty())
+                .map(|word| {
+                    let mut chars = word.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().chain(chars).collect())
+                        .unwrap_or_default()
+                })
+                .collect();
+            (title.join(" ").into(), revset.clone())
+        })
+        .collect();
+    presets.sort();
+    presets
 }
 
 /// What happened when the tab tried to open its workspace; the window uses it

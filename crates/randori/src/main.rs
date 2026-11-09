@@ -8,6 +8,7 @@ mod assets;
 mod github;
 mod graph;
 mod repo_view;
+mod settings;
 mod worker;
 
 use std::path::PathBuf;
@@ -149,6 +150,21 @@ fn main() -> Result<()> {
             })
             .expect("failed to open the main window");
             cx.activate(true);
+            install_app_menu(cx);
+            // Randori has one window; closing it ends the app instead of
+            // leaving it running with nothing to show.
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            // The window handles Quit itself (it asks about unsaved
+            // descriptions); this runs only when no window took it.
+            cx.on_action(|_: &app_view::actions::Quit, cx| cx.quit());
+            cx.on_action(|_: &app_view::actions::Hide, cx| cx.hide());
+            cx.on_action(|_: &app_view::actions::HideOthers, cx| cx.hide_other_apps());
+            cx.on_action(|_: &app_view::actions::ShowAll, cx| cx.unhide_other_apps());
 
             let select_row = args.select_row;
             let screenshot = args.screenshot.clone();
@@ -274,4 +290,42 @@ fn run_check(worker: &Worker, workspace: Option<PathBuf>, revset: Option<String>
         );
     }
     Ok(())
+}
+
+/// The menu bar (macOS) or application menu. Shortcuts shown next to items
+/// come from the key bindings.
+fn install_app_menu(cx: &mut gpui_kit::App) {
+    use app_view::actions as app;
+    use gpui_kit::{Menu, MenuItem, SystemMenuType};
+    use repo_view::actions as repo;
+    cx.set_menus([
+        Menu::new("Randori").items([
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide Randori", app::Hide),
+            MenuItem::action("Hide Others", app::HideOthers),
+            MenuItem::action("Show All", app::ShowAll),
+            MenuItem::separator(),
+            MenuItem::action("Quit Randori", app::Quit),
+        ]),
+        Menu::new("File").items([
+            MenuItem::action("Open Workspace…", app::OpenRepository),
+            MenuItem::separator(),
+            MenuItem::action("Close Tab", app::CloseTab),
+        ]),
+        Menu::new("View").items([
+            MenuItem::action("Command Palette", app::OpenCommandPalette),
+            MenuItem::separator(),
+            MenuItem::action("My Work", repo::ShowMyWork),
+            MenuItem::action("All Branches", repo::ShowAllBranches),
+            MenuItem::action("Show or Hide Side Panel", repo::ToggleSidebar),
+            MenuItem::separator(),
+            MenuItem::action("Reload Revisions", repo::Reload),
+            MenuItem::action("Refresh Pull Requests", repo::RefreshPullRequests),
+        ]),
+        Menu::new("Window").items([
+            MenuItem::action("Next Tab", app::NextTab),
+            MenuItem::action("Previous Tab", app::PreviousTab),
+        ]),
+    ]);
 }

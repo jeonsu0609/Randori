@@ -529,3 +529,31 @@ mod extract_overrides {
         assert!(settings.get_string("queries.auto-snapshot").is_err());
     }
 }
+
+#[test]
+fn write_setting_sets_and_removes_a_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[user]\nname = \"Someone\"\n").unwrap();
+
+    write_setting_to(&path, "gg.queries.auto-snapshot", Some(false)).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("name = \"Someone\""),
+        "keeps other keys: {text}"
+    );
+    assert!(text.contains("auto-snapshot = false"), "{text}");
+
+    write_setting_to(&path, "gg.queries.auto-snapshot", None).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("auto-snapshot"), "{text}");
+
+    // a missing file is created
+    let fresh = dir.path().join("new.toml");
+    write_setting_to(&fresh, "gg.ui.mark-unpushed-bookmarks", Some(true)).unwrap();
+    assert!(
+        std::fs::read_to_string(&fresh)
+            .unwrap()
+            .contains("mark-unpushed-bookmarks = true")
+    );
+}

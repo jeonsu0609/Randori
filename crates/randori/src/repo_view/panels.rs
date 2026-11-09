@@ -1,5 +1,7 @@
 //! Toolbar, bookmarks panel, status bar and the resizable layout around them.
 
+use gpui_kit::component::menu::DropdownMenu as _;
+
 use super::*;
 
 impl RepoView {
@@ -64,6 +66,47 @@ impl RepoView {
                 )
                 .child(div().w_2())
             })
+            .when_some(
+                self.workspace
+                    .as_ref()
+                    .filter(|ws| ready && !ws.presets.is_empty())
+                    .map(|ws| (ws.presets.clone(), ws.query.clone())),
+                |bar, (presets, query)| {
+                    let view = cx.entity().downgrade();
+                    bar.child(
+                        Button::new("presets")
+                            .ghost()
+                            .xsmall()
+                            .label("Presets")
+                            .icon(IconName::ChevronDown)
+                            .tooltip("Revsets from gg.presets")
+                            .dropdown_menu_with_anchor(
+                                gpui_kit::Anchor::TopRight,
+                                move |mut menu, _, _| {
+                                    for (title, revset) in &presets {
+                                        let view = view.clone();
+                                        let revset = revset.clone();
+                                        menu =
+                                            menu.item(
+                                                gpui_kit::component::menu::PopupMenuItem::new(
+                                                    title.clone(),
+                                                )
+                                                .checked(revset == query)
+                                                .on_click(move |_, window, cx| {
+                                                    let revset = revset.clone();
+                                                    let _ = view.update(cx, |view, cx| {
+                                                        view.set_query(revset, window, cx)
+                                                    });
+                                                }),
+                                            );
+                                    }
+                                    menu
+                                },
+                            ),
+                    )
+                    .child(div().w_2())
+                },
+            )
             .child(
                 div().w_72().child(
                     Input::new(&self.revset)
@@ -122,6 +165,7 @@ impl RepoView {
             })
             .collect();
         let selected_row = self.selected;
+        let mark_unpushed = settings::get(cx).mark_unpushed;
 
         v_flex()
             .size_full()
@@ -202,11 +246,20 @@ impl RepoView {
                                             .flex_1()
                                             .min_w_0()
                                             .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_medium()
-                                                    .truncate()
-                                                    .child(item.chip.name.clone()),
+                                                h_flex()
+                                                    .gap_1p5()
+                                                    .min_w_0()
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .font_medium()
+                                                            .truncate()
+                                                            .child(item.chip.name.clone()),
+                                                    )
+                                                    .when(
+                                                        mark_unpushed && item.chip.unpushed,
+                                                        |this| this.child(unpushed_mark(cx)),
+                                                    ),
                                             )
                                             .child(
                                                 h_flex()
@@ -451,4 +504,17 @@ impl RepoView {
             }
         }
     }
+}
+
+/// "Not pushed" next to a local bookmark its remotes do not have.
+pub(super) fn unpushed_mark(cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    h_flex()
+        .flex_none()
+        .gap_0p5()
+        .text_xs()
+        .text_color(theme.warning)
+        .child(gpui_kit::component::Icon::new(IconName::Upload).xsmall())
+        .child("not pushed")
+        .into_any_element()
 }
