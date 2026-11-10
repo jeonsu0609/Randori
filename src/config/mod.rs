@@ -161,6 +161,12 @@ pub fn write_user_list(name: &str, values: &[String]) -> Result<PathBuf> {
     write_user_value(name, Some(values.iter().map(String::as_str).collect()))
 }
 
+/// Sets (or, with `None`, removes) a string such as `user.name` or
+/// `ui.merge-editor` in the user's jj config file. Returns that file.
+pub fn write_user_string(name: &str, value: Option<&str>) -> Result<PathBuf> {
+    write_user_value(name, value.map(ConfigValue::from))
+}
+
 fn write_user_value(name: &str, value: Option<ConfigValue>) -> Result<PathBuf> {
     // each write reads the file, edits it and writes it back; two at once
     // (a setting and the recent workspaces) would lose one of the edits

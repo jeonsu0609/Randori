@@ -232,6 +232,9 @@ pub struct RepoStatus {
     pub operation_description: String,
     pub working_copy: CommitId,
     pub can_redo: bool,
+    /// The working-copy commit changes files (it is not empty), as `jj log`
+    /// would not mark it `(empty)`.
+    pub working_copy_changed: bool,
 }
 
 /// Events requiring user interaction during clone/init flows.

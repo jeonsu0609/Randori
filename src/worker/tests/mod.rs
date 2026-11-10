@@ -277,6 +277,29 @@ async fn snapshot_updates_wc_if_changed() -> Result<()> {
     Ok(())
 }
 
+/// the status says whether the working copy changes files: the tab marks itself by it
+#[tokio::test]
+async fn status_tells_whether_the_working_copy_changes_files() -> Result<()> {
+    let repo = mkrepo();
+
+    let mut session = WorkerSession::default();
+    let mut ws = session.load_workspace(repo.path()).await?;
+    fs::write(repo.path().join("new.txt"), "new").unwrap();
+    ws.import_and_snapshot(true, false).await?;
+    assert!(ws.format_status().working_copy_changed);
+
+    // a new change on top of it starts empty
+    let mut tx = ws.start_transaction().await?;
+    let current = tx.repo().store().get_commit(ws.wc_id())?;
+    tx.repo_mut()
+        .check_out(ws.name().to_owned(), &current)
+        .await?;
+    ws.finish_transaction(tx, "new change").await?;
+    assert!(!ws.format_status().working_copy_changed);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn transaction_updates_wc_if_snapshot() -> Result<()> {
     let repo = mkrepo();

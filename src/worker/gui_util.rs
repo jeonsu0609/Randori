@@ -819,7 +819,19 @@ impl WorkspaceSession<'_> {
                 .clone(),
             working_copy: self.format_commit_id(&self.operation.wc_id),
             can_redo: self.can_redo(),
+            working_copy_changed: self.working_copy_changed(),
         }
+    }
+
+    /// Whether the working-copy commit changes anything. A failed read
+    /// counts as unchanged: the status still goes out.
+    fn working_copy_changed(&self) -> bool {
+        let repo = self.operation.repo.as_ref();
+        let commit = match repo.store().get_commit(&self.operation.wc_id) {
+            Ok(commit) => commit,
+            Err(_) => return false,
+        };
+        commit.is_empty(repo).block_on().is_ok_and(|empty| !empty)
     }
 
     fn can_redo(&self) -> bool {
