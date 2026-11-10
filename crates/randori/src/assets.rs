@@ -96,6 +96,7 @@ mod tests {
             include_str!("repo_view/ops.rs"),
             include_str!("repo_view/panels.rs"),
             include_str!("repo_view/pick.rs"),
+            include_str!("repo_view/picked_up.rs"),
             include_str!("repo_view/pulls.rs"),
             include_str!("repo_view/split.rs"),
             include_str!("repo_view/switcher.rs"),

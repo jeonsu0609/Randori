@@ -38,10 +38,13 @@ impl RepoView {
         }
         let before = self.check_picked_up.take().flatten();
         let moved = before.is_none() || before != self.working_copy_change();
-        // "Never snapshot" means no snapshot here either
-        if !moved || settings::get(cx).auto_snapshot == Some(false) {
+        // "Never snapshot" means no snapshot here either; "Automatic" leaves
+        // it to the engine, which skips it in large repositories
+        let auto_snapshot = settings::get(cx).auto_snapshot;
+        if !moved || auto_snapshot == Some(false) {
             return;
         }
+        let force = auto_snapshot == Some(true);
         let worker = self.worker.clone();
         self.picked_up_checking = true;
         cx.spawn(async move |this, cx| {
@@ -50,7 +53,7 @@ impl RepoView {
                     // files the working copy adds on its own (an edited commit's)
                     // are not picked up; only what the snapshot brings in is
                     let before = added_in_working_copy(&worker)?;
-                    if worker.snapshot(true)?.is_none() {
+                    if worker.snapshot(force)?.is_none() {
                         return anyhow::Ok(Vec::new());
                     }
                     let mut after = added_in_working_copy(&worker)?;
