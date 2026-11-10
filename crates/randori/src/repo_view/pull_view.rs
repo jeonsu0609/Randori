@@ -1003,11 +1003,7 @@ impl RepoView {
         let owner = cx.entity().downgrade();
         let list = div()
             .relative()
-            .w(gpui_kit::rems(18.))
-            .flex_none()
-            .h_full()
-            .border_r_1()
-            .border_color(theme.border)
+            .size_full()
             .child(
                 uniform_list("pull-files", rows.len(), move |range, _, cx| {
                     let theme = cx.theme();
@@ -1026,11 +1022,17 @@ impl RepoView {
                             ListItem::new(("pull-file", ix))
                                 // one height for every row, as a uniform list needs
                                 .h(gpui_kit::rems(2.75))
+                                // a uniform list lays each row out on its own,
+                                // as wide as its text unless told: the list's
+                                // width, so a long path ends in an ellipsis
+                                // instead of pushing the counts out
+                                .w_full()
                                 .px_3()
                                 .selected(selected == Some(ix))
                                 .child(
                                     h_flex()
                                         .w_full()
+                                        .min_w_0()
                                         .gap_2()
                                         .text_sm()
                                         .child(
@@ -1045,6 +1047,7 @@ impl RepoView {
                                             v_flex()
                                                 .flex_1()
                                                 .min_w_0()
+                                                .overflow_hidden()
                                                 .child(div().truncate().child(file.name.clone()))
                                                 .when(!file.dir.is_empty(), |this| {
                                                     this.child(
@@ -1061,6 +1064,7 @@ impl RepoView {
                                             |this, count| {
                                                 this.child(
                                                     h_flex()
+                                                        .flex_none()
                                                         .gap_0p5()
                                                         .text_xs()
                                                         .text_color(theme.muted_foreground)
@@ -1076,6 +1080,7 @@ impl RepoView {
                                         )
                                         .child(
                                             div()
+                                                .flex_none()
                                                 .text_xs()
                                                 .text_color(count_color(
                                                     file.additions,
@@ -1086,6 +1091,7 @@ impl RepoView {
                                         )
                                         .child(
                                             div()
+                                                .flex_none()
                                                 .text_xs()
                                                 .text_color(count_color(
                                                     file.deletions,
@@ -1156,11 +1162,15 @@ impl RepoView {
                 self.split_diff("pull-split", diff, &pull.diff, cx)
             }));
 
-        h_flex()
-            .size_full()
-            .min_h_0()
-            .child(list)
-            .child(body)
+        // the divider between the files and the diff moves, as the panels do
+        h_resizable("pull-files-split")
+            .child(
+                resizable_panel()
+                    .size(gpui_kit::px(288.))
+                    .size_range(gpui_kit::px(160.)..gpui_kit::px(720.))
+                    .child(list),
+            )
+            .child(resizable_panel().child(body))
             .into_any_element()
     }
 }
