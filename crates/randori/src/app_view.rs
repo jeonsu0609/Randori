@@ -142,6 +142,10 @@ pub struct RandoriApp {
     pending_theme: Option<ThemeChoice>,
     /// A session write waiting for settings to stop changing.
     save_task: Option<gpui_kit::Task<()>>,
+    /// The display this window is on, where Settings opens; kept as the
+    /// window moves.
+    on_display: Rc<std::cell::Cell<Option<gpui_kit::DisplayId>>>,
+    _display: Subscription,
     _activation: Subscription,
     _appearance: Subscription,
     /// Display settings as last saved, so the session can be written without `cx`.
@@ -228,6 +232,15 @@ impl RandoriApp {
         let _fonts = cx.observe_global::<crate::settings_window::CodeFonts>(|_, cx| {
             apply_code_font(cx);
         });
+        // where Settings opens: this window's display, followed when it
+        // changes (GPUI updates the window's display before telling)
+        let on_display = Rc::new(std::cell::Cell::new(
+            window.display(cx).map(|display| display.id()),
+        ));
+        let _display = cx.observe_window_display(window, {
+            let on_display = on_display.clone();
+            move |_, window, cx| on_display.set(window.display(cx).map(|display| display.id()))
+        });
         let mut app = Self {
             tabs: Vec::new(),
             active: 0,
@@ -239,6 +252,8 @@ impl RandoriApp {
             focus: cx.focus_handle(),
             pending_theme: None,
             save_task: None,
+            on_display,
+            _display,
             _activation,
             _appearance,
             display: session.settings.clone(),
@@ -423,6 +438,11 @@ impl RandoriApp {
             ThemeChoice::System => Theme::sync_system_appearance(Some(window), cx),
         }
         theme_changed(cx);
+    }
+
+    /// The display this window is on, kept as it moves.
+    pub fn on_display(&self) -> Rc<std::cell::Cell<Option<gpui_kit::DisplayId>>> {
+        self.on_display.clone()
     }
 
     /// The appearance the session keeps (not a `--light` run's).

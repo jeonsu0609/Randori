@@ -7,7 +7,7 @@ use super::*;
 pub(super) fn general_page(cx: &App) -> SettingPage {
     let theme_choice = cx
         .try_global::<MainApp>()
-        .and_then(|main| main.0.upgrade())
+        .and_then(|main| main.app.upgrade())
         .map(|app| app.read(cx).saved_theme());
     SettingPage::new("General")
         .icon(IconName::Settings)
@@ -38,7 +38,7 @@ pub(super) fn general_page(cx: &App) -> SettingPage {
                                 _ => ThemeChoice::Dark,
                             };
                             if let Some(app) =
-                                cx.try_global::<MainApp>().and_then(|m| m.0.upgrade())
+                                cx.try_global::<MainApp>().and_then(|m| m.app.upgrade())
                             {
                                 app.update(cx, |app, cx| app.request_theme(choice, cx));
                             }

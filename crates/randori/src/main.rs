@@ -160,7 +160,10 @@ fn main() -> Result<()> {
             .expect("failed to open the main window");
             cx.activate(true);
             install_app_menu(cx);
-            cx.set_global(settings_window::MainApp(app.downgrade()));
+            cx.set_global(settings_window::MainApp {
+                app: app.downgrade(),
+                display: app.read(cx).on_display(),
+            });
             // Randori has one main window; closing it ends the app instead of
             // leaving it running with nothing to show (or only Settings).
             cx.on_window_closed(|cx, _| {

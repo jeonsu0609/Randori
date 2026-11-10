@@ -38,8 +38,14 @@ use crate::settings::{
 };
 use pages::{describe_page, diff_page, general_page, integration_page, jj_page, revisions_page};
 
-/// The main window's app, which keeps the appearance (it re-themes windows).
-pub struct MainApp(pub WeakEntity<RandoriApp>);
+/// The main window's app, which keeps the appearance (it re-themes windows),
+/// and the display it is on, which Settings opens on. The main window keeps
+/// the display as it moves: Settings opens from inside it, where the window
+/// cannot be asked.
+pub struct MainApp {
+    pub app: WeakEntity<RandoriApp>,
+    pub display: std::rc::Rc<std::cell::Cell<Option<gpui_kit::DisplayId>>>,
+}
 
 impl Global for MainApp {}
 
@@ -128,8 +134,18 @@ pub fn open(cx: &mut App) {
     {
         return;
     }
+    // on the display Randori is on: without one GPUI picks the primary
+    // display, another monitor than the main window's
+    let display = cx
+        .try_global::<MainApp>()
+        .and_then(|main| main.display.get());
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(880.), px(640.)), cx)),
+        window_bounds: Some(WindowBounds::Windowed(gpui_kit::Bounds::centered(
+            display,
+            size(px(880.), px(640.)),
+            cx,
+        ))),
+        display_id: display,
         window_min_size: Some(size(px(640.), px(420.))),
         titlebar: Some(gpui_kit::TitlebarOptions {
             title: Some("Settings".into()),
