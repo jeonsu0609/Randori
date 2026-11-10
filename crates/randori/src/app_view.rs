@@ -16,21 +16,20 @@ use gpui_kit::component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     command::{Command, CommandItem, CommandState},
     h_flex,
-    menu::{DropdownMenu as _, PopupMenu},
     notification::Notification,
     tab::{Tab, TabBar},
     v_flex,
 };
 use gpui_kit::{
-    Action, Anchor, AppContext as _, Context, Entity, FocusHandle, Image, ImageFormat,
+    Action, AppContext as _, Context, Entity, FocusHandle, Image, ImageFormat,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
-    Render, SharedString, Styled as _, Subscription, Window, div, img, prelude::FluentBuilder as _,
-    px,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    img, prelude::FluentBuilder as _, px,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::repo_view::{RepoView, RepoViewEvent};
-use crate::settings::{self, DiffLayout, DisplaySettings, PULL_REFRESH_CHOICES, Settings};
+use crate::settings::{self, DisplaySettings, Settings};
 use crate::worker::Worker;
 
 const LOGO: &[u8] = include_bytes!("../assets/icon/randori-128.png");
@@ -45,6 +44,7 @@ pub mod actions {
             NextTab,
             PreviousTab,
             OpenCommandPalette,
+            OpenSettings,
             ThemeLight,
             ThemeDark,
             ThemeSystem,
@@ -75,12 +75,16 @@ pub fn bind_keys(cx: &mut gpui_kit::App) {
     // global: they work with nothing focused, and from the menu bar
     if cfg!(target_os = "macos") {
         cx.bind_keys([
+            KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("alt-cmd-h", HideOthers, None),
         ]);
     } else {
-        cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-,", OpenSettings, None),
+            KeyBinding::new("ctrl-q", Quit, None),
+        ]);
     }
 }
 
@@ -133,11 +137,17 @@ pub struct RandoriApp {
     all_branches: bool,
     /// Focus for the window itself, so its keys (⌘P, ⌘O) work with no tab open.
     focus: FocusHandle,
+    /// An appearance the Settings window chose, applied on the next frame
+    /// (theming needs this window).
+    pending_theme: Option<ThemeChoice>,
+    /// A session write waiting for settings to stop changing.
+    save_task: Option<gpui_kit::Task<()>>,
     _activation: Subscription,
     _appearance: Subscription,
     /// Display settings as last saved, so the session can be written without `cx`.
     display: DisplaySettings,
     _settings: Subscription,
+    _fonts: Subscription,
 }
 
 impl RandoriApp {
@@ -163,6 +173,7 @@ impl RandoriApp {
         let _appearance = cx.observe_window_appearance(window, |app, window, cx| {
             if app.theme == ThemeChoice::System {
                 Theme::sync_system_appearance(Some(window), cx);
+                theme_changed(cx);
             }
         });
         // The close button asks first when descriptions would be lost; closing
@@ -185,12 +196,37 @@ impl RandoriApp {
         } else {
             Session::default()
         };
+        // screenshot builds can show settings without touching the session
+        #[cfg(feature = "screenshot")]
+        let session = Session {
+            settings: std::env::var("RANDORI_DISPLAY")
+                .ok()
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or(session.settings),
+            ..session
+        };
         // before any tab opens: views read it when they are created
         cx.set_global(Settings::load(session.settings.clone()));
         let _settings = cx.observe_global::<Settings>(|app: &mut Self, cx| {
-            app.display = settings::get(cx).display.clone();
-            app.save_session();
+            let display = settings::get(cx).display.clone();
+            let font_changed = (&display.code_font, display.code_font_size)
+                != (&app.display.code_font, app.display.code_font_size);
+            let folders_changed = display.source_folders != app.display.source_folders;
+            app.display = display;
+            if folders_changed {
+                crate::repo_view::scan_source_folders(cx);
+            }
+            if font_changed {
+                apply_code_font(cx);
+            }
+            // settings come in bursts (a number field's steps, a list of
+            // switches): the session is written once they stop
+            app.save_session_soon(cx);
             cx.notify();
+        });
+        // a saved code font is used once the lookup says it is installed
+        let _fonts = cx.observe_global::<crate::settings_window::CodeFonts>(|_, cx| {
+            apply_code_font(cx);
         });
         let mut app = Self {
             tabs: Vec::new(),
@@ -201,12 +237,16 @@ impl RandoriApp {
             saved_theme: session.theme,
             all_branches: session.all_branches,
             focus: cx.focus_handle(),
+            pending_theme: None,
+            save_task: None,
             _activation,
             _appearance,
             display: session.settings.clone(),
             _settings,
+            _fonts,
         };
         app.apply_theme(window, cx);
+        crate::repo_view::scan_source_folders(cx);
         // A workspace that was moved or deleted is dropped from the session
         // instead of coming back as an error tab on every launch.
         let (existing, missing) = split_existing(session.tabs);
@@ -307,6 +347,11 @@ impl RandoriApp {
                         }
                     }
                     RepoViewEvent::ScopeChanged { all } => app.all_branches = *all,
+                    // only the tab's dot changes; nothing to save
+                    RepoViewEvent::WorkingCopyChanged => {
+                        cx.notify();
+                        return;
+                    }
                     RepoViewEvent::OpenWorkspace(path) => {
                         if let Err(err) = app.open_tab(path.clone(), None, window, cx) {
                             window.push_notification(
@@ -377,6 +422,19 @@ impl RandoriApp {
             ThemeChoice::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
             ThemeChoice::System => Theme::sync_system_appearance(Some(window), cx),
         }
+        theme_changed(cx);
+    }
+
+    /// The appearance the session keeps (not a `--light` run's).
+    pub fn saved_theme(&self) -> ThemeChoice {
+        self.saved_theme
+    }
+
+    /// The Settings window picked an appearance; it is applied on the next
+    /// frame, which has this window.
+    pub fn request_theme(&mut self, theme: ThemeChoice, cx: &mut Context<Self>) {
+        self.pending_theme = Some(theme);
+        cx.notify();
     }
 
     fn set_theme(&mut self, theme: ThemeChoice, window: &mut Window, cx: &mut Context<Self>) {
@@ -574,6 +632,11 @@ impl RandoriApp {
                 IconName::ChevronLeft,
                 Box::new(actions::PreviousTab),
             ),
+            (
+                "Settings…",
+                IconName::Settings,
+                Box::new(actions::OpenSettings),
+            ),
             ("Light theme", IconName::Sun, Box::new(actions::ThemeLight)),
             ("Dark theme", IconName::Moon, Box::new(actions::ThemeDark)),
             (
@@ -678,7 +741,9 @@ impl RandoriApp {
             cx.quit();
             return;
         }
+        let app = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
+            let app = app.clone();
             alert
                 .title("Quit Randori?")
                 .description(format!(
@@ -688,7 +753,9 @@ impl RandoriApp {
                 .confirm()
                 .ok_text("Quit")
                 .ok_variant(ButtonVariant::Danger)
-                .on_ok(|_, _, cx| {
+                .on_ok(move |_, _, cx| {
+                    // the tabs and a settings write still waiting
+                    let _ = app.update(cx, |app, _| app.save_session());
                     cx.quit();
                     true
                 })
@@ -787,6 +854,17 @@ impl RandoriApp {
         ));
     }
 
+    /// Writes the session half a second after the last call. Closing the
+    /// window writes it at once (`on_window_should_close`).
+    fn save_session_soon(&mut self, cx: &mut Context<Self>) {
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let _ = this.update(cx, |app, _| app.save_session());
+        }));
+    }
+
     fn save_session(&self) {
         if !self.persist {
             return;
@@ -826,6 +904,8 @@ impl RandoriApp {
                         cx.listener(|app, ix: &usize, window, cx| app.activate(*ix, window, cx)),
                     )
                     .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
+                        let changed = self.display.mark_changed_tabs
+                            && tab.view.read(cx).working_copy_changed();
                         Tab::new()
                             .label(tab.title.clone())
                             .prefix(
@@ -834,15 +914,34 @@ impl RandoriApp {
                                     .text_color(theme.muted_foreground),
                             )
                             .suffix(
-                                Button::new(("close-tab", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::X)
-                                    .tooltip("Close tab")
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        cx.stop_propagation();
-                                        app.request_close_tab(ix, window, cx);
-                                    })),
+                                h_flex()
+                                    .gap_0p5()
+                                    .when(changed, |this| {
+                                        this.child(
+                                            div()
+                                                .id(("tab-changed", ix))
+                                                .size_1p5()
+                                                .rounded_full()
+                                                .bg(theme.primary)
+                                                .tooltip(|window, cx| {
+                                                    gpui_kit::component::tooltip::Tooltip::new(
+                                                        "The working copy has changes",
+                                                    )
+                                                    .build(window, cx)
+                                                }),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new(("close-tab", ix))
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(IconName::X)
+                                            .tooltip("Close tab")
+                                            .on_click(cx.listener(move |app, _, window, cx| {
+                                                cx.stop_propagation();
+                                                app.request_close_tab(ix, window, cx);
+                                            })),
+                                    ),
                             )
                     })),
             )
@@ -892,16 +991,13 @@ impl RandoriApp {
                     .on_click(cx.listener(|app, _, window, cx| app.open_palette(window, cx))),
             )
             .child(div().flex_1())
-            .child({
-                let theme = self.theme;
+            .child(
                 Button::new("rail-settings")
                     .ghost()
                     .icon(IconName::Settings)
-                    .tooltip("Settings")
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, cx| {
-                        settings_menu(menu, theme, cx)
-                    })
-            })
+                    .tooltip("Settings (⌘,)")
+                    .on_click(|_, _, cx| crate::settings_window::open(cx)),
+            )
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -929,7 +1025,10 @@ impl RandoriApp {
 }
 
 impl Render for RandoriApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(theme) = self.pending_theme.take() {
+            self.set_theme(theme, window, cx);
+        }
         v_flex()
             .id("randori")
             .key_context(APP_CONTEXT)
@@ -989,101 +1088,42 @@ pub struct OpenTabs(pub Vec<(PathBuf, SharedString)>);
 
 impl gpui_kit::Global for OpenTabs {}
 
-/// The Settings menu on the rail. Display settings apply at once; the jj ones
-/// are written to the user's jj config (the same keys GG and `jj` read).
-fn settings_menu(menu: PopupMenu, theme: ThemeChoice, cx: &gpui_kit::App) -> PopupMenu {
-    use gpui_kit::component::menu::PopupMenuItem;
-    let current = settings::get(cx);
-    let display = current.display.clone();
-    let auto_snapshot = current.auto_snapshot;
-    let mark_unpushed = current.mark_unpushed;
+/// After the theme changed (which puts its own code font back): remembers
+/// that font as the default, then applies the chosen one.
+fn theme_changed(cx: &mut gpui_kit::App) {
+    let theme = cx.theme();
+    let default = crate::settings_window::ThemeCodeFont {
+        family: theme.mono_font_family.clone(),
+        size: f32::from(theme.mono_font_size),
+    };
+    cx.set_global(default);
+    apply_code_font(cx);
+}
 
-    // A jj config write can fail (no writable config); say so instead of
-    // pretending the setting changed.
-    fn report(result: anyhow::Result<()>, window: &mut Window, cx: &mut gpui_kit::App) {
-        if let Err(err) = result {
-            window.push_notification(
-                Notification::error(format!("{err:#}")).title("Could not change the jj config"),
-                cx,
-            );
-        }
+/// The code font of Settings on the theme, or the theme's own when none is
+/// chosen. A family that is not installed is skipped: GPUI cannot lay out
+/// text in a family it does not find.
+fn apply_code_font(cx: &mut gpui_kit::App) {
+    let Some(default) = cx
+        .try_global::<crate::settings_window::ThemeCodeFont>()
+        .cloned()
+    else {
+        return;
+    };
+    let display = &settings::get(cx).display;
+    let family = display
+        .code_font
+        .clone()
+        .filter(|family| crate::settings_window::font_installed(family, cx))
+        .map(SharedString::from)
+        .unwrap_or(default.family);
+    let size = px(display.code_font_size.unwrap_or(default.size));
+    let theme = Theme::global_mut(cx);
+    if theme.mono_font_family != family || theme.mono_font_size != size {
+        theme.mono_font_family = family;
+        theme.mono_font_size = size;
+        cx.refresh_windows();
     }
-
-    let mut menu = menu
-        .label("Appearance")
-        .menu_with_check(
-            "Light",
-            theme == ThemeChoice::Light,
-            Box::new(actions::ThemeLight),
-        )
-        .menu_with_check(
-            "Dark",
-            theme == ThemeChoice::Dark,
-            Box::new(actions::ThemeDark),
-        )
-        .menu_with_check(
-            "Follow system",
-            theme == ThemeChoice::System,
-            Box::new(actions::ThemeSystem),
-        )
-        .separator()
-        .label("Diffs open as");
-    for (layout, label) in [
-        (DiffLayout::Unified, "Unified"),
-        (DiffLayout::Split, "Split"),
-    ] {
-        menu = menu.item(
-            PopupMenuItem::new(label)
-                .checked(display.diff == layout)
-                .on_click(move |_, _, cx| settings::update_display(cx, |d| d.diff = layout)),
-        );
-    }
-    menu = menu
-        .separator()
-        .label("Snapshot when Randori comes to the front");
-    for (value, label) in [
-        (None, "Automatic (off in repositories over 100k commits)"),
-        (Some(true), "Always"),
-        (Some(false), "Never"),
-    ] {
-        menu = menu.item(
-            PopupMenuItem::new(label)
-                .checked(auto_snapshot == value)
-                .on_click(move |_, window, cx| {
-                    let result = settings::set_auto_snapshot(cx, value);
-                    report(result, window, cx)
-                }),
-        );
-    }
-    menu = menu
-        .separator()
-        .label("Bookmarks")
-        .item(
-            PopupMenuItem::new("Mark bookmarks that are not pushed")
-                .checked(mark_unpushed)
-                .on_click(move |_, window, cx| {
-                    let result = settings::set_mark_unpushed(cx, !mark_unpushed);
-                    report(result, window, cx)
-                }),
-        )
-        .separator()
-        .label("GitHub")
-        .item(
-            PopupMenuItem::new("Pull requests and avatars")
-                .checked(display.github)
-                .on_click(|_, _, cx| settings::update_display(cx, |d| d.github = !d.github)),
-        );
-    for (secs, label) in PULL_REFRESH_CHOICES {
-        menu = menu.item(
-            PopupMenuItem::new(label)
-                .checked(display.pull_refresh_secs == secs)
-                .disabled(!display.github)
-                .on_click(move |_, _, cx| {
-                    settings::update_display(cx, |d| d.pull_refresh_secs = secs)
-                }),
-        );
-    }
-    menu
 }
 
 /// The nearest ancestor that holds a `.jj` directory.

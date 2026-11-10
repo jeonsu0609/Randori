@@ -53,23 +53,19 @@ impl RepoView {
                         .child("All branches"),
                 )
                 .child(div().w_1())
-                .child({
-                    let by_date = settings::get(cx).display.log_by_date;
-                    Button::new("log-order")
-                        .ghost()
+                // both orders named, so the one shown is plain (as in Fork)
+                .child(
+                    TabBar::new("log-order")
+                        .segmented()
                         .xsmall()
-                        .icon(IconName::Clock)
-                        .label("By date")
-                        .selected(by_date)
-                        .tooltip(if by_date {
-                            "Newest first across branches · click to group by branch"
-                        } else {
-                            "Grouped by branch · click to list newest first across branches"
+                        .selected_index(usize::from(settings::get(cx).display.log_by_date))
+                        .on_click(|ix: &usize, _, cx| {
+                            let by_date = *ix == 1;
+                            settings::update_display(cx, |d| d.log_by_date = by_date)
                         })
-                        .on_click(|_, _, cx| {
-                            settings::update_display(cx, |d| d.log_by_date = !d.log_by_date)
-                        })
-                })
+                        .child("Topological")
+                        .child("By date"),
+                )
                 .child(div().w_2())
             })
             .when_some(

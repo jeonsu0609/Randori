@@ -195,6 +195,9 @@ pub struct TerminalView {
     scroll_remainder: Pixels,
     _events: Option<Task<()>>,
     _focus_subscriptions: Vec<gpui_kit::Subscription>,
+    /// The terminal font of Settings the grid is drawn with, its family
+    /// only when installed (`None`: the code font's).
+    font_setting: (Option<SharedString>, Option<f32>),
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -215,6 +218,16 @@ impl TerminalView {
             cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
             // and for a theme change, which recolours the grid
             cx.observe_global::<gpui_kit::component::Theme>(|_, cx| cx.notify()),
+            // and for the terminal font of Settings, not its other changes
+            cx.observe_global::<crate::settings::Settings>(|view: &mut Self, cx| {
+                view.follow_font_setting(cx)
+            }),
+            // and once for the font listing: it brings the symbol fonts the
+            // grid falls back on, and may find the chosen font only now
+            cx.observe_global::<crate::settings_window::CodeFonts>(|view: &mut Self, cx| {
+                view.font_setting = terminal_font_setting(cx);
+                cx.notify();
+            }),
         ];
         let watch = workspace_root.and_then(RepoWatch::of);
         let mut view = Self {
@@ -239,6 +252,7 @@ impl TerminalView {
             selecting: false,
             scroll_remainder: px(0.),
             _events: None,
+            font_setting: terminal_font_setting(cx),
         };
         view.note_repository_seen(cx);
         view.start(cx);
@@ -260,6 +274,15 @@ impl TerminalView {
 
     pub fn has_exited(&self) -> bool {
         self.exited || self.error.is_some()
+    }
+
+    /// Redraws for a new terminal font, and only then.
+    fn follow_font_setting(&mut self, cx: &mut Context<Self>) {
+        let font = terminal_font_setting(cx);
+        if font != self.font_setting {
+            self.font_setting = font;
+            cx.notify();
+        }
     }
 
     /// Starts (or restarts) the shell.
@@ -724,13 +747,19 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let background = theme.background;
+        // Settings' terminal font, else the code font
+        let (family, size) = &self.font_setting;
+        let family = family
+            .clone()
+            .unwrap_or_else(|| theme.mono_font_family.clone());
+        let mono_size = size.map(px).unwrap_or(theme.mono_font_size);
         let style = GridStyle {
             font: Font {
-                family: theme.mono_font_family.clone(),
+                family,
                 fallbacks: symbol_fallbacks(cx),
                 ..Default::default()
             },
-            font_size: window.rem_size() * (f32::from(theme.mono_font_size) / 16.),
+            font_size: window.rem_size() * (f32::from(mono_size) / 16.),
             foreground: theme.foreground,
             background,
             selection: theme.selection,
@@ -1234,6 +1263,19 @@ fn lay_out_cells<L: EventListener>(
     }
 }
 
+/// The terminal font and size of Settings (`None`: the code font's). A
+/// family that is not installed is left out, since GPUI cannot lay text out
+/// in it; checked here, when the setting or the fonts change, not per frame.
+fn terminal_font_setting(cx: &App) -> (Option<SharedString>, Option<f32>) {
+    let display = &crate::settings::get(cx).display;
+    let family = display
+        .terminal_font
+        .clone()
+        .filter(|family| crate::settings_window::font_installed(family, cx))
+        .map(SharedString::from);
+    (family, display.terminal_font_size)
+}
+
 /// Powerline's arrows: solid and thin, pointing right and left.
 fn is_separator(c: char) -> bool {
     ('\u{e0b0}'..='\u{e0b3}').contains(&c)
@@ -1270,7 +1312,7 @@ fn paint_separator(bounds: Bounds<Pixels>, c: char, color: Hsla, window: &mut Wi
 /// Installed fonts with Powerline and Nerd Font symbols (prompt icons, the
 /// branch mark), tried after the code font. Looked up once.
 fn symbol_fallbacks(_: &App) -> Option<gpui_kit::FontFallbacks> {
-    // until `find_symbol_fonts` has looked, the code font alone
+    // until the font listing has come back, the code font alone
     SYMBOL_FONTS.get().cloned().flatten()
 }
 
@@ -1278,30 +1320,25 @@ fn symbol_fallbacks(_: &App) -> Option<gpui_kit::FontFallbacks> {
 static SYMBOL_FONTS: std::sync::OnceLock<Option<gpui_kit::FontFallbacks>> =
     std::sync::OnceLock::new();
 
-/// Looks through the installed fonts for symbol fonts, off the UI thread, once
-/// at startup: listing every font can take a while on a Mac with many.
-pub fn find_symbol_fonts(cx: &App) {
-    let text_system = cx.text_system().clone();
-    cx.background_executor()
-        .spawn(async move {
-            let mut fonts: Vec<String> = text_system
-                .all_font_names()
-                .into_iter()
-                .filter(|name| {
-                    let lower = name.to_lowercase();
-                    lower.contains("nerd font")
-                        || lower.contains("powerline")
-                        || lower.ends_with(" nf")
-                        || lower.contains(" nf ")
-                })
-                .collect();
-            fonts.sort();
-            fonts.dedup();
-            fonts.truncate(3);
-            let _ = SYMBOL_FONTS
-                .set((!fonts.is_empty()).then(|| gpui_kit::FontFallbacks::from_fonts(fonts)));
+/// Picks the symbol fonts out of the installed fonts (listed once at
+/// startup, off the UI thread, by `settings_window::find_installed_fonts`).
+pub fn remember_symbol_fonts(installed: &[String]) {
+    let mut fonts: Vec<String> = installed
+        .iter()
+        .filter(|name| {
+            let lower = name.to_lowercase();
+            lower.contains("nerd font")
+                || lower.contains("powerline")
+                || lower.ends_with(" nf")
+                || lower.contains(" nf ")
         })
-        .detach();
+        .cloned()
+        .collect();
+    fonts.sort();
+    fonts.dedup();
+    fonts.truncate(3);
+    let _ =
+        SYMBOL_FONTS.set((!fonts.is_empty()).then(|| gpui_kit::FontFallbacks::from_fonts(fonts)));
 }
 
 fn paint_cursor(

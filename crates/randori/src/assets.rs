@@ -106,6 +106,9 @@ mod tests {
             include_str!("repo_view/split.rs"),
             include_str!("repo_view/switcher.rs"),
             include_str!("repo_view/terminal_panel.rs"),
+            include_str!("settings_window/mod.rs"),
+            include_str!("settings_window/fields.rs"),
+            include_str!("settings_window/pages.rs"),
         );
         let mut missing = Vec::new();
         for (ix, _) in source.match_indices("IconName::") {

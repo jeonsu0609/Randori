@@ -144,6 +144,9 @@ pub(super) struct PullView {
 pub(super) struct PullOverview {
     detail: Rc<PullDetail>,
     _theme: gpui_kit::Subscription,
+    /// The issue link rules the text was drawn with.
+    links: Vec<crate::settings::IssueLink>,
+    _settings: gpui_kit::Subscription,
 }
 
 pub(super) enum OverviewEvent {
@@ -373,6 +376,18 @@ impl RepoView {
                             detail,
                             _theme: cx
                                 .observe_global::<gpui_kit::component::Theme>(|_, cx| cx.notify()),
+                            links: crate::settings::get(cx).display.issue_links.clone(),
+                            // the issue link rules make the text's links; other
+                            // settings leave a long conversation alone
+                            _settings: cx.observe_global::<crate::settings::Settings>(
+                                |overview: &mut PullOverview, cx| {
+                                    let links = &crate::settings::get(cx).display.issue_links;
+                                    if *links != overview.links {
+                                        overview.links = links.clone();
+                                        cx.notify();
+                                    }
+                                },
+                            ),
                         });
                         let subscription =
                             cx.subscribe(&overview, |view, _, event, cx| match event {
@@ -973,7 +988,7 @@ impl RepoView {
                 .threads_total
                 .saturating_sub(detail.threads.len() as u64)
         });
-        let diff = Diff::new(&pull.diff)
+        let diff = split::styled_diff(&pull.diff, cx)
             .line_number(true)
             .annotations(pull.threads.annotations.iter().cloned())
             .render_annotation({
@@ -1320,11 +1335,10 @@ fn comment_card(
                         ),
                 )
                 .child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_sm()
-                        .child(TextView::markdown(id, body.to_owned()).selectable(true)),
+                    div().px_3().py_2().text_sm().child(
+                        TextView::markdown(id, crate::issue_links::linkify_markdown(body, cx))
+                            .selectable(true),
+                    ),
                 ),
         )
         .into_any_element()
@@ -1456,7 +1470,7 @@ fn thread_card(number: u64, ix: usize, thread: &gh::ReviewThread, cx: &App) -> A
                     div().text_sm().child(
                         TextView::markdown(
                             pull_id(number, &format!("thread-{ix}"), cix),
-                            comment.body.clone(),
+                            crate::issue_links::linkify_markdown(&comment.body, cx),
                         )
                         .selectable(true),
                     ),

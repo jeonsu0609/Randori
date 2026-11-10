@@ -7,8 +7,10 @@ mod app_view;
 mod assets;
 mod github;
 mod graph;
+mod issue_links;
 mod repo_view;
 mod settings;
+mod settings_window;
 mod terminal;
 mod worker;
 
@@ -137,7 +139,7 @@ fn main() -> Result<()> {
             app_view::bind_keys(cx);
             // after the tab's and the app's, so the terminal's keys win
             terminal::bind_keys(cx);
-            terminal::find_symbol_fonts(cx);
+            settings_window::find_installed_fonts(cx);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1440.), px(900.)), cx)),
@@ -158,14 +160,20 @@ fn main() -> Result<()> {
             .expect("failed to open the main window");
             cx.activate(true);
             install_app_menu(cx);
-            // Randori has one window; closing it ends the app instead of
-            // leaving it running with nothing to show.
+            cx.set_global(settings_window::MainApp(app.downgrade()));
+            // Randori has one main window; closing it ends the app instead of
+            // leaving it running with nothing to show (or only Settings).
             cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
+                let windows = cx.windows();
+                if windows
+                    .iter()
+                    .all(|window| settings_window::is_settings_window(*window, cx))
+                {
                     cx.quit();
                 }
             })
             .detach();
+            cx.on_action(|_: &app_view::actions::OpenSettings, cx| settings_window::open(cx));
             // The window handles Quit itself (it asks about unsaved
             // descriptions); this runs only when no window took it.
             cx.on_action(|_: &app_view::actions::Quit, cx| cx.quit());
@@ -197,6 +205,10 @@ fn main() -> Result<()> {
                         if let Some(events) = pointer_events(&key) {
                             for event in events {
                                 let _ = window.update(cx, |_, window, cx| {
+                                    // hit testing uses the last frame drawn,
+                                    // which a locked screen does not update
+                                    window.refresh();
+                                    window.draw(cx).clear(cx);
                                     window.dispatch_event(event, cx);
                                 });
                                 wait_until_settled(cx, &app).await;
@@ -232,7 +244,16 @@ fn main() -> Result<()> {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(800))
                         .await;
-                    let _ = window.update(cx, |_, window, cx| {
+                    // `RANDORI_SETTINGS_PAGE` captures the Settings window instead
+                    let shot = std::env::var_os("RANDORI_SETTINGS_PAGE")
+                        .and_then(|_| cx.update(|cx| settings_window::window_handle(cx)))
+                        .unwrap_or(window);
+                    let _ = shot.update(cx, |_, window, cx| {
+                        // a frame drawn now: with the screen locked or the
+                        // display asleep macOS asks for none, and the last one
+                        // drawn would be the first
+                        window.refresh();
+                        window.draw(cx).clear(cx);
                         match window.render_to_image() {
                             Ok(image) => match image.save(&path) {
                                 Ok(()) => println!("screenshot: {}", path.display()),
@@ -397,6 +418,8 @@ fn install_app_menu(cx: &mut gpui_kit::App) {
     use repo_view::actions as repo;
     cx.set_menus([
         Menu::new("Randori").items([
+            MenuItem::action("Settings…", app::OpenSettings),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action("Hide Randori", app::Hide),

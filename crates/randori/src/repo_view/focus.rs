@@ -575,7 +575,7 @@ impl RepoView {
         let content = match focus.tab {
             FocusTab::Diff => self.render_focus_diff(focus, cx),
             FocusTab::File => match &focus.file_load {
-                Some(Load::Ready(())) => Diff::new(&focus.file)
+                Some(Load::Ready(())) => split::styled_diff(&focus.file, cx)
                     .line_number(true)
                     .header_visible(false)
                     .size_full()
@@ -686,7 +686,7 @@ impl RepoView {
             Vec::new()
         };
         let view = cx.entity().downgrade();
-        let diff = Diff::new(&focus.diff)
+        let diff = split::styled_diff(&focus.diff, cx)
             .line_number(true)
             .header_visible(false)
             .annotations(annotations)

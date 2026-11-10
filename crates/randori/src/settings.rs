@@ -56,6 +56,56 @@ impl Default for ColumnWidths {
 /// A split diff starts with its two sides the same width.
 pub const DEFAULT_SPLIT_RATIO: f32 = 0.5;
 
+/// How a diff marks changed lines beside the code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeMarks {
+    /// `+` and `−`.
+    #[default]
+    Signs,
+    /// A coloured bar.
+    Bars,
+    None,
+}
+
+/// Which of the revision list's optional columns are shown. The graph and
+/// the description always are.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnVisibility {
+    pub refs: bool,
+    pub change: bool,
+    pub author: bool,
+}
+
+impl Default for ColumnVisibility {
+    fn default() -> Self {
+        Self {
+            refs: true,
+            change: true,
+            author: true,
+        }
+    }
+}
+
+/// Text in descriptions that links to an issue: each match of `pattern` (a
+/// regular expression) opens `url` with `$0` replaced by the match, e.g.
+/// `MELON-\d+` → `https://jira.example.com/browse/$0`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IssueLink {
+    pub pattern: String,
+    pub url: String,
+}
+
+/// Fetch intervals, in minutes; 0 fetches only when asked.
+pub const AUTO_FETCH_CHOICES: [(u32, &str); 5] = [
+    (0, "Off"),
+    (5, "Every 5 minutes"),
+    (15, "Every 15 minutes"),
+    (30, "Every 30 minutes"),
+    (60, "Every hour"),
+];
+
 /// The part saved with the session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -72,6 +122,28 @@ pub struct DisplaySettings {
     pub columns: ColumnWidths,
     /// The original (left) side's share of a split diff, as last dragged.
     pub split_ratio: f32,
+    /// Folders whose jj repositories the workspace picker lists.
+    pub source_folders: Vec<String>,
+    /// Minutes between automatic fetches of every open tab; 0 is off.
+    pub auto_fetch_mins: u32,
+    /// A dot on tabs whose working copy changes files.
+    pub mark_changed_tabs: bool,
+    pub visible_columns: ColumnVisibility,
+    /// Code (diffs, file view, ids) in this font instead of the theme's.
+    pub code_font: Option<String>,
+    pub code_font_size: Option<f32>,
+    pub change_marks: ChangeMarks,
+    pub syntax_highlight: bool,
+    /// A description's first line past these lengths is marked: past the
+    /// first as long, past the second as too long.
+    pub subject_limits: (u32, u32),
+    pub issue_links: Vec<IssueLink>,
+    /// The application the terminal button opens (macOS: `open -a`);
+    /// `None` is the terminal panel.
+    pub external_terminal: Option<String>,
+    /// The terminal panel's font, instead of the code font.
+    pub terminal_font: Option<String>,
+    pub terminal_font_size: Option<f32>,
 }
 
 impl Default for DisplaySettings {
@@ -83,6 +155,19 @@ impl Default for DisplaySettings {
             log_by_date: false,
             columns: ColumnWidths::default(),
             split_ratio: DEFAULT_SPLIT_RATIO,
+            source_folders: Vec::new(),
+            auto_fetch_mins: 0,
+            mark_changed_tabs: true,
+            visible_columns: ColumnVisibility::default(),
+            code_font: None,
+            code_font_size: None,
+            change_marks: ChangeMarks::Signs,
+            syntax_highlight: true,
+            subject_limits: (50, 72),
+            issue_links: Vec::new(),
+            external_terminal: None,
+            terminal_font: None,
+            terminal_font_size: None,
         }
     }
 }
@@ -98,6 +183,15 @@ pub struct Settings {
     pub recent: Vec<String>,
     /// `gg.ui.track-recent-workspaces`.
     pub track_recent: bool,
+    /// jj's `user.name` and `user.email`, which new changes are authored by.
+    pub user_name: String,
+    pub user_email: String,
+    /// jj's `ui.merge-editor` and `ui.diff-formatter`, when set to a name.
+    pub merge_editor: Option<String>,
+    pub diff_formatter: Option<String>,
+    /// Bumped by each write of a jj setting that a loaded workspace keeps
+    /// (the user, the tools): tabs open their workspace again to read it.
+    pub jj_generation: u64,
 }
 
 impl Global for Settings {}
@@ -116,6 +210,11 @@ impl Settings {
                 mark_unpushed: settings.ui_mark_unpushed_bookmarks(),
                 recent: settings.ui_recent_workspaces(),
                 track_recent: settings.ui_track_recent_workspaces(),
+                user_name: settings.user_name().to_owned(),
+                user_email: settings.user_email().to_owned(),
+                merge_editor: settings.get_string(MERGE_EDITOR_KEY).ok(),
+                diff_formatter: settings.get_string(DIFF_FORMATTER_KEY).ok(),
+                jj_generation: 0,
             },
             Err(err) => {
                 log::warn!("reading jj config for settings: {err:#}");
@@ -125,6 +224,11 @@ impl Settings {
                     mark_unpushed: true,
                     recent: Vec::new(),
                     track_recent: false,
+                    user_name: String::new(),
+                    user_email: String::new(),
+                    merge_editor: None,
+                    diff_formatter: None,
+                    jj_generation: 0,
                 }
             }
         }
@@ -171,6 +275,45 @@ pub fn set_auto_snapshot(cx: &mut App, value: Option<bool>) -> anyhow::Result<()
     Ok(())
 }
 
+/// jj config keys the Settings window edits as text.
+pub const USER_NAME_KEY: &str = "user.name";
+pub const USER_EMAIL_KEY: &str = "user.email";
+pub const MERGE_EDITOR_KEY: &str = "ui.merge-editor";
+pub const DIFF_FORMATTER_KEY: &str = "ui.diff-formatter";
+
+/// Writes a jj string setting (`None` or empty removes it, leaving jj's
+/// default) and has open tabs read it: workspaces keep the config they were
+/// loaded with.
+pub fn set_jj_string(cx: &mut App, key: &str, value: Option<String>) -> anyhow::Result<()> {
+    let value = value
+        .map(|value| value.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let current = match key {
+        USER_NAME_KEY => Some(get(cx).user_name.clone()),
+        USER_EMAIL_KEY => Some(get(cx).user_email.clone()),
+        MERGE_EDITOR_KEY => get(cx).merge_editor.clone(),
+        DIFF_FORMATTER_KEY => get(cx).diff_formatter.clone(),
+        _ => None,
+    }
+    .filter(|current| !current.is_empty());
+    if current == value {
+        // nothing to write, and no reason for the tabs to load again
+        return Ok(());
+    }
+    gg_lib::config::write_user_string(key, value.as_deref())?;
+    cx.update_global::<Settings, _>(|settings, _| {
+        match key {
+            USER_NAME_KEY => settings.user_name = value.clone().unwrap_or_default(),
+            USER_EMAIL_KEY => settings.user_email = value.clone().unwrap_or_default(),
+            MERGE_EDITOR_KEY => settings.merge_editor = value.clone(),
+            DIFF_FORMATTER_KEY => settings.diff_formatter = value.clone(),
+            _ => {}
+        }
+        settings.jj_generation += 1;
+    });
+    Ok(())
+}
+
 /// Writes `gg.ui.mark-unpushed-bookmarks` and applies it to open tabs.
 pub fn set_mark_unpushed(cx: &mut App, value: bool) -> anyhow::Result<()> {
     gg_lib::config::write_user_setting(MARK_UNPUSHED_KEY, Some(value))?;
@@ -189,5 +332,12 @@ mod tests {
         assert!(old.github);
         assert_eq!(old.pull_refresh_secs, 60);
         assert_eq!(old.split_ratio, DEFAULT_SPLIT_RATIO);
+        // what the Settings window added reads as its defaults
+        assert_eq!(old.auto_fetch_mins, 0);
+        assert!(old.mark_changed_tabs && old.syntax_highlight);
+        assert_eq!(old.visible_columns, ColumnVisibility::default());
+        assert_eq!(old.change_marks, ChangeMarks::Signs);
+        assert_eq!(old.subject_limits, (50, 72));
+        assert!(old.code_font.is_none() && old.external_terminal.is_none());
     }
 }

@@ -4,7 +4,9 @@
 //! hidden. When a command changes the repository (jj recorded an operation),
 //! the tab reloads.
 
-use gpui_kit::component::{WindowExt as _, button::ButtonVariant};
+use std::path::Path;
+
+use gpui_kit::component::{WindowExt as _, button::ButtonVariant, notification::Notification};
 
 use crate::terminal::{TerminalEvent, TerminalView};
 
@@ -23,6 +25,27 @@ impl RepoView {
         let Some(root) = self.workspace.as_ref().map(|ws| ws.root.clone()) else {
             return;
         };
+        // Settings may send it to a terminal application instead
+        if let Some(app) = settings::get(cx).display.external_terminal.clone() {
+            // off the UI thread: `open` waits while the application starts
+            cx.spawn_in(window, async move |this, cx| {
+                let name = app.clone();
+                let result = cx
+                    .background_spawn(async move { open_external_terminal(&name, &root) })
+                    .await;
+                if let Err(err) = result {
+                    let _ = this.update_in(cx, |_, window, cx| {
+                        window.push_notification(
+                            Notification::error(format!("{err:#}"))
+                                .title(format!("Could not open {app}")),
+                            cx,
+                        )
+                    });
+                }
+            })
+            .detach();
+            return;
+        }
         let terminal = match &self.terminal {
             Some(terminal) => terminal.clone(),
             None => {
@@ -193,6 +216,21 @@ impl RepoView {
             )
             .into_any_element()
     }
+}
+
+/// Opens terminal application `app` in `dir` (macOS: `open -a`, which
+/// starts the application or brings it forward with a new window there).
+fn open_external_terminal(app: &str, dir: &Path) -> anyhow::Result<()> {
+    if !cfg!(target_os = "macos") {
+        anyhow::bail!("Opening another terminal application works on macOS only.");
+    }
+    let status = std::process::Command::new("open")
+        .arg("-a")
+        .arg(app)
+        .arg(dir)
+        .status()?;
+    anyhow::ensure!(status.success(), "open -a {app} failed ({status})");
+    Ok(())
 }
 
 fn restart(terminal: &Entity<TerminalView>, window: &mut Window, cx: &mut App) {

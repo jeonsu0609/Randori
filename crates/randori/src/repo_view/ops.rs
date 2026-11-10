@@ -118,10 +118,7 @@ impl RepoView {
                 new_status,
                 new_selection,
             } => {
-                if let Some(workspace) = &mut self.workspace {
-                    workspace.operation = new_status.operation_description.into();
-                    workspace.can_redo = new_status.can_redo;
-                }
+                self.apply_status(&new_status, cx);
                 if let Some(header) = new_selection {
                     self.pending_select = Some(header.id.change.hex);
                 }
@@ -781,6 +778,85 @@ impl RepoView {
                 cx,
             );
         }
+    }
+
+    /// Settings' "Fetch automatically": while it is on, a look every minute
+    /// whether the interval has passed since the last automatic fetch; while
+    /// it is off, nothing runs.
+    pub(super) fn follow_auto_fetch(&mut self, cx: &mut Context<Self>) {
+        let on = crate::settings::get(cx).display.auto_fetch_mins > 0;
+        if on == self.auto_fetch.is_some() {
+            return;
+        }
+        if !on {
+            self.auto_fetch = None;
+            return;
+        }
+        self.auto_fetch = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                if this
+                    .update(cx, |view, cx| view.auto_fetch_if_due(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Fetches every remote quietly when due: no progress, no password
+    /// prompt, and a failure only logged, since nobody asked for it. Skipped
+    /// while the tab's own commands run.
+    fn auto_fetch_if_due(&mut self, cx: &mut Context<Self>) {
+        let mins = crate::settings::get(cx).display.auto_fetch_mins;
+        let due = std::time::Duration::from_secs(u64::from(mins) * 60);
+        if mins == 0 || !self.busy.is_empty() || self.last_auto_fetch.elapsed() < due {
+            return;
+        }
+        let remotes = self
+            .workspace
+            .as_ref()
+            .map(|ws| ws.remotes.clone())
+            .unwrap_or_default();
+        if remotes.is_empty() {
+            return;
+        }
+        self.last_auto_fetch = std::time::Instant::now();
+        let worker = self.worker.clone();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_spawn(async move {
+                    let mut status = None;
+                    for remote_name in remotes {
+                        let fetch = GitFetch {
+                            refspec: GitRefspec::AllBookmarks {
+                                remote_name: remote_name.clone(),
+                            },
+                            input: None,
+                        };
+                        match worker.mutate(Box::new(fetch)) {
+                            Ok(MutationResult::Updated { new_status, .. }) => {
+                                status = Some(new_status)
+                            }
+                            Ok(MutationResult::Unchanged) => {}
+                            Ok(_) => log::info!("automatic fetch of {remote_name}: skipped"),
+                            Err(err) => log::info!("automatic fetch of {remote_name}: {err:#}"),
+                        }
+                    }
+                    status
+                })
+                .await;
+            if let Some(status) = status {
+                let _ = this.update(cx, |view, cx| {
+                    view.apply_status(&status, cx);
+                    view.reload(cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /// Fetches every bookmark from every git remote of the workspace.

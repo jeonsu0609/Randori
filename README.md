@@ -27,7 +27,7 @@ you move, split and recombine freely. That is how jj treats history.
 | Region | What it shows |
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
-| Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload and Terminal |
+| Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Topological / By date**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload and Terminal |
 | Rail | Revisions, Open, the command palette (`⌘P`, as in GitKraken) and Settings (below) |
 | Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
 | Revisions | Branch / tag, graph, change id, description and author columns, GitKraken style: drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. Instead of a time on every row, a hairline and a label ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. As in GitKraken the layout follows the list's width: wide, the labels have room right of the author; narrower, they sit over the row's end; narrower still, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
@@ -146,19 +146,34 @@ one.
 
 ### Settings
 
-The rail's Settings menu. Display settings are saved with Randori's session;
-the jj ones are the `[gg]` keys GG reads, written to your jj user config (the
-file `jj config set --user` edits), so the jj CLI and GG agree with Randori.
-Changes apply to open tabs at once.
+`⌘,` (or the rail's Settings button, or **Randori → Settings…**) opens the
+Settings window, as Fork has one: pages on the left, a search above them.
+A change applies at once, with no Save button. Randori's own preferences are
+saved with its session; the jj ones go to your jj user config (the file
+`jj config set --user` edits), so the jj CLI and GG agree with Randori. A jj
+write that fails says so instead of pretending the setting changed.
 
-| Setting | Saved in | Effect |
-| --- | --- | --- |
-| Appearance | session | Light, dark or follow the system |
-| Diffs open as | session | Unified or split; the diff header's switch changes it too, in the changes panel and the full file view alike. The split's divider position is saved too |
-| Snapshot when Randori comes to the front | `gg.queries.auto-snapshot` | Automatic (jj's default: off in repositories over `gg.queries.large-repo-heuristic`, 100k commits), always or never |
-| Mark bookmarks that are not pushed | `gg.ui.mark-unpushed-bookmarks` | Upload mark on local bookmarks that moved since their push, or that no remote tracks |
-| Pull requests and avatars | session | Turns the GitHub section and avatar requests off |
-| Pull request refresh | session | Every minute, 5 or 15 minutes, or only when asked |
+| Page | Setting | Saved in | Effect |
+| --- | --- | --- | --- |
+| General | Theme | session | Light, dark or follow the system |
+| | Order | session | Topological (one branch at a time, as `jj log`) or by date (newest first across branches); the toolbar switches it too |
+| | Mark tabs with changes | session | A dot on a tab whose working copy changes files |
+| | Source folders | session | The workspace picker lists the jj repositories in these folders, two levels down (not inside hidden, `target` or `node_modules` folders) |
+| | Fetch automatically | session | `jj git fetch` for every open tab every 5, 15, 30 or 60 minutes; a fetch that fails (no network, a password) is skipped quietly |
+| Revisions | Columns | session | Show or hide Branch / Tag, Change and Author; the graph and the description always show |
+| | Mark bookmarks that are not pushed | `gg.ui.mark-unpushed-bookmarks` | Upload mark on local bookmarks that moved since their push, or that no remote tracks |
+| Diff | Diffs open as | session | Unified or split; the diff header's switch changes it too, in the changes panel and the full file view alike. The split's divider position is saved too |
+| | Mark changed lines with | session | `+` and `−` signs, a coloured bar, or colour only |
+| | Syntax highlighting | session | On or off |
+| | Code font, size | session | The font of diffs, the file view and change ids, among the installed code fonts |
+| Describe | Subject length | session | The description editor counts the first line and colours the count past 50 and 72 (or your limits) |
+| | Issue links | session | One rule a line, a regular expression and a URL with `$0` for the match (`MELON-\d+ https://…/browse/$0`); matches in descriptions and pull requests become links |
+| jj | Name, Email | `user.name`, `user.email` | Who new changes are by; open tabs load their workspace again to pick them up |
+| | Snapshot when Randori comes to the front | `gg.queries.auto-snapshot` | Automatic (off in repositories over `gg.queries.large-repo-heuristic`, 100k commits), always or never |
+| Integration | Terminal: Open | session | The terminal panel, or a terminal application (Terminal, iTerm, Ghostty…) opened in the workspace's folder |
+| | Terminal: Font, size | session | The terminal panel's font, else the code font |
+| | Merge tool, Diff tool | `ui.merge-editor`, `ui.diff-formatter` | jj's tools for "Resolve in merge tool" and "Open in diff tool" (and the jj CLI); open tabs load their workspace again |
+| | GitHub | session | Pull requests and avatars on or off, and how often the list refreshes |
 
 **Presets** lists GG's revset presets: the `[gg.presets]` table of your jj
 config, or GG's own (tracked bookmarks, remote bookmarks, all revisions) when
@@ -229,6 +244,7 @@ needs it.
 | `⌘Q` (`Ctrl+Q`) | Anywhere | Quit (asks first when descriptions are unsaved). Closing the window quits too |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Window | Next / previous tab |
 | `⌘P` (`Ctrl+P`) | Window | Command palette |
+| `⌘,` (`Ctrl+,`) | Window | Settings |
 | `⇧⌘D` (`Ctrl+Shift+D`) | Workspace | Full view of the selected file |
 | `⇧⌘B` (`Ctrl+Shift+B`) | Workspace | Start a new change on a bookmark |
 | `⌥↑` / `⌥↓`, `[` / `]`, `Esc` | Full view | Previous / next change, previous / next file, back to the revisions |

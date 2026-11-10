@@ -60,6 +60,7 @@ mod pull_view;
 mod pulls;
 mod split;
 mod switcher;
+pub use switcher::scan_source_folders;
 mod terminal_panel;
 
 use crate::settings::{self, DiffLayout, Settings};
@@ -360,6 +361,17 @@ pub struct RepoView {
     column_drag: Option<(log_list::Column, gpui_kit::Pixels, f32)>,
     /// The split diff's ratio while its divider is dragged.
     split_drag: Option<f32>,
+    /// The working copy changes files, from the last status.
+    working_copy_changed: bool,
+    /// The jj settings generation this tab's workspace was loaded with; a
+    /// newer one (the Settings window wrote jj's config) opens it again.
+    jj_generation: u64,
+    reopen_pending: bool,
+    /// When the last automatic fetch started.
+    last_auto_fetch: std::time::Instant,
+    /// The minute-by-minute look whether a fetch is due, while Settings
+    /// fetches automatically.
+    auto_fetch: Option<Task<()>>,
     /// A move of the working copy asked to look for files it picked up.
     /// `Some(working copy before the move)` while a check is due.
     check_picked_up: Option<Option<String>>,
@@ -496,6 +508,11 @@ impl RepoView {
             derived_at: std::time::Instant::now(),
             column_drag: None,
             split_drag: None,
+            working_copy_changed: false,
+            jj_generation: settings::get(cx).jj_generation,
+            reopen_pending: false,
+            last_auto_fetch: std::time::Instant::now(),
+            auto_fetch: None,
             column_press: None,
             log_width: Rc::default(),
             log_by_date: settings::get(cx).display.log_by_date,
@@ -505,6 +522,7 @@ impl RepoView {
         };
         view.wd = workspace.clone();
         view.initial_query = initial_query.clone();
+        view.follow_auto_fetch(cx);
         view.open(workspace, initial_query, window, cx);
         view
     }
@@ -596,6 +614,7 @@ impl RepoView {
                             let query = initial_query.unwrap_or(latest_query);
                             let page = worker.query_log(query.clone(), by_date)?;
                             let path = absolute_path.0;
+                            let changed = status.working_copy_changed;
                             Ok((
                                 WorkspaceInfo {
                                     path: display_path(&path).into(),
@@ -611,6 +630,7 @@ impl RepoView {
                                     has_merge_tool: has_external_merge_tool,
                                 },
                                 page,
+                                changed,
                             ))
                         }
                         RepoConfig::LoadError { message, .. }
@@ -624,7 +644,8 @@ impl RepoView {
 
             let _ = this.update_in(cx, |view, window, cx| {
                 match result {
-                    Ok((workspace, page)) => {
+                    Ok((workspace, page, changed)) => {
+                        view.set_working_copy_changed(changed, cx);
                         let query = workspace.query.clone();
                         view.revset
                             .update(cx, |state, cx| state.set_value(query, window, cx));
@@ -652,6 +673,32 @@ impl RepoView {
             });
         })
         .detach();
+    }
+
+    /// What the worker reports after an operation: shown in the status bar,
+    /// the redo button and the tab's dot.
+    pub(super) fn apply_status(
+        &mut self,
+        status: &gg_lib::messages::RepoStatus,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = &mut self.workspace {
+            workspace.operation = status.operation_description.clone().into();
+            workspace.can_redo = status.can_redo;
+        }
+        self.set_working_copy_changed(status.working_copy_changed, cx);
+    }
+
+    fn set_working_copy_changed(&mut self, changed: bool, cx: &mut Context<Self>) {
+        if self.working_copy_changed != changed {
+            self.working_copy_changed = changed;
+            cx.emit(RepoViewEvent::WorkingCopyChanged);
+        }
+    }
+
+    /// The working copy changes files (the tab shows a dot).
+    pub fn working_copy_changed(&self) -> bool {
+        self.working_copy_changed
     }
 
     /// Opens the workspace again, e.g. after the worker restarted or the
@@ -777,9 +824,7 @@ impl RepoView {
                 .await;
             let _ = this.update(cx, |view, cx| match result {
                 Ok(Some(status)) => {
-                    if let Some(workspace) = &mut view.workspace {
-                        workspace.operation = status.operation_description.into();
-                    }
+                    view.apply_status(&status, cx);
                     view.reload(cx);
                 }
                 // nothing changed, but the age labels move on with the clock
@@ -816,11 +861,7 @@ impl RepoView {
                 .await;
             let _ = this.update(cx, |view, cx| {
                 match result {
-                    Ok(Some(status)) => {
-                        if let Some(workspace) = &mut view.workspace {
-                            workspace.operation = status.operation_description.into();
-                        }
-                    }
+                    Ok(Some(status)) => view.apply_status(&status, cx),
                     Ok(None) => {}
                     Err(err) => log::warn!("loading the latest operation: {err:#}"),
                 }
@@ -1077,6 +1118,7 @@ impl RepoView {
 
     /// Follows a settings change made in this or another tab.
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        self.follow_auto_fetch(cx);
         let current = settings::get(cx);
         let mode = diff_mode_of(current.display.diff);
         let github = current.display.github;
@@ -1085,6 +1127,11 @@ impl RepoView {
             self.columns = current.display.columns;
         }
         let by_date_changed = current.display.log_by_date != self.log_by_date;
+        if current.jj_generation != self.jj_generation {
+            // the workspace keeps the config it was loaded with
+            self.jj_generation = current.jj_generation;
+            self.reopen_pending = matches!(self.state, LoadState::Ready);
+        }
         self.show_diff_mode(mode, cx);
         if by_date_changed {
             self.reload(cx);
@@ -1160,6 +1207,11 @@ impl Render for RepoView {
         }
         if std::mem::take(&mut self.show_head_pending) {
             cx.defer_in(window, |view, window, cx| view.show_pull_head(window, cx));
+        }
+        // after the tab's own commands, whose answers belong to the old load
+        if self.reopen_pending && self.busy.is_empty() {
+            self.reopen_pending = false;
+            cx.defer_in(window, |view, window, cx| view.retry_open(window, cx));
         }
 
         v_flex()
@@ -1470,6 +1522,8 @@ pub enum RepoViewEvent {
     },
     /// The workspace picker chose another workspace (open or recent).
     OpenWorkspace(PathBuf),
+    /// The working copy started or stopped changing files.
+    WorkingCopyChanged,
 }
 
 impl gpui_kit::EventEmitter<RepoViewEvent> for RepoView {}

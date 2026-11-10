@@ -13,6 +13,7 @@ use gpui_kit::component::{
 
 use super::*;
 use crate::app_view::OpenTabs;
+use std::path::Path;
 
 /// Conflicts the toolbar counts: the ones that can still be resolved.
 const CONFLICT_REVSET: &str = "conflicts() & mutable()";
@@ -21,6 +22,78 @@ const CONFLICT_LIMIT: usize = 100;
 /// What the bookmark picker lists.
 const BOOKMARK_REVSET: &str = "bookmarks() | remote_bookmarks()";
 const BOOKMARK_LIMIT: usize = 2000;
+
+/// jj repositories in Settings' source folders, found in the background.
+#[derive(Default)]
+pub struct SourceRepos {
+    repos: Vec<PathBuf>,
+}
+
+impl gpui_kit::Global for SourceRepos {}
+
+/// How deep below a source folder repositories are looked for.
+const SOURCE_DEPTH: usize = 2;
+
+/// Looks for the repositories of Settings' source folders off the UI
+/// thread; the workspace picker lists them. Run when the folders change and
+/// whenever the picker opens, so repositories made since show up.
+pub fn scan_source_folders(cx: &mut App) {
+    let folders = settings::get(cx).display.source_folders.clone();
+    if folders.is_empty() {
+        cx.set_global(SourceRepos::default());
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let search = folders.clone();
+        let repos = cx
+            .background_spawn(async move { find_repositories(&search) })
+            .await;
+        cx.update(|cx| {
+            // a change of the folders meanwhile has a search of its own
+            if settings::get(cx).display.source_folders == folders {
+                cx.set_global(SourceRepos { repos });
+            }
+        });
+    })
+    .detach();
+}
+
+/// The jj workspaces in `folders` and up to [`SOURCE_DEPTH`] levels below,
+/// not looking inside one (or inside hidden and build folders).
+fn find_repositories(folders: &[String]) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+        if dir.join(".jj").is_dir() {
+            found.push(dir.to_owned());
+            return;
+        }
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with('.') && !matches!(name.as_ref(), "node_modules" | "target")
+            })
+            .map(|entry| entry.path())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            walk(&dir, depth - 1, found);
+        }
+    }
+    let mut found = Vec::new();
+    for folder in folders {
+        walk(Path::new(folder), SOURCE_DEPTH, &mut found);
+    }
+    found.dedup();
+    found
+}
 
 /// One entry of the bookmark picker.
 struct BookmarkChoice {
@@ -152,6 +225,17 @@ impl RepoView {
             .filter(|path| path.join(".jj").is_dir())
             .filter(|path| !open.iter().any(|(open, _)| open == path))
             .collect();
+        // Settings' source folders, as found last; looked for again now, so
+        // repositories made since show up next time
+        let in_folders: Vec<PathBuf> = cx
+            .try_global::<SourceRepos>()
+            .map(|found| found.repos.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| !open.iter().any(|(open, _)| open == path))
+            .filter(|path| !recent.contains(path))
+            .collect();
+        scan_source_folders(cx);
 
         // (label, detail, path); `None` is "Open…"
         let mut entries: Vec<(SharedString, SharedString, Option<PathBuf>)> = open
@@ -176,6 +260,17 @@ impl RepoView {
             (
                 title.into(),
                 format!("{} · recent", display_path(&path.to_string_lossy())).into(),
+                Some(path),
+            )
+        }));
+        entries.extend(in_folders.into_iter().map(|path| {
+            let title = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            (
+                title.into(),
+                format!("{} · source folder", display_path(&path.to_string_lossy())).into(),
                 Some(path),
             )
         }));
@@ -477,4 +572,33 @@ fn open_picker(
                 }),
         )
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_folders_find_repositories_two_levels_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for repo in [
+            "app/.jj",
+            "group/lib/.jj",
+            "group/deep/too/.jj",
+            ".hidden/repo/.jj",
+            "target/repo/.jj",
+            "app/nested/.jj",
+        ] {
+            std::fs::create_dir_all(root.join(repo)).unwrap();
+        }
+        let found = find_repositories(&[root.display().to_string()]);
+        let names: Vec<String> = found
+            .iter()
+            .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+            .collect();
+        // not three levels down, not in hidden or build folders, not inside
+        // a repository
+        assert_eq!(names, vec!["app", "group/lib"]);
+    }
 }

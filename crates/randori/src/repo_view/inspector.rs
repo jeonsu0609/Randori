@@ -28,6 +28,25 @@ impl RepoView {
             (a + file.additions, d + file.deletions)
         });
         let refs = ref_chips(&header.refs);
+        // what is being written, for an editable revision; what is saved otherwise
+        let typed = (!header.is_immutable).then(|| self.description_input.read(cx).value());
+        let description_text: String = match &typed {
+            Some(typed) => typed.to_string(),
+            None => header.description.lines.join("\n"),
+        };
+        let issues = crate::issue_links::find(&description_text, cx);
+        let subject_len = description_text
+            .lines()
+            .next()
+            .map_or(0, |line| line.chars().count());
+        let (long, too_long) = settings::get(cx).display.subject_limits;
+        let subject_color = if subject_len > too_long as usize {
+            theme.danger
+        } else if subject_len > long as usize {
+            theme.warning
+        } else {
+            theme.muted_foreground
+        };
 
         let fact = |label: &'static str, value: AnyElement| {
             v_flex()
@@ -121,6 +140,25 @@ impl RepoView {
                                                 "Press D to edit"
                                             }),
                                     )
+                                    // the subject's length against Settings' limits
+                                    .when(subject_len > 0, |this| {
+                                        this.child(
+                                            div()
+                                                .id("subject-length")
+                                                .text_xs()
+                                                .text_color(subject_color)
+                                                .child(format!("{subject_len} / {long}"))
+                                                .tooltip(move |window, cx| {
+                                                    gpui_kit::component::tooltip::Tooltip::new(
+                                                        format!(
+                                                            "First line: {subject_len} characters \
+                                                             (long past {long}, too long past {too_long})"
+                                                        ),
+                                                    )
+                                                    .build(window, cx)
+                                                }),
+                                        )
+                                    })
                                     .child(
                                         Button::new("save-description")
                                             .small()
@@ -132,6 +170,21 @@ impl RepoView {
                                             })),
                                     ),
                             )
+                    })
+                    // issue keys of the description, by Settings' issue link rules
+                    .when(!issues.is_empty(), |this| {
+                        this.child(h_flex().gap_1().flex_wrap().children(
+                            issues.into_iter().enumerate().map(|(ix, issue)| {
+                                let url = issue.url.clone();
+                                Button::new(("issue-link", ix))
+                                    .outline()
+                                    .xsmall()
+                                    .icon(IconName::ExternalLink)
+                                    .label(issue.key)
+                                    .tooltip(issue.url)
+                                    .on_click(move |_, _, cx| cx.open_url(&url))
+                            }),
+                        ))
                     })
                     .when(!refs.is_empty(), |this| {
                         this.child(
@@ -353,7 +406,7 @@ impl RepoView {
     pub(super) fn render_changes(&self, cx: &mut Context<Self>) -> AnyElement {
         let diff = self.split_diff(
             "changes-split",
-            Diff::new(&self.diff).line_number(true),
+            split::styled_diff(&self.diff, cx).line_number(true),
             &self.diff,
             cx,
         );

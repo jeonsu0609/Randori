@@ -19,6 +19,8 @@ gpui-kit = "0.9.0"
 jj-lib = "0.46.0"
 anyhow = "1.0.100"
 chrono = "0.4.44"
+# Issue link patterns in descriptions (the version jj already builds).
+regex = "1.12"
 etcetera = "0.11.0"
 futures = "0.3.31"
 log = "0.4"

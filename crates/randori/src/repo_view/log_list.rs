@@ -44,6 +44,10 @@ pub(super) struct Columns {
     pub(super) age_gutter: Option<Rems>,
     /// Too narrow for names: the author column shows avatars only.
     pub(super) compact_author: bool,
+    /// The optional columns Settings shows; a hidden one is 0 wide.
+    pub(super) show_refs: bool,
+    pub(super) show_change: bool,
+    pub(super) show_author: bool,
 }
 
 /// The narrowest description before the author column gives way.
@@ -144,7 +148,9 @@ pub(super) fn render_row(
                     h_flex()
                         .flex_none()
                         .h_full()
-                        .child(render_ref_column(row, ix, color, cols.refs, cx))
+                        .when(cols.show_refs, |this| {
+                            this.child(render_ref_column(row, ix, color, cols.refs, cx))
+                        })
                         .child(graph.row_element(
                             ix,
                             row.author.clone(),
@@ -155,23 +161,25 @@ pub(super) fn render_row(
                             cx,
                         )),
                 )
-                .child(
-                    h_flex()
-                        .w(cols.change)
-                        .flex_none()
-                        .font_family(theme.mono_font_family.clone())
-                        .child(
-                            div()
-                                .font_semibold()
-                                .text_color(theme.primary)
-                                .child(row.change_prefix.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .child(row.change_rest.clone()),
-                        ),
-                )
+                .when(cols.show_change, |this| {
+                    this.child(
+                        h_flex()
+                            .w(cols.change)
+                            .flex_none()
+                            .font_family(theme.mono_font_family.clone())
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .text_color(theme.primary)
+                                    .child(row.change_prefix.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child(row.change_rest.clone()),
+                            ),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
@@ -191,28 +199,30 @@ pub(super) fn render_row(
                                 .child("(no description set)"),
                         }),
                 )
-                .child(if cols.compact_author {
-                    div()
-                        .w(cols.author)
-                        .flex_none()
-                        .flex()
-                        .justify_center()
-                        .child(crate::graph::avatar(
-                            &row.author,
-                            avatar,
-                            rem * 1.25,
-                            theme.border,
-                            false,
-                            cx,
-                        ))
-                } else {
-                    div()
-                        .w(cols.author)
-                        .flex_none()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(row.author.clone())
+                .when(cols.show_author, |this| {
+                    this.child(if cols.compact_author {
+                        div()
+                            .w(cols.author)
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(crate::graph::avatar(
+                                &row.author,
+                                avatar,
+                                rem * 1.25,
+                                theme.border,
+                                false,
+                                cx,
+                            ))
+                    } else {
+                        div()
+                            .w(cols.author)
+                            .flex_none()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(row.author.clone())
+                    })
                 })
                 .when_some(cols.age_gutter, |this, gutter| {
                     this.child(div().w(gutter).flex_none())
@@ -340,7 +350,7 @@ fn render_ref_column(
 
 impl RepoView {
     pub(super) fn render_log_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let cols = self.columns();
+        let cols = self.columns(cx);
         let header = [
             header_cell("Branch / Tag", cols.refs, Column::Refs, false, cx),
             header_cell("Graph", cols.graph, Column::Graph, false, cx),
@@ -407,12 +417,12 @@ impl RepoView {
                         h_flex()
                             .flex_none()
                             .h_full()
-                            .child(refs_cell)
+                            .when(cols.show_refs, |this| this.child(refs_cell))
                             .child(graph_cell),
                     )
-                    .child(change_cell)
+                    .when(cols.show_change, |this| this.child(change_cell))
                     .child(div().flex_1().min_w_0().truncate().child("Description"))
-                    .child(author_cell)
+                    .when(cols.show_author, |this| this.child(author_cell))
                     .when_some(cols.age_gutter, |this, gutter| {
                         this.child(div().w(gutter).flex_none())
                     }),
@@ -420,28 +430,38 @@ impl RepoView {
     }
 
     /// Resolved widths of the columns.
-    pub(super) fn columns(&self) -> Columns {
+    pub(super) fn columns(&self, cx: &App) -> Columns {
+        let shown = settings::get(cx).display.visible_columns;
         let c = self.columns;
         let rems = gpui_kit::rems;
+        let width = |show: bool, width: f32| if show { width } else { 0. };
+        let (refs, change, author) = (
+            width(shown.refs, c.refs),
+            width(shown.change, c.change),
+            width(shown.author, c.author),
+        );
         let graph = c.graph.map(rems).unwrap_or_else(|| self.graph.width());
         let (age_gutter, compact_author) =
-            fit_columns(self.log_width.get(), c.refs + graph.0 + c.change, c.author);
+            fit_columns(self.log_width.get(), refs + graph.0 + change, author);
         Columns {
-            refs: rems(c.refs),
+            refs: rems(refs),
             graph,
-            change: rems(c.change),
-            author: rems(if compact_author {
+            change: rems(change),
+            author: rems(if compact_author && shown.author {
                 COMPACT_AUTHOR
             } else {
-                c.author
+                author
             }),
             age_gutter: age_gutter.map(rems),
-            compact_author,
+            compact_author: compact_author && shown.author,
+            show_refs: shown.refs,
+            show_change: shown.change,
+            show_author: shown.author,
         }
     }
 
-    fn column_width(&self, column: Column) -> f32 {
-        let cols = self.columns();
+    fn column_width(&self, column: Column, cx: &App) -> f32 {
+        let cols = self.columns(cx);
         match column {
             Column::Refs => cols.refs.0,
             Column::Graph => cols.graph.0,
@@ -450,8 +470,8 @@ impl RepoView {
         }
     }
 
-    fn start_column_resize(&mut self, column: Column, x: gpui_kit::Pixels) {
-        self.column_drag = Some((column, x, self.column_width(column)));
+    fn start_column_resize(&mut self, column: Column, x: gpui_kit::Pixels, cx: &App) {
+        self.column_drag = Some((column, x, self.column_width(column, cx)));
     }
 
     fn resize_column(
@@ -504,7 +524,7 @@ impl RepoView {
     }
 
     pub(super) fn render_log(&self, cx: &mut Context<Self>) -> AnyElement {
-        let cols = self.columns();
+        let cols = self.columns(cx);
         let rows = self.row_data.clone();
         let graph = self.graph.clone();
         let focus = self.log_focus.clone();
@@ -734,9 +754,9 @@ fn header_cell(
             let view = cx.entity().downgrade();
             move |_, _, window, cx| {
                 let moved_to = window.mouse_position().x;
-                let _ = view.update(cx, |view, _| {
+                let _ = view.update(cx, |view, cx| {
                     let x = view.column_press.take().unwrap_or(moved_to);
-                    view.start_column_resize(column, x)
+                    view.start_column_resize(column, x, cx)
                 });
                 cx.new(|_| ResizeGhost)
             }

@@ -27,6 +27,21 @@ fn clamp_ratio(ratio: f32) -> f32 {
     }
 }
 
+/// A diff of `state` drawn as Settings says: how changed lines are marked
+/// and whether code is highlighted.
+pub(super) fn styled_diff(state: &Entity<DiffState>, cx: &App) -> Diff {
+    use gpui_kit::component::diff::DiffChangeIndicator;
+    let display = &settings::get(cx).display;
+    let marks = match display.change_marks {
+        settings::ChangeMarks::Signs => DiffChangeIndicator::Signs,
+        settings::ChangeMarks::Bars => DiffChangeIndicator::Bars,
+        settings::ChangeMarks::None => DiffChangeIndicator::None,
+    };
+    Diff::new(state)
+        .change_indicator(marks)
+        .syntax_highlight(display.syntax_highlight)
+}
+
 /// What the divider drags; `0` names the diff it belongs to, since the
 /// inspector and the full file view can both be on screen.
 pub(super) struct SplitResize(pub(super) &'static str);
