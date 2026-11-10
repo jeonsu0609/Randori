@@ -73,6 +73,34 @@ pub fn annotate_apart(
     })
 }
 
+/// A pull request's diff (merge base of `base` and `head` to `head`, full
+/// commit ids) from a load of its own, as [`annotate_apart`] does: a large
+/// pull request does not hold up the workspace's worker while every file's
+/// hunks are computed. `None` when either commit is not in the repository.
+pub fn commit_range_diff_apart(
+    workspace: &std::path::Path,
+    base: &str,
+    head: &str,
+) -> anyhow::Result<Option<Vec<crate::messages::queries::RevChange>>> {
+    struct NoEvents;
+    impl EventSink for NoEvents {
+        fn send(&self, _: &str, _: serde_json::Value) {}
+    }
+    let repo_path = crate::config::resolve_repo_path(Some(workspace));
+    let (settings, ..) = crate::config::read_config(repo_path.as_deref())?;
+    let mut session = WorkerSession::new(
+        Arc::new(NoEvents),
+        Some(workspace.to_owned()),
+        settings,
+        false,
+        false,
+    );
+    pollster::block_on(async {
+        let ws = session.load_workspace(workspace).await?;
+        queries::query_commit_range_diff(&ws, base, head).await
+    })
+}
+
 /// A repository-modifying operation (e.g. abandon, rebase, bookmark create).
 ///
 /// Concrete mutation types live in [`crate::messages`] and are deserialized

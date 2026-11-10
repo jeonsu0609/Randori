@@ -19,8 +19,8 @@ use jj_lib::{
 use tempfile::{TempDir, tempdir};
 
 use crate::{
-    messages::mutations::ForgetWorkspace,
-    worker::{Mutation as _, WorkerSession, WorkspaceSession},
+    messages::{RepoConfig, RepoStatus, mutations::ForgetWorkspace},
+    worker::{Mutation as _, Session as _, SessionEvent, WorkerSession, WorkspaceSession},
 };
 
 async fn mkcolocated() -> Result<TempDir> {
@@ -85,6 +85,52 @@ async fn colocated_workspace_exports_to_git() -> Result<()> {
     let mut feature = git_repo.find_reference("refs/heads/feature")?;
     assert_eq!(feature.peel_to_id()?.to_string(), committed.hex());
 
+    Ok(())
+}
+
+/// a terminal's `git commit` or `git branch` changes only git; the snapshot that imports it must
+/// still hand the client the new status, though the working copy did not change
+#[tokio::test]
+async fn a_snapshot_reports_a_change_made_by_git_alone() -> Result<()> {
+    let repo = mkcolocated().await?;
+    let committed = {
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        commit_file(&mut ws, "a.txt").await?
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel::<SessionEvent>();
+    let worker =
+        std::thread::spawn(move || pollster::block_on(WorkerSession::default().handle_events(&rx)));
+    let (tx_load, rx_load) = std::sync::mpsc::channel::<Result<RepoConfig>>();
+    tx.send(SessionEvent::OpenWorkspace {
+        tx: tx_load,
+        wd: Some(repo.path().to_owned()),
+    })?;
+    rx_load.recv()??;
+    let snapshot = || -> Result<Option<RepoStatus>> {
+        let (tx_snapshot, rx_snapshot) = std::sync::mpsc::channel();
+        tx.send(SessionEvent::ExecuteSnapshot {
+            force: true,
+            tx: tx_snapshot,
+        })?;
+        Ok(rx_snapshot.recv()?)
+    };
+    assert!(snapshot()?.is_none(), "nothing changed yet");
+
+    fs::write(
+        repo.path()
+            .join(".git")
+            .join("refs")
+            .join("heads")
+            .join("from-git"),
+        format!("{}\n", committed.hex()),
+    )?;
+    assert!(snapshot()?.is_some(), "the import is reported");
+    assert!(snapshot()?.is_none(), "and only once");
+
+    tx.send(SessionEvent::EndSession)?;
+    worker.join().expect("the worker thread")?;
     Ok(())
 }
 

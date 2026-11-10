@@ -993,6 +993,43 @@ pub fn query_file_history(
     query_headers(ws, &revset, limit)
 }
 
+/// The changes a pull request makes, as a code host shows them: from the best
+/// common ancestor of `base` and `head` (both full commit ids) to `head`.
+/// `None` when either commit is not in the repository (not fetched, or from a
+/// fork), so the caller can ask the host instead.
+pub async fn query_commit_range_diff(
+    ws: &WorkspaceSession<'_>,
+    base: &str,
+    head: &str,
+) -> Result<Option<Vec<RevChange>>> {
+    let (Some(base), Some(head)) = (CommitId::try_from_hex(base), CommitId::try_from_hex(head))
+    else {
+        return Ok(None);
+    };
+    let repo = ws.repo();
+    let index = repo.index();
+    if !index.has_id(&base).await? || !index.has_id(&head).await? {
+        return Ok(None);
+    }
+    let store = repo.store();
+    let from = match index
+        .common_ancestors(std::slice::from_ref(&base), std::slice::from_ref(&head))
+        .await?
+        .first()
+    {
+        Some(ancestor) => store.get_commit_async(ancestor).await?,
+        // unrelated histories: what the base branch has
+        None => store.get_commit_async(&base).await?,
+    };
+    let to = store.get_commit_async(&head).await?;
+    let (from_tree, to_tree) = (from.tree(), to.tree());
+    let mut changes = Vec::new();
+    let tree_diff = from_tree.diff_stream(&to_tree, &EverythingMatcher);
+    let labels = Diff::new(from_tree.labels(), to_tree.labels());
+    format_tree_changes(ws, &mut changes, tree_diff, labels).await?;
+    Ok(Some(changes))
+}
+
 /// Headers of the first `limit` revisions of `revset`, newest first. Unlike
 /// a log query it keeps no paging state, so it can run beside the log.
 pub fn query_headers(

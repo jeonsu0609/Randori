@@ -127,6 +127,12 @@ pub enum SessionEvent {
         force: bool,
         tx: Sender<Option<messages::RepoStatus>>,
     },
+    /// Load the repository at its latest operation, without snapshotting:
+    /// what jj recorded outside this session (the CLI, a terminal). Returns
+    /// `Some` when the head moved.
+    LoadHead {
+        tx: Sender<Option<messages::RepoStatus>>,
+    },
     /// Run a mutation (e.g. abandon, rebase, bookmark create) against the
     /// loaded workspace.
     ExecuteMutation {
@@ -180,7 +186,7 @@ impl Session for WorkerSession {
             log::debug!("WorkerSession handling {evt:?}");
             match evt {
                 Ok(SessionEvent::EndSession) => return Ok(()),
-                Ok(SessionEvent::ExecuteSnapshot { tx, .. }) => {
+                Ok(SessionEvent::ExecuteSnapshot { tx, .. } | SessionEvent::LoadHead { tx }) => {
                     tx.send(None)?;
                 }
                 Ok(SessionEvent::ReadConfigArray { key, tx }) => {
@@ -361,7 +367,20 @@ impl Session for WorkspaceSession<'_> {
                         .workspace_settings
                         .get_bool("snapshot.auto-update-stale")
                         .unwrap_or(false);
-                    if self.import_and_snapshot(force, auto_update_stale).await? || updated_head {
+                    let before = self.repo().op_id().clone();
+                    let updated_wc = self.import_and_snapshot(force, auto_update_stale).await?;
+                    // importing Git's HEAD or refs (a `git commit` in a colocated
+                    // repository) records an operation without changing the
+                    // working copy; the client still needs the new status
+                    let imported = self.repo().op_id() != &before;
+                    if updated_wc || imported || updated_head {
+                        tx.send(Some(self.format_status()))?;
+                    } else {
+                        tx.send(None)?;
+                    }
+                }
+                SessionEvent::LoadHead { tx } => {
+                    if self.load_at_head().await? {
                         tx.send(Some(self.format_status()))?;
                     } else {
                         tx.send(None)?;

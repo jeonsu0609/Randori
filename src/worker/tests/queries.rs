@@ -1158,3 +1158,45 @@ async fn log_by_date_has_the_same_rows_in_topological_order() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn a_commit_range_diff_starts_at_the_merge_base() -> Result<()> {
+    let repo = mkrepo();
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+
+    // base is the head's parent: the range is the head's own changes
+    let base = revs::hunk_base().commit.hex;
+    let head = revs::hunk_child_single().commit.hex;
+    let range = queries::query_commit_range_diff(&ws, &base, &head)
+        .await?
+        .expect("both commits are in the repository");
+    let own = match queries::query_revisions(
+        &ws,
+        RevSet {
+            from: revs::hunk_child_single(),
+            to: revs::hunk_child_single(),
+        },
+    )
+    .await?
+    {
+        RevsResult::Detail { changes, .. } => changes,
+        RevsResult::NotFound { .. } => panic!("the head exists"),
+    };
+    let paths = |changes: &[crate::messages::queries::RevChange]| {
+        changes
+            .iter()
+            .map(|change| change.path.repo_path.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paths(&range), paths(&own));
+
+    // the other way round, the merge base is the head itself: nothing
+    let back = queries::query_commit_range_diff(&ws, &head, &base).await?;
+    assert_eq!(back.map(|changes| changes.len()), Some(0));
+
+    // a commit the repository does not have (all zeros is the root commit)
+    let missing = queries::query_commit_range_diff(&ws, &"f".repeat(40), &head).await?;
+    assert!(missing.is_none());
+    Ok(())
+}
