@@ -27,12 +27,13 @@ you move, split and recombine freely. That is how jj treats history.
 | Region | What it shows |
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
-| Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
+| Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload and Terminal |
 | Rail | Revisions, Open, the command palette (`⌘P`, as in GitKraken) and Settings (below) |
 | Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
 | Revisions | Branch / tag, graph, change id, description and author columns, GitKraken style: drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. Instead of a time on every row, a hairline and a label ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. As in GitKraken the layout follows the list's width: wide, the labels have room right of the author; narrower, they sit over the row's end; narrower still, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Split puts the parent's version on the left and wraps long lines so both sides stay in view; drag the boundary between them to resize the sides, double-click it to even them. The palette and the View menu do the same from the keyboard; used on a unified diff, they switch it (and the layout diffs open in) to split. Double-click a file (or `⇧⌘D`) for its full view |
 | Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
+| Terminal | Your shell at the bottom of the tab (below) |
 | Status bar | Worker state, the running jj operation and its progress, the last operation, the working copy and the number of loaded revisions |
 
 The **workspace** switcher lists the open tabs, then recently opened
@@ -115,6 +116,34 @@ goes back):
 
 ![The file history](doc/randori/file-history.png)
 
+### Terminal
+
+The toolbar's terminal button or `` ⌃` `` opens your shell at the bottom of the
+tab, in the workspace's folder, as GitKraken does. It is a real terminal: your
+login shell with its prompt and aliases, colours, full-screen programs (`less`,
+`vim`, `jj split -i`), scrollback, a mouse selection to copy, and input methods
+for Korean, Japanese or Chinese. The shell keeps running while the panel is
+hidden; when it exits, Enter starts a new one.
+
+When a command records a jj operation (`jj new`, `jj squash`, `jj git fetch`,
+even a snapshot by `jj st`), the revisions reload on their own. In a
+colocated repository so does a `git` command that moves a branch or `HEAD`
+(`git commit`, `git checkout`): Randori snapshots to import it, so this needs
+snapshots on (**Snapshot when Randori comes to the front** set to Automatic or
+Always; with Never, the change shows after the next jj command). Reload
+(`⌘R`) also picks up what the jj CLI, or `git` in a colocated repository, did
+elsewhere.
+
+| Keys | In the terminal |
+| --- | --- |
+| `⌘C` / `⌘V` (`Ctrl+Shift+C` / `Ctrl+Shift+V`) | Copy the selection / paste (bracketed, so pasted lines do not run one by one) |
+| `⌘K` | Clear the screen and the scrollback |
+| `Esc`, `Ctrl` keys | Go to the shell, not to Randori |
+
+Powerline prompt arrows are drawn by the terminal itself, so they need no
+patched font; other prompt symbols use an installed Nerd Font when there is
+one.
+
 ### Settings
 
 The rail's Settings menu. Display settings are saved with Randori's session;
@@ -169,7 +198,8 @@ sign in (`gh auth login`); nothing else needs it.
 | `/` | Revisions | Edit the revset |
 | `⌘L` (`Ctrl+L`) | Workspace | Edit the revset |
 | `Esc` | Workspace | Back to the revision list |
-| `⌘R` (`Ctrl+R`) | Workspace | Reload |
+| `⌘R` (`Ctrl+R`) | Workspace | Reload, with what jj recorded outside Randori |
+| `` ⌃` `` | Workspace | Show or hide the terminal |
 | `⌘B` (`Ctrl+B`) | Workspace | Show or hide the bookmarks panel |
 | `⌘O` (`Ctrl+O`) | Window | Open a workspace in a new tab |
 | `⌘W` (`Ctrl+W`) | Window | Close the tab; with no tab open, close the window |
@@ -287,9 +317,11 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                    focus        a file's full view: diff, file, blame, history
                    switcher     workspace and bookmark switchers, conflict count
                    split        the movable divider of split diffs
+                   terminal_panel  the terminal at the bottom of a tab
                    dnd, menus   drag payloads, context menus
                  graph          graph lanes, branch colours and avatars per virtual-list row
                  github         GitHub remotes, token lookup, pull request and avatar query
+                 terminal       a shell in a PTY (alacritty_terminal) drawn with GPUI
                  worker         one jj worker thread per tab
                  assets         embedded icons
       │  SessionEvent requests over a channel per tab, push events back through EventSink

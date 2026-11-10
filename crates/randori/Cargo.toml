@@ -36,6 +36,11 @@ gpui-pre = { version = "0.3", features = ["test-support"], optional = true }
 # requests and avatar images.
 reqwest_client = { version = "0.3", package = "gpui-pre-reqwest-client" }
 http_client = { version = "0.3", package = "gpui-pre-http-client" }
+# The terminal panel: the shell's PTY and screen (escape sequences, scrollback).
+alacritty_terminal = "0.26.0"
+
+[dev-dependencies]
+tempfile = "3.27"
 
 [features]
 # `randori --screenshot out.png` renders the first screen offscreen (README images, visual checks).

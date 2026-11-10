@@ -153,7 +153,17 @@ impl RepoView {
             )
             .child(
                 command("refresh", IconName::RefreshCw, "Reload revisions")
-                    .on_click(cx.listener(|view, _, _, cx| view.reload(cx))),
+                    .on_click(cx.listener(|view, _, _, cx| view.refresh_from_disk(true, cx))),
+            )
+            .child(
+                command(
+                    "terminal",
+                    IconName::SquareTerminal,
+                    "Show or hide the terminal (⌃`)",
+                )
+                .selected(self.terminal_open)
+                .disabled(!ready)
+                .on_click(cx.listener(|view, _, window, cx| view.toggle_terminal(window, cx))),
             )
     }
     pub(super) fn render_refs_panel(&self, cx: &mut Context<Self>) -> AnyElement {

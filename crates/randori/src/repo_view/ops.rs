@@ -89,7 +89,12 @@ impl RepoView {
                 // per remote); the log is read again once, after the last of them.
                 if view.busy.is_empty() {
                     view.progress = None;
-                    if std::mem::take(&mut view.reload_after_ops) {
+                    let reload = std::mem::take(&mut view.reload_after_ops);
+                    if let Some(snapshot) = view.refresh_after_ops.take() {
+                        // for the terminal's change: a snapshot only when
+                        // Git alone moved, since jj snapshotted
+                        view.refresh_from_disk(snapshot, cx);
+                    } else if reload {
                         view.reload(cx);
                     }
                 }

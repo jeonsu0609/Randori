@@ -58,6 +58,7 @@ mod picked_up;
 mod pulls;
 mod split;
 mod switcher;
+mod terminal_panel;
 
 use crate::settings::{self, DiffLayout, Settings};
 use crate::worker::{Worker, WorkerEvent};
@@ -85,6 +86,7 @@ pub mod actions {
             OrderByDate,
             GroupByBranch,
             RefreshPullRequests,
+            ToggleTerminal,
             // the divider of split diffs
             WidenOriginalSide,
             WidenModifiedSide,
@@ -194,6 +196,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(platform_key!("shift-p"), Push, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("shift-d"), OpenFileDiff, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("shift-b"), SwitchBookmark, Some(REPO_CONTEXT)),
+        KeyBinding::new("ctrl-`", ToggleTerminal, Some(REPO_CONTEXT)),
         KeyBinding::new("escape", CloseFileFocus, Some(FOCUS_CONTEXT)),
         KeyBinding::new("alt-down", NextChange, Some(FOCUS_CONTEXT)),
         KeyBinding::new("alt-up", PreviousChange, Some(FOCUS_CONTEXT)),
@@ -210,6 +213,8 @@ enum LoadState {
 
 struct WorkspaceInfo {
     path: SharedString,
+    /// The workspace's directory, where the terminal starts.
+    root: PathBuf,
     query: String,
     /// jj's log revset (`revsets.log`), the "Mine" scope.
     default_query: String,
@@ -258,11 +263,18 @@ pub struct RepoView {
     root_focus: FocusHandle,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
+    /// The tab's terminal, started the first time it is shown.
+    terminal: Option<Entity<crate::terminal::TerminalView>>,
+    terminal_open: bool,
     detail_task: Option<Task<()>>,
     /// Label of the mutation in flight, shown in the status bar.
     busy: Vec<SharedString>,
     /// A finished operation changed the repository; reload when none are left.
     reload_after_ops: bool,
+    /// The terminal changed the repository meanwhile: load from disk, not
+    /// just the tab's own operation, once none are left. `Some(true)` when
+    /// only Git moved, so the load snapshots to import it.
+    refresh_after_ops: Option<bool>,
     /// Latest progress message from a git fetch or push.
     progress: Option<SharedString>,
     /// Change to select after the next reload (from a mutation result).
@@ -411,9 +423,12 @@ impl RepoView {
             root_focus: cx.focus_handle(),
             _events,
             _subscriptions,
+            terminal: None,
+            terminal_open: false,
             detail_task: None,
             busy: Vec::new(),
             reload_after_ops: false,
+            refresh_after_ops: None,
             progress: None,
             pending_select: None,
             ref_target: None,
@@ -536,6 +551,7 @@ impl RepoView {
                             Ok((
                                 WorkspaceInfo {
                                     path: display_path(&path).into(),
+                                    root: PathBuf::from(&path),
                                     query,
                                     default_query,
                                     remote_urls: git_remote_urls,
@@ -669,6 +685,7 @@ impl RepoView {
         let Some(query) = self.workspace.as_ref().map(|ws| ws.query.clone()) else {
             return;
         };
+        self.terminal_caught_up(cx);
         let keep = self.rows.len();
         let by_date = settings::get(cx).display.log_by_date;
         self.log_by_date = by_date;
@@ -724,6 +741,42 @@ impl RepoView {
                 }
                 Ok(None) => {}
                 Err(err) => log::warn!("snapshot failed: {err:#}"),
+            });
+        })
+        .detach();
+    }
+
+    /// Picks up what jj recorded outside this tab (the jj CLI, the terminal)
+    /// and reloads: the worker otherwise keeps the operation it last loaded.
+    /// With `snapshot` it snapshots first unless snapshots are off, as coming
+    /// to the front does; without, as after a jj command, which snapshotted.
+    pub(super) fn refresh_from_disk(&mut self, snapshot: bool, cx: &mut Context<Self>) {
+        if self.workspace.is_none() {
+            return;
+        }
+        let auto_snapshot = settings::get(cx).auto_snapshot;
+        let worker = self.worker.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    match auto_snapshot {
+                        _ if !snapshot => worker.load_head(),
+                        Some(false) => worker.load_head(),
+                        force => worker.snapshot(force == Some(true)),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(Some(status)) => {
+                        if let Some(workspace) = &mut view.workspace {
+                            workspace.operation = status.operation_description.into();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => log::warn!("loading the latest operation: {err:#}"),
+                }
+                view.reload(cx);
             });
         })
         .detach();
@@ -1072,7 +1125,7 @@ impl Render for RepoView {
                 if matches!(view.state, LoadState::Failed(_)) {
                     view.retry_open(window, cx)
                 } else {
-                    view.reload(cx)
+                    view.refresh_from_disk(true, cx)
                 }
             }))
             .on_action(
@@ -1104,6 +1157,11 @@ impl Render for RepoView {
             )
             .on_drop(
                 cx.listener(|view, _: &split::SplitResize, _, cx| view.finish_split_resize(cx)),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::ToggleTerminal, window, cx| {
+                    view.toggle_terminal(window, cx)
+                }),
             )
             .on_action(cx.listener(|view, _: &actions::WidenOriginalSide, _, cx| {
                 view.widen_original_side(cx)
@@ -1245,14 +1303,10 @@ impl Render for RepoView {
                 cx.listener(|view, _: &actions::Push, window, cx| view.push_selected(window, cx)),
             )
             .child(self.render_toolbar(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .flex()
-                    .child(self.render_body(window, cx)),
-            )
+            .child(div().flex_1().min_h_0().min_w_0().flex().child({
+                let body = self.render_body(window, cx);
+                self.with_terminal(body, window, cx)
+            }))
             .child(self.render_status_bar(cx))
     }
 }

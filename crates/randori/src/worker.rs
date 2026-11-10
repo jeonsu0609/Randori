@@ -234,6 +234,11 @@ impl Worker {
     pub fn snapshot(&self, force: bool) -> Result<Option<RepoStatus>> {
         self.call(|tx| SessionEvent::ExecuteSnapshot { force, tx })
     }
+
+    /// Loads the repository at its latest operation without snapshotting.
+    pub fn load_head(&self) -> Result<Option<RepoStatus>> {
+        self.call(|tx| SessionEvent::LoadHead { tx })
+    }
 }
 
 #[cfg(test)]

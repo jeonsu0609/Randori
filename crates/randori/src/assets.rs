@@ -42,8 +42,10 @@ gpui_kit::assets::icon_assets!(pub AppIcons, [
     Plus,
     Redo2,
     RefreshCw,
+    RotateCcw,
     Search,
     Settings,
+    SquareTerminal,
     Sun,
     Tag,
     TextCursorInput,
@@ -100,6 +102,7 @@ mod tests {
             include_str!("repo_view/pulls.rs"),
             include_str!("repo_view/split.rs"),
             include_str!("repo_view/switcher.rs"),
+            include_str!("repo_view/terminal_panel.rs"),
         );
         let mut missing = Vec::new();
         for (ix, _) in source.match_indices("IconName::") {

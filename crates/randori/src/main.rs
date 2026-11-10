@@ -9,6 +9,7 @@ mod github;
 mod graph;
 mod repo_view;
 mod settings;
+mod terminal;
 mod worker;
 
 use std::path::PathBuf;
@@ -131,6 +132,9 @@ fn main() -> Result<()> {
             }
             repo_view::bind_keys(cx);
             app_view::bind_keys(cx);
+            // after the tab's and the app's, so the terminal's keys win
+            terminal::bind_keys(cx);
+            terminal::find_symbol_fonts(cx);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1440.), px(900.)), cx)),
@@ -412,6 +416,7 @@ fn install_app_menu(cx: &mut gpui_kit::App) {
             MenuItem::action("By Date", repo::OrderByDate),
             MenuItem::action("Grouped by Branch", repo::GroupByBranch),
             MenuItem::action("Show or Hide Side Panel", repo::ToggleSidebar),
+            MenuItem::action("Show or Hide Terminal", repo::ToggleTerminal),
             MenuItem::separator(),
             MenuItem::action("Widen Original Side", repo::WidenOriginalSide),
             MenuItem::action("Widen Modified Side", repo::WidenModifiedSide),

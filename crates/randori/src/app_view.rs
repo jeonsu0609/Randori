@@ -545,6 +545,11 @@ impl RandoriApp {
                     IconName::PanelLeft,
                     Box::new(repo::ToggleSidebar),
                 ),
+                (
+                    "Show or hide the terminal",
+                    IconName::SquareTerminal,
+                    Box::new(repo::ToggleTerminal),
+                ),
             ]);
         }
         commands.extend([

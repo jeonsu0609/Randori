@@ -46,10 +46,12 @@ thread-safe). The session progresses through states: `WorkerSession` →
   - `picked_up.rs`: after New, Edit or a bookmark switch (`check_picked_up_after`), one snapshot looks for files the new working copy picked up because the revision it moved to does not ignore them (jj #5596), and offers `IgnoreNewFiles`: `.git/info/exclude` lines (the top-most new folder of each path) and an untrack that resets the working copy instead of checking out, so the files stay on disk
   - `focus.rs`: the full view of one file (`FileFocus`), in place of the revisions and the diff: Diff with per-hunk `CopyHunk` (discard) and `MoveHunk` (squash) under every hunk via `Diff::annotations`, File (`DiffFile::unchanged`), Blame, and History in the side panel's place. After a reload it follows the shown change to its rewritten commit (`refresh_focus`)
   - `split.rs`: the divider of split diffs (`split_diff` wraps a `Diff`). Split diffs soft-wrap so each side fits its column; the ratio is `DisplaySettings::split_ratio` (clamped by `clamp_ratio`), held in `split_drag` while dragged. The keyboard path is `WidenOriginalSide` / `WidenModifiedSide` / `EvenSplitSides` in the palette and the View menu. Both the changes panel and the full file view go through it, and `show_diff_mode` switches both diff states
+  - `terminal_panel.rs`: the terminal at the bottom of a tab (`ToggleTerminal`, ⌃`), started in `WorkspaceInfo::root` the first time it opens. `TerminalEvent::RepositoryChanged { snapshot }` runs `refresh_from_disk(snapshot)` (or sets `refresh_after_ops: Option<bool>` while Randori's own mutation runs); `snapshot` is true when only the colocated Git repository moved, so the load imports it, and every `reload` tells the terminal the heads it now shows (`note_repository_seen`)
   - `dnd.rs`, `menus.rs`: drag payloads, context menus
 - **`crates/randori/src/graph.rs`**: draws the worker's graph layout per virtual-list row. `branch_colors` gives each branch one palette colour (a node inherits the child above it in its lane; a lane change takes the right-hand endpoint's colour); nodes are author avatars (`graph::avatar`).
 - **`crates/randori/src/settings.rs`**: the `Settings` GPUI global every view reads and observes (`cx.observe_global::<Settings>`), so changes apply to open tabs at once. Display settings are saved in the session; `gg.queries.auto-snapshot` and `gg.ui.mark-unpushed-bookmarks` are written to the jj user config with `gg_lib::config::write_user_setting`. Workers keep the config they were loaded with, so the UI passes the current choice along (`Worker::snapshot(force)`) instead of relying on the worker's copy.
 - **`crates/randori/src/github.rs`**: GitHub remotes (`GitHubRepo::pick`), the token lookup (`GH_TOKEN` / `GITHUB_TOKEN`, then `gh auth token`; never stored or logged), the one GraphQL query and its parser. HTTP goes through GPUI's client, set in `main.rs` (`reqwest_client`), which also loads avatar images.
+- **`crates/randori/src/terminal/`**: `TerminalView`, the user's shell in a PTY. `alacritty_terminal` runs the PTY thread and keeps the screen; Randori draws its grid (`layout_grid`: backgrounds, one shaped line per run of narrow cells forced onto the cell width with neighbouring cells styled alike in one `TextRun`, wide characters alone, Powerline arrows as paths; the cell-to-run split is `lay_out_cells`, which needs no window and is unit tested, and is the only part done under the screen's lock: shaping runs after the lock is let go, so the PTY thread is not kept waiting; symbol fonts are found once at startup off the UI thread, `find_symbol_fonts`), turns keys into xterm bytes (`keys.rs`, unit tested), sends text through `EntityInputHandler` so input methods compose, and handles selection, the wheel, the clipboard and resizing (in the canvas prepaint, as Zed does). After output it compares the repository with what it saw (`schedule_repository_check`, `RepoWatch`): `op_heads/heads` for jj, and in a colocated repository `.git/HEAD`, `packed-refs` and the times of the directories under `.git/refs` for `git commit`/`git checkout`. The `Listener` sends one `Wakeup` until the view takes it (`wakeup_pending`), since the PTY thread sends one per 64 KB read. Keys the app or gpui-kit's root binds that the shell needs (`Esc`, `Tab` and `Shift+Tab`, which the root uses to move focus, and on Linux/Windows the `Ctrl` shortcuts with `Ctrl+C`, the root's copy) are bound to `SendKey` in `TERMINAL_CONTEXT`, which wins over the tab's, the app's and the root's bindings; `terminal::bind_keys` runs after the others. The panel embeds the view cached (`AnyView::cached`), so the tab's redraws skip the grid and output redraws only the terminal; the view notifies itself on focus changes for the cursor.
 - **`crates/randori/src/assets.rs`**: the icons the app embeds. Only listed icons ship; a new `IconName::Foo` must be added to `icon_assets!` or it draws nothing (the `every_used_icon_is_embedded` test catches this, and needs new submodules added to its file list).
 
 ## File Queries
@@ -135,6 +137,20 @@ Drag payloads are in `repo_view/dnd.rs` (`DraggedRevision`, `DraggedRef`,
 (`repo_view/pick.rs`, started by `R`, the context menus or the palette). While
 a pick is open, `run_mutation` and the dialogs refuse other commands
 (`blocked_by_pick`), so nothing changes the repository underneath an open pick.
+
+### Loading the Latest Operation
+
+The worker keeps the operation it last loaded; queries (`QueryLog`, …) read
+that one. `ExecuteSnapshot` and `LoadHead` load the latest first, so what the
+jj CLI or the terminal recorded shows up: `RepoView::refresh_from_disk` uses
+`LoadHead` when snapshots are off or not wanted and `ExecuteSnapshot`
+otherwise, then reloads. Reload (`⌘R`) and the toolbar's reload snapshot; the
+terminal's reload does not, since the jj command it follows snapshotted.
+
+`ExecuteSnapshot` answers with a status when the working copy changed, the
+head moved, or importing Git (colocated) recorded an operation: a `git
+commit` in a terminal changes nothing in the working copy, yet the client
+needs the new operation.
 
 ### Log Order
 
