@@ -135,6 +135,14 @@ Drag payloads are in `repo_view/dnd.rs` (`DraggedRevision`, `DraggedRef`,
 a pick is open, `run_mutation` and the dialogs refuse other commands
 (`blocked_by_pick`), so nothing changes the repository underneath an open pick.
 
+### Log Order
+
+`SessionEvent::QueryLog { by_date }` picks the row order. `false` is jj's
+`TopoGroupedGraph` (one branch at a time, as `jj log`); `true` streams the
+revset in index order, newest first across branches. The index is
+topological (a commit is added after its parents), so the graph layout works
+unchanged. The order lives in `QueryState`, so the next pages keep it.
+
 ### Log Scope
 
 "Mine" is the workspace's `query_choices["default"]` (jj's `revsets.log`) and

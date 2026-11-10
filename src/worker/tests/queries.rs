@@ -1122,3 +1122,39 @@ async fn headers_know_which_revisions_are_immutable() -> Result<()> {
     assert!(headers.iter().any(|h| h.is_immutable) && headers.iter().any(|h| !h.is_immutable));
     Ok(())
 }
+
+#[tokio::test]
+async fn log_by_date_has_the_same_rows_in_topological_order() -> Result<()> {
+    let repo = mkrepo();
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+
+    let grouped = queries::query_log_ordered(&ws, "all()", 100, false)?;
+    let by_date = queries::query_log_ordered(&ws, "all()", 100, true)?;
+
+    let ids = |page: &crate::messages::queries::LogPage| -> Vec<String> {
+        page.rows
+            .iter()
+            .map(|row| row.revision.id.commit.hex.clone())
+            .collect()
+    };
+    let (mut a, mut b) = (ids(&grouped), ids(&by_date));
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "the same revisions");
+
+    // every parent that is listed comes after its child
+    let order = ids(&by_date);
+    for (ix, row) in by_date.rows.iter().enumerate() {
+        for parent in &row.revision.parent_ids {
+            if let Some(at) = order.iter().position(|id| *id == parent.hex) {
+                assert!(at > ix, "{} listed before its child", parent.hex);
+            }
+        }
+    }
+    // rows keep their graph coordinates in list order
+    for (ix, row) in by_date.rows.iter().enumerate() {
+        assert_eq!(row.location.1, ix);
+    }
+    Ok(())
+}

@@ -94,6 +94,7 @@ async fn reload_with_default_query() -> Result<()> {
     tx.send(SessionEvent::QueryLog {
         tx: tx_query,
         query: "none()".to_owned(),
+        by_date: false,
     })?;
     tx.send(SessionEvent::OpenWorkspace {
         tx: tx_reload,
@@ -126,6 +127,7 @@ async fn query_log_single() -> Result<()> {
     tx.send(SessionEvent::QueryLog {
         tx: tx_query,
         query: "@".to_owned(),
+        by_date: false,
     })?;
     tx.send(SessionEvent::EndSession)?;
 
@@ -154,6 +156,7 @@ async fn query_log_multi() -> Result<()> {
     tx.send(SessionEvent::QueryLog {
         tx: tx_page1,
         query: "all()".to_owned(),
+        by_date: false,
     })?;
     tx.send(SessionEvent::QueryLogNextPage { tx: tx_page2 })?;
     tx.send(SessionEvent::EndSession)?;
@@ -194,10 +197,12 @@ async fn query_log_multi_restart() -> Result<()> {
     tx.send(SessionEvent::QueryLog {
         tx: tx_page1,
         query: "all()".to_owned(),
+        by_date: false,
     })?;
     tx.send(SessionEvent::QueryLog {
         tx: tx_page1b,
         query: "all()".to_owned(),
+        by_date: false,
     })?;
     tx.send(SessionEvent::QueryLogNextPage { tx: tx_page2 })?;
     tx.send(SessionEvent::EndSession)?;
@@ -242,6 +247,7 @@ async fn query_log_multi_interrupt() -> Result<()> {
     tx.send(SessionEvent::QueryLog {
         tx: tx_page1,
         query: "all()".to_owned(),
+        by_date: false,
     })?;
     tx.send(SessionEvent::QueryRevisions {
         tx: tx_rev,
@@ -295,6 +301,7 @@ async fn query_log_multi_resume_missing_edge() -> Result<()> {
     tx.send(SessionEvent::QueryLog {
         tx: tx_page1,
         query: "vnstymnv | wnpusytq | ywknyuol".to_owned(),
+        by_date: false,
     })?;
     // leaves the query session, which must then resume from the right place
     tx.send(SessionEvent::ExecuteSnapshot {
@@ -352,6 +359,7 @@ async fn query_check_immutable() -> Result<()> {
     tx.send(SessionEvent::QueryLog {
         tx: tx_page,
         query: "@|main@origin".to_owned(),
+        by_date: false,
     })?;
     tx.send(SessionEvent::EndSession)?;
 

@@ -66,6 +66,8 @@ pub struct QueryState {
     stems: Vec<Option<LogStem>>,
     /// stem of a missing edge, kept until the next row so that nothing is drawn under its stub
     missing_stem: Option<usize>,
+    /// newest first across branches (jj's index order) instead of one branch at a time
+    by_date: bool,
 }
 
 impl QueryState {
@@ -75,7 +77,15 @@ impl QueryState {
             next_row: 0,
             stems: Vec::new(),
             missing_stem: None,
+            by_date: false,
         }
+    }
+
+    /// Orders rows by when jj recorded them, newest first, interleaving
+    /// branches like `git log --date-order`; parents still follow children.
+    pub fn by_date(mut self, by_date: bool) -> QueryState {
+        self.by_date = by_date;
+        self
     }
 }
 
@@ -99,8 +109,12 @@ impl<'q, 'w> QuerySession<'q, 'w> {
         state: QueryState,
     ) -> QuerySession<'q, 'w> {
         let as_id: for<'a> fn(&'a CommitId) -> &'a CommitId = commit_id_identity;
-        let mut stream: Pin<Box<dyn Stream<Item = _> + 'q>> =
-            Box::pin(TopoGroupedGraph::new(revset.stream_graph(), as_id).stream());
+        let mut stream: Pin<Box<dyn Stream<Item = _> + 'q>> = if state.by_date {
+            // the index is topological: a commit is always added after its parents
+            revset.stream_graph()
+        } else {
+            Box::pin(TopoGroupedGraph::new(revset.stream_graph(), as_id).stream())
+        };
         // skip already-yielded rows
         let mut stream_done = false;
         for _ in 0..state.next_row {
@@ -337,7 +351,19 @@ impl<'q, 'w> QuerySession<'q, 'w> {
 
 #[cfg(test)]
 pub fn query_log(ws: &WorkspaceSession, revset_str: &str, max_results: usize) -> Result<LogPage> {
-    let state = QueryState::new(max_results);
+    query_log_ordered(ws, revset_str, max_results, false)
+}
+
+#[cfg(test)]
+/// [`query_log`] with the row order chosen: `by_date` is newest first across
+/// branches, otherwise one branch at a time.
+pub fn query_log_ordered(
+    ws: &WorkspaceSession,
+    revset_str: &str,
+    max_results: usize,
+    by_date: bool,
+) -> Result<LogPage> {
+    let state = QueryState::new(max_results).by_date(by_date);
     let revset = ws.evaluate_revset_str(revset_str)?;
     let mut session = QuerySession::new(ws, &*revset, state);
     session.get_page()

@@ -63,6 +63,8 @@ pub struct DisplaySettings {
     pub github: bool,
     /// Seconds between pull request refreshes; 0 refreshes only when asked.
     pub pull_refresh_secs: u64,
+    /// Revisions newest first across branches instead of grouped by branch.
+    pub log_by_date: bool,
     /// The revision list's column widths, as last dragged.
     pub columns: ColumnWidths,
 }
@@ -73,6 +75,7 @@ impl Default for DisplaySettings {
             diff: DiffLayout::Unified,
             github: true,
             pull_refresh_secs: 60,
+            log_by_date: false,
             columns: ColumnWidths::default(),
         }
     }

@@ -52,6 +52,24 @@ impl RepoView {
                         .child("Mine")
                         .child("All branches"),
                 )
+                .child(div().w_1())
+                .child({
+                    let by_date = settings::get(cx).display.log_by_date;
+                    Button::new("log-order")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Clock)
+                        .label("By date")
+                        .selected(by_date)
+                        .tooltip(if by_date {
+                            "Newest first across branches · click to group by branch"
+                        } else {
+                            "Grouped by branch · click to list newest first across branches"
+                        })
+                        .on_click(|_, _, cx| {
+                            settings::update_display(cx, |d| d.log_by_date = !d.log_by_date)
+                        })
+                })
                 .child(div().w_2())
             })
             .when_some(

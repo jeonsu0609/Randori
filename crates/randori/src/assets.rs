@@ -17,6 +17,7 @@ gpui_kit::assets::icon_assets!(pub AppIcons, [
     CircleCheck,
     CircleDot,
     CircleX,
+    Clock,
     CloudDownload,
     Command,
     Copy,

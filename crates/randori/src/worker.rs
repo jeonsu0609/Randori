@@ -142,19 +142,25 @@ impl Worker {
         self.call(|tx| SessionEvent::OpenWorkspace { tx, wd })?
     }
 
-    /// Starts a log query and returns its first page.
-    pub fn query_log(&self, query: String) -> Result<LogPage> {
-        self.query_log_pages(query, 0)
+    /// Starts a log query and returns its first page. `by_date` lists
+    /// revisions newest first across branches instead of a branch at a time.
+    pub fn query_log(&self, query: String, by_date: bool) -> Result<LogPage> {
+        self.query_log_pages(query, by_date, 0)
     }
 
     /// Runs a log query and keeps paging until at least `min_rows` rows are
     /// loaded (or the log ends), as one uninterrupted sequence.
-    pub fn query_log_pages(&self, query: String, min_rows: usize) -> Result<LogPage> {
+    pub fn query_log_pages(
+        &self,
+        query: String,
+        by_date: bool,
+        min_rows: usize,
+    ) -> Result<LogPage> {
         let _guard = self
             .log_lock
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let mut page: LogPage = self.call(|tx| SessionEvent::QueryLog { tx, query })??;
+        let mut page: LogPage = self.call(|tx| SessionEvent::QueryLog { tx, query, by_date })??;
         while page.has_more && page.rows.len() < min_rows {
             let next: LogPage = self.call(|tx| SessionEvent::QueryLogNextPage { tx })??;
             page.has_more = next.has_more;

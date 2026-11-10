@@ -81,6 +81,8 @@ pub mod actions {
             ToggleSidebar,
             ShowMyWork,
             ShowAllBranches,
+            OrderByDate,
+            GroupByBranch,
             RefreshPullRequests,
             // the full view of one file
             OpenFileDiff,
@@ -299,6 +301,8 @@ pub struct RepoView {
     picked_up_checking: bool,
     /// Files found, waiting to be shown in a notification.
     picked_up: Vec<TreePath>,
+    /// The order the loaded rows were queried in (see `settings::log_by_date`).
+    log_by_date: bool,
     /// The revision list's width in rems, measured when it paints.
     log_width: Rc<std::cell::Cell<f32>>,
     /// Where the pointer went down on a column handle.
@@ -424,6 +428,7 @@ impl RepoView {
             column_drag: None,
             column_press: None,
             log_width: Rc::default(),
+            log_by_date: settings::get(cx).display.log_by_date,
             check_picked_up: None,
             picked_up_checking: false,
             picked_up: Vec::new(),
@@ -495,6 +500,8 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         self.state = LoadState::Loading;
+        let by_date = settings::get(cx).display.log_by_date;
+        self.log_by_date = by_date;
         let worker = self.worker.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -516,7 +523,7 @@ impl RepoView {
                                 .cloned()
                                 .unwrap_or_else(|| latest_query.clone());
                             let query = initial_query.unwrap_or(latest_query);
-                            let page = worker.query_log(query.clone())?;
+                            let page = worker.query_log(query.clone(), by_date)?;
                             let path = absolute_path.0;
                             Ok((
                                 WorkspaceInfo {
@@ -655,10 +662,12 @@ impl RepoView {
             return;
         };
         let keep = self.rows.len();
+        let by_date = settings::get(cx).display.log_by_date;
+        self.log_by_date = by_date;
         let worker = self.worker.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { worker.query_log_pages(query, keep) })
+                .background_spawn(async move { worker.query_log_pages(query, by_date, keep) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 match result {
@@ -798,6 +807,15 @@ impl RepoView {
         self.graph = Rc::new(Graph::new(&self.rows));
         let mut row_data: Vec<RowData> =
             self.rows.iter().map(|row| RowData::new(row, now)).collect();
+        if self.log_by_date {
+            // the rows follow commit time there; grouping by author time would
+            // jump back and forth wherever history was rewritten
+            for (data, row) in row_data.iter_mut().zip(&self.rows) {
+                let (bucket, label) = time_bucket(row.revision.committed_at, now);
+                data.bucket = bucket;
+                data.bucket_label = label.into();
+            }
+        }
         mark_bucket_starts(&mut row_data);
         self.row_data = Rc::new(row_data);
         self.refs = self
@@ -949,7 +967,11 @@ impl RepoView {
         if self.column_drag.is_none() {
             self.columns = current.display.columns;
         }
+        let by_date_changed = current.display.log_by_date != self.log_by_date;
         self.show_diff_mode(mode, cx);
+        if by_date_changed {
+            self.reload(cx);
+        }
         if !github {
             // no more requests to GitHub, and no pictures from it
             self.pulls = None;
@@ -1045,6 +1067,12 @@ impl Render for RepoView {
                     }
                 }),
             )
+            .on_action(cx.listener(|_, _: &actions::OrderByDate, _, cx| {
+                settings::update_display(cx, |d| d.log_by_date = true)
+            }))
+            .on_action(cx.listener(|_, _: &actions::GroupByBranch, _, cx| {
+                settings::update_display(cx, |d| d.log_by_date = false)
+            }))
             .on_action(cx.listener(|view, _: &actions::ShowMyWork, window, cx| {
                 view.set_log_scope(false, window, cx)
             }))

@@ -920,6 +920,7 @@ impl WorkspaceSession<'_> {
             id: self.format_id(commit),
             description: commit.description().into(),
             author: commit.author().try_into()?,
+            committed_at: RevAuthor::try_from(commit.committer())?.timestamp,
             has_conflict: commit.has_conflict(),
             working_copy_of: self.workspace_index().get(commit.id()).cloned(),
             is_working_copy: *commit.id() == self.operation.wc_id

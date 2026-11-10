@@ -113,6 +113,8 @@ pub enum SessionEvent {
     QueryLog {
         tx: Sender<Result<messages::queries::LogPage>>,
         query: String,
+        /// Newest first across branches instead of grouped by branch.
+        by_date: bool,
     },
     /// Fetch the next page of results from an in-progress log query.
     QueryLogNextPage {
@@ -330,6 +332,7 @@ impl Session for WorkspaceSession<'_> {
                 SessionEvent::QueryLog {
                     tx,
                     query: revset_string,
+                    by_date,
                 } => {
                     let log_page_size = self
                         .session
@@ -341,7 +344,7 @@ impl Session for WorkspaceSession<'_> {
                         tx,
                         rx,
                         Some(&revset_string),
-                        Some(QueryState::new(log_page_size)),
+                        Some(QueryState::new(log_page_size).by_date(by_date)),
                     )
                     .await?;
 

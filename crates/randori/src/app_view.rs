@@ -511,6 +511,16 @@ impl RandoriApp {
                     Box::new(repo::OpenFileView),
                 ),
                 (
+                    "List revisions by date",
+                    IconName::Clock,
+                    Box::new(repo::OrderByDate),
+                ),
+                (
+                    "Group revisions by branch",
+                    IconName::GitBranch,
+                    Box::new(repo::GroupByBranch),
+                ),
+                (
                     "Refresh pull requests",
                     IconName::RefreshCw,
                     Box::new(repo::RefreshPullRequests),

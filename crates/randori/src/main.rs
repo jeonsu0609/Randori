@@ -352,7 +352,7 @@ fn run_check(worker: &Worker, workspace: Option<PathBuf>, revset: Option<String>
         anyhow::bail!("the workspace did not load");
     };
     let query = revset.unwrap_or(latest_query);
-    let page = worker.query_log(query.clone())?;
+    let page = worker.query_log(query.clone(), false)?;
     println!("workspace: {}", absolute_path.0);
     println!("query:     {query}");
     println!("operation: {}", status.operation_description);
@@ -408,6 +408,9 @@ fn install_app_menu(cx: &mut gpui_kit::App) {
             MenuItem::separator(),
             MenuItem::action("My Work", repo::ShowMyWork),
             MenuItem::action("All Branches", repo::ShowAllBranches),
+            MenuItem::separator(),
+            MenuItem::action("By Date", repo::OrderByDate),
+            MenuItem::action("Grouped by Branch", repo::GroupByBranch),
             MenuItem::action("Show or Hide Side Panel", repo::ToggleSidebar),
             MenuItem::separator(),
             MenuItem::action("Reload Revisions", repo::Reload),

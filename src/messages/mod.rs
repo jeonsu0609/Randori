@@ -182,6 +182,9 @@ pub struct RevHeader {
     pub id: RevId,
     pub description: MultilineString,
     pub author: RevAuthor,
+    /// When the commit was last written (rewritten by rebase, squash, …),
+    /// unlike the author's date.
+    pub committed_at: chrono::DateTime<Local>,
     pub has_conflict: bool,
     pub is_working_copy: bool,
     pub working_copy_of: Option<String>,

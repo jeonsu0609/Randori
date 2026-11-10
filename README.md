@@ -53,6 +53,14 @@ you move to does not ignore files the previous one ignored, an older
 them; **Ignore locally** adds them to `.git/info/exclude` (one line per new
 folder, never committed) and untracks them, leaving the files on disk.
 
+**By date** lists revisions newest first across branches, like GitKraken's
+graph or `git log --date-order`, instead of jj's order, which finishes one
+branch before the next. It uses the order jj recorded the commits in, which is
+by date in practice and always has parents below their children. The choice
+is remembered for every tab (palette: **List revisions by date** / **Group
+revisions by branch**). By date, the age labels follow the commit time too, so
+a rebased old change sits with the day it was rewritten.
+
 **Mine** is jj's own log (`revsets.log`): your changes that are not in trunk
 yet, and trunk. Changes on other people's branches are immutable to jj and stay
 out of it. **All branches** shows every visible commit (`all()`), every branch
