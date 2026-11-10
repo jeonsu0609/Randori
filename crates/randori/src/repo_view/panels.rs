@@ -11,7 +11,6 @@ impl RepoView {
         let switchers = self.render_switchers(cx);
         let theme = cx.theme();
         let ready = matches!(self.state, LoadState::Ready);
-        let can_redo = self.workspace.as_ref().is_some_and(|ws| ws.can_redo);
         let has_selection = self.selected.is_some();
         let command = |id: &'static str, icon: IconName, tooltip: &'static str| {
             Button::new(id).ghost().small().icon(icon).tooltip(tooltip)
@@ -126,16 +125,6 @@ impl RepoView {
                 )
                 .disabled(!ready || !has_selection)
                 .on_click(cx.listener(|view, _, window, cx| view.new_child(window, cx))),
-            )
-            .child(
-                command("undo", IconName::Undo2, "Undo the last operation")
-                    .disabled(!ready)
-                    .on_click(cx.listener(|view, _, window, cx| view.undo(window, cx))),
-            )
-            .child(
-                command("redo", IconName::Redo2, "Redo")
-                    .disabled(!ready || !can_redo)
-                    .on_click(cx.listener(|view, _, window, cx| view.redo(window, cx))),
             )
             .child(
                 command("fetch", IconName::CloudDownload, "Fetch from all remotes")
@@ -367,9 +356,19 @@ impl RepoView {
                                 this.child(div().text_color(theme.muted_foreground).child(progress))
                             })
                     })
+                    // as GG has it: the latest operation, and beside it the
+                    // Undo that undoes it, so what Undo will undo is in view
+                    // (jj and other tools record operations too)
                     .when_some(
                         self.workspace.as_ref().filter(|_| self.busy.is_empty()),
                         |this, ws| {
+                            // jj undo's way: a snapshot first, so what it
+                            // picks up (files, Git) is what is undone
+                            let undo_tip = format!(
+                                "Undo the latest operation: {}\nAs jj undo does, it snapshots \
+                                 first; changes it picks up are what is undone",
+                                ws.operation
+                            );
                             this.child(div().text_color(theme.muted_foreground).child("·"))
                                 .child(
                                     div()
@@ -379,6 +378,35 @@ impl RepoView {
                                         .text_color(theme.muted_foreground)
                                         .child(ws.operation.clone()),
                                 )
+                                .child(
+                                    Button::new("status-undo")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Undo2)
+                                        .label("Undo")
+                                        .tooltip(undo_tip)
+                                        // not while the workspace (re)loads
+                                        .disabled(!matches!(self.state, LoadState::Ready))
+                                        .on_click(
+                                            cx.listener(|view, _, window, cx| {
+                                                view.undo(window, cx)
+                                            }),
+                                        ),
+                                )
+                                .when(ws.can_redo, |this| {
+                                    this.child(
+                                        Button::new("status-redo")
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(IconName::Redo2)
+                                            .label("Redo")
+                                            .tooltip("Redo the latest undone operation")
+                                            .disabled(!matches!(self.state, LoadState::Ready))
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.redo(window, cx)
+                                            })),
+                                    )
+                                })
                         },
                     ),
             )

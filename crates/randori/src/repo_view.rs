@@ -234,8 +234,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", FocusLog, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("r"), Reload, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("b"), ToggleSidebar, Some(REPO_CONTEXT)),
-        KeyBinding::new(platform_key!("z"), Undo, Some(LOG_CONTEXT)),
-        KeyBinding::new(platform_key!("shift-z"), Redo, Some(LOG_CONTEXT)),
         KeyBinding::new(platform_key!("shift-f"), Fetch, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("shift-p"), Push, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("shift-d"), OpenFileDiff, Some(REPO_CONTEXT)),

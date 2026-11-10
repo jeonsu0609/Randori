@@ -515,8 +515,18 @@ impl RandoriApp {
                 ),
                 ("Push bookmarks", IconName::Upload, Box::new(repo::Push)),
                 ("Fetch", IconName::CloudDownload, Box::new(repo::Fetch)),
-                ("Undo", IconName::Undo2, Box::new(repo::Undo)),
-                ("Redo", IconName::Redo2, Box::new(repo::Redo)),
+                // the latest operation of the repository, whoever made it (as
+                // GG's Undo); the status bar names it
+                (
+                    "Undo the latest operation",
+                    IconName::Undo2,
+                    Box::new(repo::Undo),
+                ),
+                (
+                    "Redo the latest undone operation",
+                    IconName::Redo2,
+                    Box::new(repo::Redo),
+                ),
                 (
                     "Reload revisions",
                     IconName::RefreshCw,

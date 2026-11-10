@@ -27,14 +27,14 @@ you move, split and recombine freely. That is how jj treats history.
 | Region | What it shows |
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
-| Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Topological / By date**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload and Terminal |
+| Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Topological / By date**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Fetch, Push, Reload and Terminal |
 | Rail | Revisions, Open, the command palette (`⌘P`, as in GitKraken) and Settings (below) |
 | Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
 | Revisions | Branch / tag, graph, change id, description and author columns, GitKraken style: drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. Instead of a time on every row, a hairline and a label ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. As in GitKraken the layout follows the list's width: wide, the labels have room right of the author; narrower, they sit over the row's end; narrower still, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Split puts the parent's version on the left and wraps long lines so both sides stay in view; drag the boundary between them to resize the sides, double-click it to even them. The palette and the View menu do the same from the keyboard; used on a unified diff, they switch it (and the layout diffs open in) to split. Double-click a file (or `⇧⌘D`) for its full view |
 | Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Terminal | Your shell at the bottom of the tab (below) |
-| Status bar | Worker state, the running jj operation and its progress, the last operation, the working copy and the number of loaded revisions |
+| Status bar | Worker state, the running jj operation and its progress, the latest operation with **Undo** beside it (and **Redo** after an undo), the working copy and the number of loaded revisions |
 
 The **workspace** switcher lists the open tabs, then recently opened
 workspaces (`gg.ui.recent-workspaces`, the list GG keeps; off with
@@ -98,7 +98,7 @@ operation log, and git credentials are asked for when a remote needs them.
 | Anything else | `⌘P` opens the command palette |
 | Push | `⌘⇧P` pushes the selection's bookmarks (an untracked bookmark goes to `origin`, or the only remote) |
 | Fetch | `⌘⇧F` fetches every remote |
-| Undo / redo | `⌘Z` / `⌘⇧Z` in the revision list |
+| Undo / redo | **Undo** beside the latest operation in the status bar, or the palette. As in GG and `jj undo`, it undoes the repository's latest operation whoever made it (the jj CLI, VS Code, a snapshot), which the status bar names |
 
 ### Full file view
 
@@ -109,7 +109,7 @@ goes back):
 
 | Part | What it shows |
 | --- | --- |
-| Diff | The file's diff in that revision, unified or split. Under every hunk, **Squash into parent** and **Discard hunk** (the parent's lines back; `⌘Z` undoes). `⌥↑` `⌥↓` move between changes |
+| Diff | The file's diff in that revision, unified or split. Under every hunk, **Squash into parent** and **Discard hunk** (the parent's lines back; Undo undoes it). `⌥↑` `⌥↓` move between changes |
 | File | The whole file as it is in that revision, with line numbers |
 | Blame | Each line with the revision that last changed it, the way `jj file annotate` finds it; click a revision to see its diff of the file. It is computed on a load of its own, so the tab stays usable while a long history is walked |
 | History | Every revision that changed the file among the ancestors of the one you opened, in the side panel's place; pick one to see the file as it was there |
