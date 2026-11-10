@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::{WindowExt as _, notification::Notification};
 
+use super::github_access::{github_token, within};
 use super::*;
 use crate::github::{self, Checks, FetchError, GitHubRepo, PullRequest, Review};
 
@@ -34,8 +35,10 @@ pub(super) struct Pulls {
     token: Option<String>,
     fetching: bool,
     last_fetch: Option<Instant>,
-    /// Avatar URL → whether it is a real picture (not an identicon).
-    avatar_checks: HashMap<String, bool>,
+    /// The default branch's recent authors came with a refresh already.
+    authors_loaded: bool,
+    /// Author emails asked about by commit (answered, or in flight).
+    avatars_asked: HashSet<String>,
     _timer: Task<()>,
 }
 
@@ -74,7 +77,8 @@ impl RepoView {
             token: None,
             fetching: false,
             last_fetch: None,
-            avatar_checks: HashMap::new(),
+            authors_loaded: false,
+            avatars_asked: HashSet::new(),
             _timer,
         });
         self.refresh_pulls(true, cx);
@@ -96,42 +100,23 @@ impl RepoView {
             return;
         }
         pulls.fetching = true;
+        // the first successful refresh also brings recent authors' avatars
+        let authors = !pulls.authors_loaded;
+        let executor = cx.background_executor().clone();
         let repo = pulls.repo.clone();
         let cached = pulls.token.clone();
-        let known: HashSet<String> = pulls.avatar_checks.keys().cloned().collect();
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let token = match cached {
-                Some(token) => Some(token),
-                None => {
-                    let host = repo.host.clone();
-                    cx.background_spawn(async move { github::find_token(&host) })
-                        .await
-                }
-            };
+            let token = github_token(repo.host.clone(), cached, executor.clone()).await;
             let result = match token.clone() {
-                Some(token) => match github::fetch(client.clone(), repo, token).await {
-                    Ok(snapshot) => {
-                        // look at each new picture once, to drop identicons
-                        let mut urls: Vec<String> = snapshot
-                            .avatars
-                            .values()
-                            .cloned()
-                            .chain(
-                                snapshot
-                                    .pulls
-                                    .iter()
-                                    .filter_map(|pr| pr.author_avatar.clone()),
-                            )
-                            .filter(|url| !known.contains(url))
-                            .collect();
-                        urls.sort();
-                        urls.dedup();
-                        let checks = github::check_avatars(client, urls).await;
-                        Some(Ok((snapshot, checks)))
-                    }
-                    Err(err) => Some(Err(err)),
-                },
+                // the request and its parsing off the UI thread
+                Some(token) => Some(
+                    cx.background_spawn(within(
+                        executor.clone(),
+                        github::fetch(client, repo, token, authors),
+                    ))
+                    .await,
+                ),
                 None => None,
             };
             let _ = this.update(cx, |view, cx| {
@@ -141,25 +126,24 @@ impl RepoView {
                 pulls.fetching = false;
                 pulls.last_fetch = Some(Instant::now());
                 match result {
-                    Some(Ok((snapshot, checks))) => {
-                        pulls.avatar_checks.extend(checks);
-                        let real = |url: &String| pulls.avatar_checks.get(url) != Some(&false);
+                    Some(Ok(snapshot)) => {
+                        pulls.authors_loaded = true;
                         pulls.token = token;
                         pulls.list = snapshot.pulls;
-                        for pr in &mut pulls.list {
-                            pr.author_avatar = pr.author_avatar.take().filter(|url| real(url));
-                        }
                         pulls.total = snapshot.total;
                         pulls.state = PullsState::Ready;
+                        // GitHub's pictures as GitHub shows them, its default
+                        // ones (identicons) included
                         let mut avatars = (*view.avatars).clone();
-                        for (email, url) in snapshot.avatars {
-                            if real(&url) {
-                                avatars.insert(email, url.into());
-                            } else {
-                                avatars.remove(&email);
-                            }
-                        }
+                        avatars.extend(
+                            snapshot
+                                .avatars
+                                .into_iter()
+                                .map(|(email, url)| (email, url.into())),
+                        );
                         view.avatars = Rc::new(avatars);
+                        view.request_missing_avatars(cx);
+                        view.refresh_open_pull(cx);
                     }
                     None | Some(Err(FetchError::Unauthorized)) => {
                         pulls.token = None;
@@ -174,6 +158,96 @@ impl RepoView {
             });
         })
         .detach();
+    }
+
+    /// Asks GitHub about authors in the loaded rows that have no picture yet,
+    /// by one of their commits each (only pushed commits can answer). Each
+    /// email is asked once per tab.
+    pub(super) fn request_missing_avatars(&mut self, cx: &mut Context<Self>) {
+        const LIMIT: usize = 200;
+        let client = cx.http_client();
+        let Some(pulls) = &mut self.pulls else {
+            return;
+        };
+        let Some(token) = pulls.token.clone() else {
+            return;
+        };
+        let mut commits: Vec<(String, String)> = Vec::new();
+        for row in &self.rows {
+            let email = row.revision.author.email.to_ascii_lowercase();
+            if email.is_empty()
+                || self.avatars.contains_key(email.as_str())
+                || github::noreply_avatar(&email).is_some()
+                || pulls.avatars_asked.contains(&email)
+            {
+                continue;
+            }
+            pulls.avatars_asked.insert(email.clone());
+            commits.push((email, row.revision.id.commit.hex.clone()));
+            if commits.len() == LIMIT {
+                break;
+            }
+        }
+        if commits.is_empty() {
+            return;
+        }
+        let repo = pulls.repo.clone();
+        let asked: Vec<String> = commits.iter().map(|(email, _)| email.clone()).collect();
+        cx.spawn(async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            let result = cx
+                .background_spawn(within(
+                    executor,
+                    github::pull::fetch_commit_avatars(client, repo, token, commits),
+                ))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                // a timeout leaves every email unanswered; a failed batch, its own
+                let (found, unanswered, error) = match result {
+                    Ok(answer) => (answer.found, answer.unanswered, answer.error),
+                    Err(err) => (HashMap::new(), asked, Some(err)),
+                };
+                if let Some(FetchError::Other(err)) = error {
+                    log::warn!("commit avatars: {err:#}");
+                }
+                // not answered: ask again on the next load
+                if let Some(pulls) = &mut view.pulls {
+                    for email in &unanswered {
+                        pulls.avatars_asked.remove(email);
+                    }
+                }
+                if !found.is_empty() {
+                    let mut avatars = (*view.avatars).clone();
+                    avatars.extend(found.into_iter().map(|(email, url)| (email, url.into())));
+                    view.avatars = Rc::new(avatars);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The repository and token the pull request section uses, for the pull
+    /// request view.
+    pub(super) fn github_access(&self) -> Option<(GitHubRepo, Option<String>)> {
+        self.pulls
+            .as_ref()
+            .map(|pulls| (pulls.repo.clone(), pulls.token.clone()))
+    }
+
+    /// Keeps the token the pull request view found, for the next refresh.
+    pub(super) fn remember_github_token(&mut self, token: String) {
+        if let Some(pulls) = &mut self.pulls {
+            pulls.token.get_or_insert(token);
+        }
+    }
+
+    pub(super) fn pull_request_numbered(&self, number: u64) -> Option<&PullRequest> {
+        self.pulls
+            .as_ref()?
+            .list
+            .iter()
+            .find(|pr| pr.number == number)
     }
 
     /// The refresh interval setting has passed since the last fetch.
@@ -198,13 +272,16 @@ impl RepoView {
             .is_some_and(|pulls| matches!(pulls.state, PullsState::Ready))
     }
 
-    /// Selects the head revision of pull request `ix`. A head outside the
+    /// Selects a pull request's head (`oid`) in the graph. A head outside the
     /// loaded revisions switches to "All branches" and selects it there.
-    fn select_pull(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pr) = self.pulls.as_ref().and_then(|pulls| pulls.list.get(ix)) else {
-            return;
-        };
-        let oid = pr.head_oid.clone();
+    pub(super) fn select_commit(
+        &mut self,
+        oid: String,
+        number: u64,
+        head: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(row) = self
             .rows
             .iter()
@@ -216,7 +293,6 @@ impl RepoView {
             self.pending_commit_select = Some(oid);
             self.set_log_scope(true, window, cx);
         } else {
-            let (number, head) = (pr.number, pr.head_ref.clone());
             window.push_notification(
                 Notification::info(format!(
                     "Fetch to bring in {head}, or the head may be in a fork."
@@ -331,12 +407,11 @@ impl RepoView {
                 .pb_1()
                 .children(pulls.list.iter().enumerate().map(|(ix, pr)| {
                     let selected = selected_commit.as_deref() == Some(pr.head_oid.as_str());
+                    let number = pr.number;
                     render_pull(pr, ix, selected, cx)
-                        .on_click(
-                            cx.listener(move |view, _, window, cx| {
-                                view.select_pull(ix, window, cx)
-                            }),
-                        )
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.open_pull(number, window, cx)
+                        }))
                         .into_any_element()
                 }))
                 .when(pulls.total > pulls.list.len(), |this| {

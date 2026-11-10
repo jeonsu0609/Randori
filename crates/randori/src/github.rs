@@ -5,6 +5,8 @@
 //! (`gh auth token`). Randori never stores it, never logs it, and sends it
 //! only to that host's GraphQL API over HTTPS.
 
+pub mod pull;
+
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
@@ -67,6 +69,15 @@ impl GitHubRepo {
             .find_map(|(_, url)| Self::from_remote_url(url))
     }
 
+    /// The REST API's URL for `path` (which starts with `/`).
+    pub fn rest_url(&self, path: &str) -> String {
+        if self.host == "github.com" {
+            format!("https://api.github.com{path}")
+        } else {
+            format!("https://{}/api/v3{path}", self.host)
+        }
+    }
+
     fn graphql_url(&self) -> String {
         if self.host == "github.com" {
             "https://api.github.com/graphql".to_owned()
@@ -107,6 +118,10 @@ pub struct PullRequest {
     pub base_ref: String,
     /// Full hex id of the head commit.
     pub head_oid: String,
+    /// Full hex id of the base branch's tip, for computing the diff.
+    pub base_oid: String,
+    /// When GitHub last changed the pull request (ISO 8601).
+    pub updated_at: String,
     pub review: Review,
     pub checks: Option<Checks>,
 }
@@ -137,66 +152,136 @@ impl From<anyhow::Error> for FetchError {
 /// A token for `host`, from the environment or the GitHub CLI. Blocks while
 /// `gh` runs, so call it off the UI thread.
 pub fn find_token(host: &str) -> Option<String> {
-    let vars: &[&str] = if host == "github.com" {
-        &["GH_TOKEN", "GITHUB_TOKEN"]
-    } else {
-        &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
-    };
-    if let Some(token) = vars
-        .iter()
-        .filter_map(|var| std::env::var(var).ok())
-        .find(|token| !token.trim().is_empty())
-    {
-        return Some(token.trim().to_owned());
+    let env = |var: &str| std::env::var(var).ok();
+    if let Some(token) = env_token(host, env) {
+        return Some(token);
     }
     // An app started from Finder has a minimal PATH, so try the usual
     // install locations too.
     ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"]
         .iter()
         .find_map(|gh| {
-            let output = Command::new(gh)
-                .args(["auth", "token", "--hostname", host])
-                .output()
-                .ok()?;
+            let output = gh_token_command(gh, host).output().ok()?;
             let token = String::from_utf8(output.stdout).ok()?;
             (output.status.success() && !token.trim().is_empty()).then(|| token.trim().to_owned())
         })
 }
 
-const QUERY: &str = "query($owner: String!, $name: String!) {
-  repository(owner: $owner, name: $name) {
-    pullRequests(states: OPEN, first: 30, orderBy: {field: UPDATED_AT, direction: DESC}) {
+/// Environment variables holding tokens. `env_token` has already decided
+/// which of them `host` may use.
+const TOKEN_VARS: [&str; 4] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// `gh auth token` for `host`, asking only for the credentials `gh` stored
+/// for that host: `gh` hands `GH_ENTERPRISE_TOKEN` to any host that is not
+/// github.com, so the token variables are kept from it.
+fn gh_token_command(gh: &str, host: &str) -> Command {
+    let mut command = Command::new(gh);
+    command.args(["auth", "token", "--hostname", host]);
+    for var in TOKEN_VARS {
+        command.env_remove(var);
+    }
+    command
+}
+
+/// The token the environment holds for `host`, with the GitHub CLI's rules:
+/// `GH_TOKEN` / `GITHUB_TOKEN` are for github.com, and the enterprise ones
+/// only for the host `GH_HOST` names. Any other host gets none: a remote
+/// that merely looks like GitHub Enterprise must not receive a token.
+fn env_token(host: &str, env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let vars: &[&str] = if host == "github.com" {
+        &["GH_TOKEN", "GITHUB_TOKEN"]
+    } else if env("GH_HOST").is_some_and(|gh_host| gh_host.trim().eq_ignore_ascii_case(host)) {
+        &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+    } else {
+        &[]
+    };
+    vars.iter()
+        .filter_map(|var| env(var))
+        .map(|token| token.trim().to_owned())
+        .find(|token| !token.is_empty())
+}
+
+/// The pull request list. With `authors`, also the authors of the default
+/// branch's recent commits, for avatars: asked on the first refresh only, as
+/// the other authors are asked about by commit (`pull::fetch_commit_avatars`)
+/// and the list refreshes every minute.
+fn query(authors: bool) -> String {
+    let history = if authors {
+        "defaultBranchRef { target { ... on Commit { history(first: 100) { nodes { author { email avatarUrl(size: 64) } } } } } }"
+    } else {
+        ""
+    };
+    format!(
+        "query($owner: String!, $name: String!) {{
+  repository(owner: $owner, name: $name) {{
+    pullRequests(states: OPEN, first: 30, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
       totalCount
-      nodes {
-        number title url isDraft headRefName headRefOid baseRefName reviewDecision
-        author { login avatarUrl(size: 64) }
-        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-        baseRef { target { ... on Commit { history(first: 50) { nodes { author { email avatarUrl(size: 64) } } } } } }
-      }
-    }
-    defaultBranchRef {
-      target { ... on Commit { history(first: 100) { nodes { author { email avatarUrl(size: 64) } } } } }
-    }
-  }
-}";
+      nodes {{
+        number title url isDraft headRefName headRefOid baseRefName baseRefOid updatedAt reviewDecision
+        author {{ login avatarUrl(size: 64) }}
+        commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }}
+      }}
+    }}
+    {history}
+  }}
+}}"
+    )
+}
 
 /// Open pull requests and recent author avatars of `repo`.
 pub async fn fetch(
     client: Arc<dyn HttpClient>,
     repo: GitHubRepo,
     token: String,
+    authors: bool,
 ) -> Result<Snapshot, FetchError> {
-    let body = json!({
-        "query": QUERY,
-        "variables": { "owner": repo.owner, "name": repo.name },
-    });
+    let variables = json!({ "owner": repo.owner, "name": repo.name });
+    let value = graphql(&client, &repo, &token, &query(authors), variables).await?;
+    Ok(parse(&value)?)
+}
+
+/// Runs a GraphQL query against `repo`'s host.
+pub(crate) async fn graphql(
+    client: &Arc<dyn HttpClient>,
+    repo: &GitHubRepo,
+    token: &str,
+    query: &str,
+    variables: Value,
+) -> Result<Value, FetchError> {
+    let body = json!({ "query": query, "variables": variables });
+    let bytes = send(
+        client,
+        Method::POST,
+        &repo.graphql_url(),
+        token,
+        "application/json",
+        AsyncBody::from(body.to_string()),
+    )
+    .await?;
+    Ok(serde_json::from_slice(&bytes).context("parsing the GitHub response")?)
+}
+
+/// Sends one authenticated request and reads the whole answer.
+pub(crate) async fn send(
+    client: &Arc<dyn HttpClient>,
+    method: Method,
+    url: &str,
+    token: &str,
+    accept: &str,
+    body: AsyncBody,
+) -> Result<Vec<u8>, FetchError> {
     let request = Request::builder()
-        .method(Method::POST)
-        .uri(repo.graphql_url())
+        .method(method)
+        .uri(url)
         .header("Authorization", format!("bearer {token}"))
         .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .body(AsyncBody::from(body.to_string()))
+        .header("Accept", accept)
+        .body(body)
         .map_err(|err| anyhow!(err))?;
     let mut response = client.send(request).await?;
     if response.status() == StatusCode::UNAUTHORIZED {
@@ -209,21 +294,52 @@ pub async fn fetch(
         .await
         .context("reading the GitHub response")?;
     if !response.status().is_success() {
-        return Err(anyhow!("GitHub answered {}", response.status()).into());
+        let detail = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| value["message"].as_str().map(str::to_owned));
+        return Err(match detail {
+            Some(message) => anyhow!("GitHub answered {}: {message}", response.status()),
+            None => anyhow!("GitHub answered {}", response.status()),
+        }
+        .into());
     }
-    let value: Value = serde_json::from_slice(&bytes).context("parsing the GitHub response")?;
-    Ok(parse(&value)?)
+    Ok(bytes)
 }
 
-/// Reads a response of [`QUERY`].
+/// The node at `path` under a GraphQL answer's `data`. GitHub answers a
+/// field the token may not read (a check run, say) with null and an error,
+/// and the rest as usual: so errors fail the answer only when the node
+/// itself is missing, and are logged otherwise.
+pub(crate) fn answered<'a>(value: &'a Value, path: &[&str], missing: &str) -> Result<&'a Value> {
+    let node = path.iter().fold(&value["data"], |node, key| &node[*key]);
+    let messages: Vec<&str> = value["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|error| error["message"].as_str())
+        .collect();
+    if node.is_null() {
+        match messages.first() {
+            Some(message) => bail!("{message}"),
+            None => bail!("{missing}"),
+        }
+    }
+    if !messages.is_empty() {
+        log::warn!(
+            "GitHub left part of the answer out: {}",
+            messages.join("; ")
+        );
+    }
+    Ok(node)
+}
+
+/// Reads a response of [`query`].
 pub fn parse(value: &Value) -> Result<Snapshot> {
-    if let Some(message) = value["errors"][0]["message"].as_str() {
-        bail!("{message}");
-    }
-    let repo = &value["data"]["repository"];
-    if repo.is_null() {
-        bail!("the repository is not visible to this GitHub account");
-    }
+    let repo = answered(
+        value,
+        &["repository"],
+        "the repository is not visible to this GitHub account",
+    )?;
     let text = |v: &Value| v.as_str().unwrap_or_default().to_owned();
     let pulls: Vec<PullRequest> = repo["pullRequests"]["nodes"]
         .as_array()
@@ -241,6 +357,8 @@ pub fn parse(value: &Value) -> Result<Snapshot> {
             head_ref: text(&pr["headRefName"]),
             base_ref: text(&pr["baseRefName"]),
             head_oid: text(&pr["headRefOid"]),
+            base_oid: text(&pr["baseRefOid"]),
+            updated_at: text(&pr["updatedAt"]),
             review: match pr["reviewDecision"].as_str() {
                 Some("APPROVED") => Review::Approved,
                 Some("CHANGES_REQUESTED") => Review::ChangesRequested,
@@ -260,26 +378,15 @@ pub fn parse(value: &Value) -> Result<Snapshot> {
         .as_u64()
         .map_or(pulls.len(), |n| n as usize);
 
-    // Authors of the default branch and of every pull request's base branch,
-    // where a team that merges into a release branch does its work.
+    // the default branch's recent authors, when the query asked for them
     let mut avatars = HashMap::new();
-    let bases = repo["pullRequests"]["nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|pr| &pr["baseRef"]["target"]["history"]["nodes"]);
-    for history in
-        std::iter::once(&repo["defaultBranchRef"]["target"]["history"]["nodes"]).chain(bases)
-    {
-        for author in history.as_array().into_iter().flatten() {
-            let author = &author["author"];
-            if let (Some(email), Some(url)) =
-                (author["email"].as_str(), author["avatarUrl"].as_str())
-            {
-                avatars
-                    .entry(email.to_ascii_lowercase())
-                    .or_insert_with(|| url.to_owned());
-            }
+    let history = &repo["defaultBranchRef"]["target"]["history"]["nodes"];
+    for author in history.as_array().into_iter().flatten() {
+        let author = &author["author"];
+        if let (Some(email), Some(url)) = (author["email"].as_str(), author["avatarUrl"].as_str()) {
+            avatars
+                .entry(email.to_ascii_lowercase())
+                .or_insert_with(|| url.to_owned());
         }
     }
     Ok(Snapshot {
@@ -287,46 +394,6 @@ pub fn parse(value: &Value) -> Result<Snapshot> {
         total,
         avatars,
     })
-}
-
-/// GitHub's generated picture for an account without one (an identicon):
-/// always a 420×420 PNG, whatever size was asked for. At node size it reads as
-/// a broken image, so such accounts get initials instead.
-pub fn is_identicon(bytes: &[u8]) -> bool {
-    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
-    let dimension = |at: usize| {
-        bytes
-            .get(at..at + 4)
-            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    bytes.starts_with(PNG) && dimension(16) == Some(420) && dimension(20) == Some(420)
-}
-
-/// Whether each avatar URL is a real picture (`false` for an identicon). A
-/// URL that cannot be read counts as real, so the image loader still tries
-/// it and falls back to initials on its own.
-pub async fn check_avatars(
-    client: Arc<dyn HttpClient>,
-    urls: Vec<String>,
-) -> HashMap<String, bool> {
-    let checks = urls.into_iter().map(|url| {
-        let client = client.clone();
-        async move {
-            let identicon = async {
-                let mut response = client.get(&url, AsyncBody::empty(), true).await.ok()?;
-                let mut bytes = Vec::new();
-                response.body_mut().read_to_end(&mut bytes).await.ok()?;
-                Some(is_identicon(&bytes))
-            }
-            .await
-            .unwrap_or(false);
-            (url, !identicon)
-        }
-    });
-    futures::future::join_all(checks)
-        .await
-        .into_iter()
-        .collect()
 }
 
 /// GitHub's no-reply addresses name the account, so the avatar needs no
@@ -413,9 +480,7 @@ mod tests {
                   "isDraft": false, "headRefName": "feat/ipc", "headRefOid": "abc123", "baseRefName": "qa",
                   "reviewDecision": "APPROVED",
                   "author": { "login": "ian", "avatarUrl": "https://avatars/ian" },
-                  "commits": { "nodes": [ { "commit": { "statusCheckRollup": { "state": "FAILURE" } } } ] },
-                  "baseRef": { "target": { "history": { "nodes": [
-                      { "author": { "email": "ian@example.com", "avatarUrl": "https://avatars/ian" } } ] } } } },
+                  "commits": { "nodes": [ { "commit": { "statusCheckRollup": { "state": "FAILURE" } } } ] } },
                 { "number": 121, "title": "draft", "url": "u", "isDraft": true, "headRefName": "d",
                   "headRefOid": "def", "baseRefName": "qa", "reviewDecision": null, "author": null,
                   "commits": { "nodes": [ { "commit": { "statusCheckRollup": null } } ] } },
@@ -441,8 +506,7 @@ mod tests {
         );
         // first avatar for an email wins, matched case-insensitively
         assert_eq!(snapshot.avatars["van@example.com"], "https://avatars/van");
-        // base branch authors count too
-        assert_eq!(snapshot.avatars["ian@example.com"], "https://avatars/ian");
+        assert_eq!(snapshot.avatars.len(), 1);
     }
 
     #[test]
@@ -451,21 +515,70 @@ mod tests {
         assert_eq!(parse(&error).unwrap_err().to_string(), "Bad credentials");
         let hidden = json!({ "data": { "repository": null } });
         assert!(parse(&hidden).is_err());
+        // an unreadable field is nulled with an error; the list still loads
+        let partial = json!({
+            "data": { "repository": { "pullRequests": { "totalCount": 1, "nodes": [
+                { "number": 5, "title": "T", "commits": { "nodes": [ { "commit": null } ] } }
+            ] } } },
+            "errors": [ { "message": "Resource not accessible by integration" } ]
+        });
+        let snapshot = parse(&partial).expect("the list");
+        assert_eq!(snapshot.pulls.len(), 1);
+        assert_eq!(snapshot.pulls[0].checks, None);
     }
 
     #[test]
-    fn identicons_are_420_pixel_pngs() {
-        let png = |width: u32, height: u32| {
-            let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
-            bytes.extend(width.to_be_bytes());
-            bytes.extend(height.to_be_bytes());
-            bytes
+    fn only_the_first_list_query_asks_for_authors() {
+        assert!(query(true).contains("defaultBranchRef"));
+        assert!(!query(false).contains("defaultBranchRef"));
+        // the commits a pull request's diff runs between, in both
+        for authors in [true, false] {
+            assert!(query(authors).contains("baseRefOid"));
+        }
+    }
+
+    #[test]
+    fn enterprise_tokens_go_only_to_gh_host() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                vars.iter()
+                    .find(|(var, _)| *var == name)
+                    .map(|(_, value)| value.to_string())
+            }
         };
-        assert!(is_identicon(&png(420, 420)));
-        // a picture GitHub resized to the requested 64px
-        assert!(!is_identicon(&png(64, 64)));
-        assert!(!is_identicon(b"\xff\xd8\xff\xe0 JFIF"));
-        assert!(!is_identicon(b""));
+        let vars: &[(&str, &str)] = &[
+            ("GH_TOKEN", "public"),
+            ("GH_ENTERPRISE_TOKEN", "corp"),
+            ("GH_HOST", "github.corp.example"),
+        ];
+        assert_eq!(
+            env_token("github.com", env(vars)).as_deref(),
+            Some("public")
+        );
+        assert_eq!(
+            env_token("github.corp.example", env(vars)).as_deref(),
+            Some("corp")
+        );
+        // a remote that only looks like GitHub Enterprise gets nothing
+        assert_eq!(env_token("github.evil.example", env(vars)), None);
+        // without GH_HOST the enterprise token is never used
+        let no_host: &[(&str, &str)] = &[("GH_ENTERPRISE_TOKEN", "corp")];
+        assert_eq!(env_token("github.corp.example", env(no_host)), None);
+    }
+
+    #[test]
+    fn gh_never_sees_the_token_variables() {
+        let command = gh_token_command("gh", "github.evil.example");
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        for var in TOKEN_VARS {
+            assert!(removed.iter().any(|name| name == var), "{var} reaches gh");
+        }
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["auth", "token", "--hostname", "github.evil.example"]);
     }
 
     #[test]

@@ -122,7 +122,10 @@ fn main() -> Result<()> {
         .with_assets(assets::RandoriAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            // GitHub avatars (`img(url)`) and the pull request queries.
+            // GitHub avatars (`img(url)`) and the pull request queries. Its
+            // read timeout needs a Tokio runtime where the body is read, which
+            // GPUI's executors are not; `repo_view::github_access::within` times
+            // GitHub's requests out instead.
             match reqwest_client::ReqwestClient::user_agent(concat!(
                 "Randori/",
                 env!("CARGO_PKG_VERSION")

@@ -170,19 +170,42 @@ Bookmarks").
 When a workspace has a GitHub remote (`origin`, or else the first remote on
 github.com or a GitHub Enterprise host), the side panel lists its open pull
 requests, newest activity first: author, number and title, head → base branch,
-the review decision and the checks of the head commit. Click one to select its
-head revision (switching to **All branches** if it is not loaded), or open it on
-GitHub. The list refreshes on the interval chosen in Settings (every minute by
-default), when the window comes back to the front (at most every 30 seconds)
-and from **Refresh pull requests** in the palette.
-The same query brings the avatars of recent authors on the default branch and
-on the pull requests' base branches.
+the review decision and the checks of the head commit. Click one to open it, or
+its link to open it on GitHub. The list refreshes on the interval chosen in
+Settings (every minute by default), when the window comes back to the front (at
+most every 30 seconds) and from **Refresh pull requests** in the palette.
 
-Randori uses the token you already have: `GH_TOKEN` or `GITHUB_TOKEN`
-(`GH_ENTERPRISE_TOKEN` for Enterprise hosts), or else the GitHub CLI's
-(`gh auth token`). It is kept in memory, never written or logged, and sent only
-to that host's GraphQL API over HTTPS. Without one the section shows how to
-sign in (`gh auth login`); nothing else needs it.
+An open pull request takes the place of the revisions, the diff and the
+inspector, as its page on GitHub looks (`Esc` goes back):
+
+| Tab | What it shows |
+| --- | --- |
+| Overview | The description (Markdown, with task lists, tables and code) and the conversation: comments, reviews, pushed commits, merges. Beside it the review decision, reviewers and their reviews, assignees, labels, checks (failing first) and the branch, with **Show in the graph** to select the head revision |
+| Files changed | The changed files and their diff, unified or split (the divider moves as in the changes panel), with review threads under the lines they are on. Click a file to go to it |
+
+The view follows the pull request: when the list refreshes and GitHub has
+updated it, the view reloads, and so does its diff if new commits were pushed.
+
+The diff runs from the merge base of the base and the head to the head, as
+GitHub's does. Randori computes it from the repository when both commits are in
+it (a branch of the same repository, fetched): nothing is cut short. A pull
+request from a fork, or one not fetched yet, shows GitHub's diff instead, which
+GitHub may refuse for a very large pull request.
+
+Avatars are GitHub's, as GitHub shows them: an account's picture, or the
+generated one (an identicon) of an account without a picture. The first pull
+request query brings the authors of recent commits on the default branch; any
+other author in the loaded revisions is asked about by one of their commits,
+once. Authors whose commits GitHub does not have
+(not pushed) get their initials.
+
+Randori uses the token you already have: `GH_TOKEN` or `GITHUB_TOKEN` for
+github.com, `GH_ENTERPRISE_TOKEN` only for the Enterprise host `GH_HOST` names,
+or else the one the GitHub CLI stored for that host (`gh auth token`). A remote
+that merely looks like GitHub Enterprise gets no token. It is kept in memory,
+never written or logged, and sent only to that host's GraphQL API over HTTPS.
+Without one the section shows how to sign in (`gh auth login`); nothing else
+needs it.
 
 ![Creating a bookmark](doc/randori/bookmark-dialog.png)
 

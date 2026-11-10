@@ -47,6 +47,7 @@ use crate::graph::{Graph, row_height};
 
 mod dnd;
 mod focus;
+mod github_access;
 mod inspector;
 mod log_list;
 mod menus;
@@ -55,6 +56,7 @@ mod ops;
 mod panels;
 mod pick;
 mod picked_up;
+mod pull_view;
 mod pulls;
 mod split;
 mod switcher;
@@ -67,6 +69,46 @@ use focus::{FOCUS_CONTEXT, FocusTab};
 use menus::*;
 use model::*;
 use pick::*;
+
+/// What fills the middle of a tab; one at a time, so opening one closes the
+/// other.
+enum Center {
+    Revisions,
+    /// The full view of one file, in place of the revisions and the diff.
+    File(Box<focus::FileFocus>),
+    /// A pull request, in place of the revisions, the diff and the inspector.
+    Pull(Box<pull_view::PullView>),
+}
+
+impl Center {
+    fn file(&self) -> Option<&focus::FileFocus> {
+        match self {
+            Center::File(focus) => Some(focus),
+            _ => None,
+        }
+    }
+
+    fn file_mut(&mut self) -> Option<&mut focus::FileFocus> {
+        match self {
+            Center::File(focus) => Some(focus),
+            _ => None,
+        }
+    }
+
+    fn pull(&self) -> Option<&pull_view::PullView> {
+        match self {
+            Center::Pull(pull) => Some(pull),
+            _ => None,
+        }
+    }
+
+    fn pull_mut(&mut self) -> Option<&mut pull_view::PullView> {
+        match self {
+            Center::Pull(pull) => Some(pull),
+            _ => None,
+        }
+    }
+}
 
 /// Keyboard actions of the main window.
 pub mod actions {
@@ -97,6 +139,7 @@ pub mod actions {
             OpenFileBlame,
             OpenFileHistory,
             CloseFileFocus,
+            ClosePull,
             NextChange,
             PreviousChange,
             NextFile,
@@ -198,6 +241,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(platform_key!("shift-b"), SwitchBookmark, Some(REPO_CONTEXT)),
         KeyBinding::new("ctrl-`", ToggleTerminal, Some(REPO_CONTEXT)),
         KeyBinding::new("escape", CloseFileFocus, Some(FOCUS_CONTEXT)),
+        KeyBinding::new("escape", ClosePull, Some(pull_view::PULL_CONTEXT)),
         KeyBinding::new("alt-down", NextChange, Some(FOCUS_CONTEXT)),
         KeyBinding::new("alt-up", PreviousChange, Some(FOCUS_CONTEXT)),
         KeyBinding::new("]", NextFile, Some(FOCUS_CONTEXT)),
@@ -300,8 +344,10 @@ pub struct RepoView {
     pulls: Option<pulls::Pulls>,
     /// Commit to select after the next reload (a pull request's head).
     pending_commit_select: Option<String>,
-    /// The full view of one file, in place of the revisions and the diff.
-    focus: Option<focus::FileFocus>,
+    /// What fills the middle: the revisions, one file, or a pull request.
+    center: Center,
+    /// The Overview's "Show in the graph" waits for a frame with a window.
+    show_head_pending: bool,
     /// The revision list's column widths (shared through the settings).
     columns: settings::ColumnWidths,
     /// Mutable revisions with conflicts, in the whole repository.
@@ -441,7 +487,8 @@ impl RepoView {
             avatars: Rc::default(),
             pulls: None,
             pending_commit_select: None,
-            focus: None,
+            center: Center::Revisions,
+            show_head_pending: false,
             columns: settings::get(cx).display.columns,
             conflicts: Vec::new(),
             conflicts_task: None,
@@ -488,9 +535,10 @@ impl RepoView {
     /// view while it replaces the list (a handle that is not on screen
     /// would swallow the command).
     pub(super) fn command_focus(&self) -> FocusHandle {
-        match &self.focus {
-            Some(focus) => focus.handle.clone(),
-            None => self.log_focus.clone(),
+        match &self.center {
+            Center::File(focus) => focus.handle.clone(),
+            Center::Pull(pull) => pull.handle.clone(),
+            Center::Revisions => self.log_focus.clone(),
         }
     }
 
@@ -807,6 +855,7 @@ impl RepoView {
                         view.has_more = page.has_more;
                         view.rows.extend(page.rows);
                         view.rebuild_derived();
+                        view.request_missing_avatars(cx);
                     }
                     Err(err) => log::warn!("next log page failed: {err:#}"),
                 }
@@ -860,6 +909,7 @@ impl RepoView {
         self.refresh_focus(cx);
         self.refresh_conflicts(cx);
         self.run_picked_up_check(cx);
+        self.request_missing_avatars(cx);
     }
 
     fn rebuild_derived(&mut self) {
@@ -1016,9 +1066,11 @@ impl RepoView {
         }
         self.diff_mode = mode;
         self.diff.update(cx, |state, cx| state.set_mode(mode, cx));
-        // the full file view keeps a diff of its own
-        if let Some(focus) = &self.focus {
-            focus.diff.update(cx, |state, cx| state.set_mode(mode, cx));
+        // the full file view and the pull request keep diffs of their own
+        match &self.center {
+            Center::File(focus) => focus.diff.update(cx, |state, cx| state.set_mode(mode, cx)),
+            Center::Pull(pull) => pull.diff.update(cx, |state, cx| state.set_mode(mode, cx)),
+            Center::Revisions => {}
         }
         cx.notify();
     }
@@ -1105,6 +1157,9 @@ impl Render for RepoView {
         }
         if self.split_drag.is_some() && !cx.has_active_drag() {
             cx.defer_in(window, |view, _, cx| view.finish_split_resize(cx));
+        }
+        if std::mem::take(&mut self.show_head_pending) {
+            cx.defer_in(window, |view, window, cx| view.show_pull_head(window, cx));
         }
 
         v_flex()

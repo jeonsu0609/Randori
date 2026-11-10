@@ -63,6 +63,15 @@ pub(super) struct FileItem {
     pub(super) has_conflict: bool,
 }
 
+/// A part of a view that loads: on its way, there (with what it shows),
+/// empty for a reason ("no changes"), or failed.
+pub(super) enum Load<T = ()> {
+    Loading,
+    Ready(T),
+    Note(SharedString),
+    Failed(SharedString),
+}
+
 pub(super) struct Detail {
     pub(super) header: RevHeader,
     pub(super) parents: Vec<SharedString>,
@@ -157,11 +166,7 @@ pub(super) fn build_detail(result: RevsResult) -> Option<Detail> {
     };
     let header = headers.into_iter().last()?;
     let files: Vec<FileItem> = changes.iter().map(FileItem::from).collect();
-    let patches: Vec<DiffFile> = changes
-        .iter()
-        .filter_map(|change| DiffFile::parse(&unified_patch(change)).ok())
-        .flatten()
-        .collect();
+    let patches = diff_files(&changes);
     Some(Detail {
         parent_ids: parents.iter().map(|parent| parent.id.clone()).collect(),
         parents: parents
@@ -259,6 +264,16 @@ pub(super) fn ref_chips(refs: &[StoreRef]) -> Vec<RefChip> {
 /// GG's hunk ranges are already 1-based (its copy of jj's hunker starts at
 /// `1..1`); a unified header only differs for an empty side, which names the
 /// line before the hunk (`-0,0` for an added file).
+/// The changes as the diff view's files: each one written as a unified
+/// patch and read back.
+pub(super) fn diff_files(changes: &[RevChange]) -> Vec<DiffFile> {
+    changes
+        .iter()
+        .filter_map(|change| DiffFile::parse(&unified_patch(change)).ok())
+        .flatten()
+        .collect()
+}
+
 pub(super) fn unified_patch(change: &RevChange) -> String {
     let path = &change.path.repo_path;
     let old = if matches!(change.kind, ChangeKind::Added) {

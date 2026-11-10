@@ -485,50 +485,59 @@ impl RepoView {
             }
             LoadState::Ready => {
                 let rem = window.rem_size();
-                h_resizable("workspace")
-                    .when(self.sidebar_visible, |this| {
-                        this.child(
-                            resizable_panel()
-                                .size(rem * 18.)
-                                .size_range(rem * 14. ..rem * 28.)
-                                // the full view's file history takes the side panel's place,
-                                // as GitKraken's does; the panel layout stays as it was
-                                .child(match &self.focus {
-                                    Some(focus) if focus.show_history => {
-                                        self.render_history(focus, cx)
-                                    }
-                                    _ => self.render_refs_panel(cx),
-                                }),
-                        )
-                    })
-                    .child(
-                        resizable_panel().size_range(rem * 30. ..rem * 200.).child(
-                            match &self.focus {
-                                // the full view of one file takes the revisions' place
-                                Some(focus) => self.render_focus(focus, cx),
-                                None => v_resizable("center")
-                                    .child(
-                                        resizable_panel()
-                                            .size(rem * 26.)
-                                            .size_range(rem * 10. ..rem * 200.)
-                                            .child(self.render_log(cx)),
-                                    )
-                                    .child(
-                                        resizable_panel()
-                                            .size_range(rem * 8. ..rem * 200.)
-                                            .child(self.render_changes(cx)),
-                                    )
-                                    .into_any_element(),
-                            },
-                        ),
+                // its own layout with a pull request open, so dropping the
+                // inspector does not hand its room to the other panels
+                h_resizable(if self.center.pull().is_some() {
+                    "workspace-pull"
+                } else {
+                    "workspace"
+                })
+                .when(self.sidebar_visible, |this| {
+                    this.child(
+                        resizable_panel()
+                            .size(rem * 18.)
+                            .size_range(rem * 14. ..rem * 28.)
+                            // the full view's file history takes the side panel's place,
+                            // as GitKraken's does; the panel layout stays as it was
+                            .child(match self.center.file() {
+                                Some(focus) if focus.show_history => self.render_history(focus, cx),
+                                _ => self.render_refs_panel(cx),
+                            }),
                     )
-                    .child(
+                })
+                .child(
+                    resizable_panel().size_range(rem * 30. ..rem * 200.).child(
+                        match &self.center {
+                            // a pull request takes the revisions' place, as in GitKraken
+                            Center::Pull(pull) => self.render_pull(pull, cx),
+                            // the full view of one file takes the revisions' place
+                            Center::File(focus) => self.render_focus(focus, cx),
+                            Center::Revisions => v_resizable("center")
+                                .child(
+                                    resizable_panel()
+                                        .size(rem * 26.)
+                                        .size_range(rem * 10. ..rem * 200.)
+                                        .child(self.render_log(cx)),
+                                )
+                                .child(
+                                    resizable_panel()
+                                        .size_range(rem * 8. ..rem * 200.)
+                                        .child(self.render_changes(cx)),
+                                )
+                                .into_any_element(),
+                        },
+                    ),
+                )
+                // a pull request uses the inspector's room too, as in GitKraken
+                .when(self.center.pull().is_none(), |this| {
+                    this.child(
                         resizable_panel()
                             .size(rem * 22.)
                             .size_range(rem * 18. ..rem * 36.)
                             .child(self.render_inspector(cx)),
                     )
-                    .into_any_element()
+                })
+                .into_any_element()
             }
         }
     }

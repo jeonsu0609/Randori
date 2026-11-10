@@ -313,7 +313,7 @@ impl RepoView {
                     .on_click(
                         cx.listener(move |view, event: &gpui_kit::ClickEvent, window, cx| {
                             view.select_file(Some(ix), cx);
-                            if view.focus.is_some() {
+                            if view.center.file().is_some() {
                                 // the full view follows the file picked here
                                 view.retarget_focus(cx);
                             } else if event.click_count() >= 2 {

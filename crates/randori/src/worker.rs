@@ -30,6 +30,25 @@ fn restart_delay(failures: u32) -> Duration {
         .min(Duration::from_secs(5))
 }
 
+/// Runs `work` on a thread of its own and waits for it without holding an
+/// executor thread. For the loads that open the repository a second time
+/// (blame, a pull request's diff): they block for seconds on a large history,
+/// and the background executor's few threads also run the tab's other work.
+pub async fn on_own_thread<T: Send + 'static>(
+    name: &str,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .with_context(|| format!("starting the {name} thread"))?;
+    rx.await
+        .map_err(|_| anyhow!("the {name} thread stopped without a result"))?
+}
+
 /// A push event emitted by the worker, e.g. `gg://repo/status`.
 pub struct WorkerEvent {
     pub name: String,

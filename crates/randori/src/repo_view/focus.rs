@@ -20,14 +20,6 @@ pub(super) enum FocusTab {
 }
 
 /// Loading state of one part of the view.
-enum Load {
-    Loading,
-    Ready,
-    /// Nothing to show, with the reason ("no changes", "binary file").
-    Note(SharedString),
-    Failed(SharedString),
-}
-
 struct BlameBlock {
     rev: RevHeader,
     change: SharedString,
@@ -119,7 +111,7 @@ impl RepoView {
         };
         // the selected revision's detail is loaded already
         show_diff_of(&mut focus, detail, cx);
-        self.focus = Some(focus);
+        self.center = Center::File(Box::new(focus));
         self.load_focus_tab(cx);
         if history {
             self.load_focus_history(cx);
@@ -131,7 +123,7 @@ impl RepoView {
     /// Shows the file selected in the inspector, in the selected revision,
     /// keeping the tab and whether the history is open.
     pub(super) fn retarget_focus(&mut self, cx: &mut Context<Self>) {
-        let (Some(focus), Some(detail)) = (self.focus.as_mut(), self.detail.as_ref()) else {
+        let (Some(focus), Some(detail)) = (self.center.file_mut(), self.detail.as_ref()) else {
             return;
         };
         let Some(file) = self.selected_file.and_then(|ix| detail.files.get(ix)) else {
@@ -159,14 +151,15 @@ impl RepoView {
     }
 
     pub(super) fn close_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.focus.take().is_some() {
+        if self.center.file().is_some() {
+            self.center = Center::Revisions;
             self.log_focus.focus(window, cx);
             cx.notify();
         }
     }
 
     fn set_focus_tab(&mut self, tab: FocusTab, cx: &mut Context<Self>) {
-        if let Some(focus) = &mut self.focus {
+        if let Some(focus) = self.center.file_mut() {
             focus.tab = tab;
         }
         self.load_focus_tab(cx);
@@ -174,7 +167,7 @@ impl RepoView {
     }
 
     fn toggle_focus_history(&mut self, cx: &mut Context<Self>) {
-        let Some(focus) = &mut self.focus else {
+        let Some(focus) = self.center.file_mut() else {
             return;
         };
         focus.show_history = !focus.show_history;
@@ -186,7 +179,7 @@ impl RepoView {
 
     /// Shows the file as it is in `rev` (a history or blame pick).
     fn show_focus_rev(&mut self, rev: RevHeader, cx: &mut Context<Self>) {
-        let Some(focus) = &mut self.focus else {
+        let Some(focus) = self.center.file_mut() else {
             return;
         };
         focus.rev = rev;
@@ -203,7 +196,7 @@ impl RepoView {
     /// After a reload: follow the shown revision to its rewritten commit (a
     /// hunk was discarded or squashed), or keep it when it did not change.
     pub(super) fn refresh_focus(&mut self, cx: &mut Context<Self>) {
-        let Some(focus) = &self.focus else {
+        let Some(focus) = self.center.file() else {
             return;
         };
         let change = focus.rev.id.change.hex.clone();
@@ -217,21 +210,21 @@ impl RepoView {
         };
         if row.revision.id.commit.hex != commit {
             let rev = row.revision.clone();
-            if let Some(focus) = &mut self.focus {
+            if let Some(focus) = self.center.file_mut() {
                 focus.history_load = None;
                 if focus.base.change.hex == rev.id.change.hex {
                     focus.base = rev.id.clone();
                 }
             }
             self.show_focus_rev(rev, cx);
-            if self.focus.as_ref().is_some_and(|focus| focus.show_history) {
+            if self.center.file().is_some_and(|focus| focus.show_history) {
                 self.load_focus_history(cx);
             }
         }
     }
 
     fn load_focus_diff(&mut self, cx: &mut Context<Self>) {
-        let Some(focus) = &mut self.focus else {
+        let Some(focus) = self.center.file_mut() else {
             return;
         };
         let set = RevSet {
@@ -246,7 +239,8 @@ impl RepoView {
                 .await;
             let _ = this.update(cx, |view, cx| {
                 // a later pick (another revision or file) owns the view now
-                let Some(focus) = view.focus.as_mut().filter(|focus| focus.key() == asked) else {
+                let Some(focus) = view.center.file_mut().filter(|focus| focus.key() == asked)
+                else {
                     return;
                 };
                 match result {
@@ -262,7 +256,7 @@ impl RepoView {
 
     /// Loads what the current tab needs, once per revision.
     fn load_focus_tab(&mut self, cx: &mut Context<Self>) {
-        let Some(focus) = &mut self.focus else {
+        let Some(focus) = self.center.file_mut() else {
             return;
         };
         let (id, path) = (focus.rev.id.clone(), focus.path.clone());
@@ -279,7 +273,8 @@ impl RepoView {
                         .background_spawn(async move { worker.query_file(id, path) })
                         .await;
                     let _ = this.update(cx, |view, cx| {
-                        let Some(focus) = view.focus.as_mut().filter(|focus| focus.key() == asked)
+                        let Some(focus) =
+                            view.center.file_mut().filter(|focus| focus.key() == asked)
                         else {
                             return;
                         };
@@ -295,7 +290,7 @@ impl RepoView {
                                 focus
                                     .file
                                     .update(cx, |state, cx| state.set_files([file], cx));
-                                Load::Ready
+                                Load::Ready(())
                             }
                             Err(err) => Load::Failed(format!("{err:#}").into()),
                         });
@@ -306,18 +301,23 @@ impl RepoView {
             FocusTab::Blame if focus.blame_load.is_none() => {
                 focus.blame_load = Some(Load::Loading);
                 focus._tasks.push(cx.spawn(async move |this, cx| {
-                    let result = cx
-                        // a long history takes a while; a load of its own keeps the
-                        // tab's worker (log, diff, mutations) free meanwhile
-                        .background_spawn(async move {
-                            match workspace {
-                                Some(wd) => gg_lib::worker::annotate_apart(&wd, &id, &path),
-                                None => worker.query_annotation(id, path),
-                            }
-                        })
-                        .await;
+                    // a long history takes a while; a load of its own keeps the
+                    // tab's worker (log, diff, mutations) free meanwhile
+                    let result = match workspace {
+                        Some(wd) => {
+                            crate::worker::on_own_thread("randori-blame", move || {
+                                gg_lib::worker::annotate_apart(&wd, &id, &path)
+                            })
+                            .await
+                        }
+                        None => {
+                            cx.background_spawn(async move { worker.query_annotation(id, path) })
+                                .await
+                        }
+                    };
                     let _ = this.update(cx, |view, cx| {
-                        let Some(focus) = view.focus.as_mut().filter(|focus| focus.key() == asked)
+                        let Some(focus) =
+                            view.center.file_mut().filter(|focus| focus.key() == asked)
                         else {
                             return;
                         };
@@ -330,7 +330,7 @@ impl RepoView {
                             }
                             Ok(annotation) => {
                                 focus.blame = Rc::new(blame_rows(annotation, Local::now()));
-                                Load::Ready
+                                Load::Ready(())
                             }
                             Err(err) => Load::Failed(format!("{err:#}").into()),
                         });
@@ -343,7 +343,7 @@ impl RepoView {
     }
 
     fn load_focus_history(&mut self, cx: &mut Context<Self>) {
-        let Some(focus) = &mut self.focus else {
+        let Some(focus) = self.center.file_mut() else {
             return;
         };
         focus.history_load = Some(Load::Loading);
@@ -355,7 +355,7 @@ impl RepoView {
                 .background_spawn(async move { worker.query_file_history(id, path, HISTORY_LIMIT) })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                let Some(focus) = view.focus.as_mut().filter(|focus| {
+                let Some(focus) = view.center.file_mut().filter(|focus| {
                     (focus.base.commit.hex.clone(), focus.path.repo_path.clone()) == asked
                 }) else {
                     return;
@@ -375,7 +375,7 @@ impl RepoView {
                                 })
                                 .collect(),
                         );
-                        Load::Ready
+                        Load::Ready(())
                     }
                     Err(err) => Load::Failed(format!("{err:#}").into()),
                 });
@@ -423,7 +423,7 @@ impl RepoView {
     }
 
     fn focus_hunk(&self, ix: usize) -> Option<(RevId, RevId, TreePath, ChangeHunk)> {
-        let focus = self.focus.as_ref()?;
+        let focus = self.center.file()?;
         if focus.rev.is_immutable {
             return None;
         }
@@ -575,7 +575,7 @@ impl RepoView {
         let content = match focus.tab {
             FocusTab::Diff => self.render_focus_diff(focus, cx),
             FocusTab::File => match &focus.file_load {
-                Some(Load::Ready) => Diff::new(&focus.file)
+                Some(Load::Ready(())) => Diff::new(&focus.file)
                     .line_number(true)
                     .header_visible(false)
                     .size_full()
@@ -583,7 +583,7 @@ impl RepoView {
                 other => load_note(other.as_ref(), cx),
             },
             FocusTab::Blame => match &focus.blame_load {
-                Some(Load::Ready) => self.render_blame(focus, cx),
+                Some(Load::Ready(())) => self.render_blame(focus, cx),
                 other => load_note(other.as_ref(), cx),
             },
         };
@@ -646,7 +646,7 @@ impl RepoView {
     }
 
     fn focus_change(&mut self, next: bool, cx: &mut Context<Self>) {
-        if let Some(focus) = &self.focus {
+        if let Some(focus) = self.center.file() {
             focus.diff.update(cx, |state, cx| {
                 if next {
                     state.next_change(cx)
@@ -658,7 +658,7 @@ impl RepoView {
     }
 
     fn render_focus_diff(&self, focus: &FileFocus, cx: &mut Context<Self>) -> AnyElement {
-        if !matches!(focus.diff_load, Load::Ready) {
+        if !matches!(focus.diff_load, Load::Ready(())) {
             return load_note(Some(&focus.diff_load), cx);
         }
         // Discard and squash below every hunk, for a mutable revision with one parent.
@@ -735,7 +735,7 @@ impl RepoView {
     pub(super) fn render_history(&self, focus: &FileFocus, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let body = match &focus.history_load {
-            Some(Load::Ready) => {
+            Some(Load::Ready(())) => {
                 let rows = focus.history.clone();
                 let shown = focus.rev.id.commit.hex.clone();
                 let avatars = self.avatars.clone();
@@ -905,7 +905,7 @@ impl RepoView {
                                     .on_click(move |_, _, cx| {
                                         let rev = rev.clone();
                                         let _ = owner.update(cx, |view, cx| {
-                                            if let Some(focus) = &mut view.focus {
+                                            if let Some(focus) = view.center.file_mut() {
                                                 focus.tab = FocusTab::Diff;
                                             }
                                             view.show_focus_rev(rev, cx)
@@ -994,7 +994,7 @@ fn show_diff_of(focus: &mut FileFocus, detail: &Detail, cx: &mut Context<RepoVie
             focus
                 .diff
                 .update(cx, |state, cx| state.set_files([patch], cx));
-            focus.diff_load = Load::Ready;
+            focus.diff_load = Load::Ready(());
         }
         _ => {
             focus.hunks.clear();
@@ -1052,7 +1052,7 @@ fn blame_rows(
 fn load_note(load: Option<&Load>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (text, color) = match load {
-        None | Some(Load::Loading) | Some(Load::Ready) => {
+        None | Some(Load::Loading) | Some(Load::Ready(())) => {
             return v_flex()
                 .size_full()
                 .items_center()
