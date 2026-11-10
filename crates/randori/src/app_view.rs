@@ -521,6 +521,21 @@ impl RandoriApp {
                     Box::new(repo::GroupByBranch),
                 ),
                 (
+                    "Widen the original side of split diffs",
+                    IconName::ChevronRight,
+                    Box::new(repo::WidenOriginalSide),
+                ),
+                (
+                    "Widen the modified side of split diffs",
+                    IconName::ChevronLeft,
+                    Box::new(repo::WidenModifiedSide),
+                ),
+                (
+                    "Even the sides of split diffs",
+                    IconName::Columns2,
+                    Box::new(repo::EvenSplitSides),
+                ),
+                (
                     "Refresh pull requests",
                     IconName::RefreshCw,
                     Box::new(repo::RefreshPullRequests),

@@ -53,6 +53,9 @@ impl Default for ColumnWidths {
     }
 }
 
+/// A split diff starts with its two sides the same width.
+pub const DEFAULT_SPLIT_RATIO: f32 = 0.5;
+
 /// The part saved with the session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -67,6 +70,8 @@ pub struct DisplaySettings {
     pub log_by_date: bool,
     /// The revision list's column widths, as last dragged.
     pub columns: ColumnWidths,
+    /// The original (left) side's share of a split diff, as last dragged.
+    pub split_ratio: f32,
 }
 
 impl Default for DisplaySettings {
@@ -77,6 +82,7 @@ impl Default for DisplaySettings {
             pull_refresh_secs: 60,
             log_by_date: false,
             columns: ColumnWidths::default(),
+            split_ratio: DEFAULT_SPLIT_RATIO,
         }
     }
 }
@@ -182,5 +188,6 @@ mod tests {
         assert_eq!(old.diff, DiffLayout::Split);
         assert!(old.github);
         assert_eq!(old.pull_refresh_secs, 60);
+        assert_eq!(old.split_ratio, DEFAULT_SPLIT_RATIO);
     }
 }

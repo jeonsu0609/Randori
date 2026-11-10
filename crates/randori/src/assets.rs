@@ -14,6 +14,7 @@ gpui_kit::assets::icon_assets!(pub AppIcons, [
     ChevronLeft,
     ChevronRight,
     ChevronUp,
+    Columns2,
     CircleCheck,
     CircleDot,
     CircleX,
@@ -96,6 +97,7 @@ mod tests {
             include_str!("repo_view/panels.rs"),
             include_str!("repo_view/pick.rs"),
             include_str!("repo_view/pulls.rs"),
+            include_str!("repo_view/split.rs"),
             include_str!("repo_view/switcher.rs"),
         );
         let mut missing = Vec::new();

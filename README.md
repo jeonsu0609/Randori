@@ -31,7 +31,7 @@ you move, split and recombine freely. That is how jj treats history.
 | Rail | Revisions, Open, the command palette (`⌘K`) and Settings (below) |
 | Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
 | Revisions | Branch / tag, graph, change id, description and author columns, GitKraken style: drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. Instead of a time on every row, a hairline and a label ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. As in GitKraken the layout follows the list's width: wide, the labels have room right of the author; narrower, they sit over the row's end; narrower still, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
-| Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Double-click a file (or `⇧⌘D`) for its full view |
+| Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Split puts the parent's version on the left and wraps long lines so both sides stay in view; drag the boundary between them to resize the sides, double-click it to even them. The palette and the View menu do the same from the keyboard; used on a unified diff, they switch it (and the layout diffs open in) to split. Double-click a file (or `⇧⌘D`) for its full view |
 | Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Status bar | Worker state, the running jj operation and its progress, the last operation, the working copy and the number of loaded revisions |
 
@@ -125,7 +125,7 @@ Changes apply to open tabs at once.
 | Setting | Saved in | Effect |
 | --- | --- | --- |
 | Appearance | session | Light, dark or follow the system |
-| Diffs open as | session | Unified or split; the diff header's switch changes it too |
+| Diffs open as | session | Unified or split; the diff header's switch changes it too, in the changes panel and the full file view alike. The split's divider position is saved too |
 | Snapshot when Randori comes to the front | `gg.queries.auto-snapshot` | Automatic (jj's default: off in repositories over `gg.queries.large-repo-heuristic`, 100k commits), always or never |
 | Mark bookmarks that are not pushed | `gg.ui.mark-unpushed-bookmarks` | Upload mark on local bookmarks that moved since their push, or that no remote tracks |
 | Pull requests and avatars | session | Turns the GitHub section and avatar requests off |
@@ -286,6 +286,7 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                    pulls        the pull requests section
                    focus        a file's full view: diff, file, blame, history
                    switcher     workspace and bookmark switchers, conflict count
+                   split        the movable divider of split diffs
                    dnd, menus   drag payloads, context menus
                  graph          graph lanes, branch colours and avatars per virtual-list row
                  github         GitHub remotes, token lookup, pull request and avatar query
@@ -307,6 +308,10 @@ src/messages     request and response types shared with the UI
   `src/messages`, `src/config`, `src/askpass.rs`). GG's Tauri app, web mode and
   Svelte frontend are not part of Randori; GG's documentation is kept in
   [`doc/gg/`](doc/gg/).
+- gpui-kit comes from Randori's fork, `jeonsu0609/gpui-kit`: the 0.9.0
+  release plus a ratio for the two sides of a split diff, through
+  `[patch.crates-io]`. What changed and how to update it:
+  [`doc/randori/gpui-kit-patch.md`](doc/randori/gpui-kit-patch.md).
 
 ## Based on GG
 

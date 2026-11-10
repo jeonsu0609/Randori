@@ -56,7 +56,7 @@ pub(super) struct FileFocus {
     /// The revision the view opened on; the history is its ancestors'.
     base: RevId,
     pub(super) show_history: bool,
-    diff: Entity<DiffState>,
+    pub(super) diff: Entity<DiffState>,
     /// `path`'s hunks in `rev`, for discard and squash.
     hunks: Vec<ChangeHunk>,
     diff_load: Load,
@@ -686,7 +686,7 @@ impl RepoView {
             Vec::new()
         };
         let view = cx.entity().downgrade();
-        Diff::new(&focus.diff)
+        let diff = Diff::new(&focus.diff)
             .line_number(true)
             .header_visible(false)
             .annotations(annotations)
@@ -696,11 +696,12 @@ impl RepoView {
                 };
                 let ix = *ix as usize;
                 let (discard, squash) = (view.clone(), view.clone());
+                // at the start: with long lines the row is wider than the
+                // view, and its end is off screen until scrolled to
                 h_flex()
                     .px_3()
                     .py_1()
                     .gap_1()
-                    .justify_end()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(
@@ -727,9 +728,8 @@ impl RepoView {
                             }),
                     )
                     .into_any_element()
-            })
-            .size_full()
-            .into_any_element()
+            });
+        self.split_diff("focus-split", diff, &focus.diff, cx)
     }
 
     pub(super) fn render_history(&self, focus: &FileFocus, cx: &mut Context<Self>) -> AnyElement {

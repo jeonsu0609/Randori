@@ -351,6 +351,12 @@ impl RepoView {
             .into_any_element()
     }
     pub(super) fn render_changes(&self, cx: &mut Context<Self>) -> AnyElement {
+        let diff = self.split_diff(
+            "changes-split",
+            Diff::new(&self.diff).line_number(true),
+            &self.diff,
+            cx,
+        );
         let theme = cx.theme();
         let file = self
             .selected_file
@@ -383,12 +389,7 @@ impl RepoView {
                 .w_full()
                 // Fill the panel: without wrapping the diff would otherwise shrink to
                 // its longest line and clip the file header of a short file.
-                .child(
-                    Diff::new(&self.diff)
-                        .line_number(true)
-                        .soft_wrap(false)
-                        .size_full(),
-                )
+                .child(diff)
                 .into_any_element()
         };
 

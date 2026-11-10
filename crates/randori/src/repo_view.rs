@@ -56,6 +56,7 @@ mod panels;
 mod pick;
 mod picked_up;
 mod pulls;
+mod split;
 mod switcher;
 
 use crate::settings::{self, DiffLayout, Settings};
@@ -84,6 +85,10 @@ pub mod actions {
             OrderByDate,
             GroupByBranch,
             RefreshPullRequests,
+            // the divider of split diffs
+            WidenOriginalSide,
+            WidenModifiedSide,
+            EvenSplitSides,
             // the full view of one file
             OpenFileDiff,
             OpenFileView,
@@ -295,6 +300,8 @@ pub struct RepoView {
     derived_at: std::time::Instant,
     /// A column being resized: which, where the drag started, its width then.
     column_drag: Option<(log_list::Column, gpui_kit::Pixels, f32)>,
+    /// The split diff's ratio while its divider is dragged.
+    split_drag: Option<f32>,
     /// A move of the working copy asked to look for files it picked up.
     /// `Some(working copy before the move)` while a check is due.
     check_picked_up: Option<Option<String>>,
@@ -426,6 +433,7 @@ impl RepoView {
             conflicts_loading: false,
             derived_at: std::time::Instant::now(),
             column_drag: None,
+            split_drag: None,
             column_press: None,
             log_width: Rc::default(),
             log_by_date: settings::get(cx).display.log_by_date,
@@ -955,6 +963,10 @@ impl RepoView {
         }
         self.diff_mode = mode;
         self.diff.update(cx, |state, cx| state.set_mode(mode, cx));
+        // the full file view keeps a diff of its own
+        if let Some(focus) = &self.focus {
+            focus.diff.update(cx, |state, cx| state.set_mode(mode, cx));
+        }
         cx.notify();
     }
 
@@ -1038,6 +1050,9 @@ impl Render for RepoView {
         if self.column_drag.is_some() && !cx.has_active_drag() {
             cx.defer_in(window, |view, _, cx| view.finish_column_resize(cx));
         }
+        if self.split_drag.is_some() && !cx.has_active_drag() {
+            cx.defer_in(window, |view, _, cx| view.finish_split_resize(cx));
+        }
 
         v_flex()
             .id("repo")
@@ -1086,6 +1101,18 @@ impl Render for RepoView {
                 cx.listener(|view, _: &log_list::ColumnResize, _, cx| {
                     view.finish_column_resize(cx)
                 }),
+            )
+            .on_drop(
+                cx.listener(|view, _: &split::SplitResize, _, cx| view.finish_split_resize(cx)),
+            )
+            .on_action(cx.listener(|view, _: &actions::WidenOriginalSide, _, cx| {
+                view.widen_original_side(cx)
+            }))
+            .on_action(cx.listener(|view, _: &actions::WidenModifiedSide, _, cx| {
+                view.widen_modified_side(cx)
+            }))
+            .on_action(
+                cx.listener(|view, _: &actions::EvenSplitSides, _, cx| view.nudge_split(None, cx)),
             )
             .on_action(
                 cx.listener(|view, _: &actions::SwitchWorkspace, window, cx| {
