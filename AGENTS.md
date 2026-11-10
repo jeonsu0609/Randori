@@ -102,7 +102,7 @@ bindings (no screen-recording permission needed):
 
 ```bash
 cargo run -p randori --features screenshot -- \
-  --revset 'all()' --select-row 1 --keys 'down,cmd-k,n,e,w,enter' \
+  --revset 'all()' --select-row 1 --keys 'down,cmd-p,n,e,w,enter' \
   --screenshot /tmp/shot.png /path/to/workspace
 ```
 

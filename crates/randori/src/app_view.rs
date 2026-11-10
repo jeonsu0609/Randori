@@ -61,9 +61,9 @@ pub fn bind_keys(cx: &mut gpui_kit::App) {
     use actions::*;
     // `cmd-` on macOS, `ctrl-` elsewhere.
     let (open, close, palette) = if cfg!(target_os = "macos") {
-        ("cmd-o", "cmd-w", "cmd-k")
+        ("cmd-o", "cmd-w", "cmd-p")
     } else {
-        ("ctrl-o", "ctrl-w", "ctrl-k")
+        ("ctrl-o", "ctrl-w", "ctrl-p")
     };
     cx.bind_keys([
         KeyBinding::new(open, OpenRepository, Some(APP_CONTEXT)),
@@ -131,7 +131,7 @@ pub struct RandoriApp {
     saved_theme: ThemeChoice,
     /// Log scope new tabs start with (the last one picked).
     all_branches: bool,
-    /// Focus for the window itself, so its keys (⌘K, ⌘O) work with no tab open.
+    /// Focus for the window itself, so its keys (⌘P, ⌘O) work with no tab open.
     focus: FocusHandle,
     _activation: Subscription,
     _appearance: Subscription,
@@ -387,7 +387,7 @@ impl RandoriApp {
         cx.notify();
     }
 
-    /// ⌘K: every command of the window and the selected workspace, searchable.
+    /// ⌘P (as in GitKraken): every command of the window and the selected workspace, searchable.
     /// A confirmed item runs its action from the revision list, the same path a
     /// menu item or key binding takes.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -883,7 +883,7 @@ impl RandoriApp {
                 Button::new("rail-palette")
                     .ghost()
                     .icon(IconName::Command)
-                    .tooltip("Command palette (⌘K)")
+                    .tooltip("Command palette (⌘P)")
                     .on_click(cx.listener(|app, _, window, cx| app.open_palette(window, cx))),
             )
             .child(div().flex_1())

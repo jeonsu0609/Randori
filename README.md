@@ -28,7 +28,7 @@ you move, split and recombine freely. That is how jj treats history.
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
 | Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Undo, Redo, Fetch, Push, Reload |
-| Rail | Revisions, Open, the command palette (`⌘K`) and Settings (below) |
+| Rail | Revisions, Open, the command palette (`⌘P`, as in GitKraken) and Settings (below) |
 | Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
 | Revisions | Branch / tag, graph, change id, description and author columns, GitKraken style: drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. Instead of a time on every row, a hairline and a label ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. As in GitKraken the layout follows the list's width: wide, the labels have room right of the author; narrower, they sit over the row's end; narrower still, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Split puts the parent's version on the left and wraps long lines so both sides stay in view; drag the boundary between them to resize the sides, double-click it to even them. The palette and the View menu do the same from the keyboard; used on a unified diff, they switch it (and the layout diffs open in) to split. Double-click a file (or `⇧⌘D`) for its full view |
@@ -94,7 +94,7 @@ operation log, and git credentials are asked for when a remote needs them.
 | Discard a file's changes | Right-click it in the inspector, confirmed in a dialog |
 | Squash one hunk into the parent | Select lines in the diff, then **Squash hunk into parent** |
 | Resolve a conflict | Right-click the conflicted file → **Resolve in merge tool** (`ui.merge-editor`) |
-| Anything else | `⌘K` opens the command palette |
+| Anything else | `⌘P` opens the command palette |
 | Push | `⌘⇧P` pushes the selection's bookmarks (an untracked bookmark goes to `origin`, or the only remote) |
 | Fetch | `⌘⇧F` fetches every remote |
 | Undo / redo | `⌘Z` / `⌘⇧Z` in the revision list |
@@ -175,7 +175,7 @@ sign in (`gh auth login`); nothing else needs it.
 | `⌘W` (`Ctrl+W`) | Window | Close the tab; with no tab open, close the window |
 | `⌘Q` (`Ctrl+Q`) | Anywhere | Quit (asks first when descriptions are unsaved). Closing the window quits too |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Window | Next / previous tab |
-| `⌘K` (`Ctrl+K`) | Window | Command palette |
+| `⌘P` (`Ctrl+P`) | Window | Command palette |
 | `⇧⌘D` (`Ctrl+Shift+D`) | Workspace | Full view of the selected file |
 | `⇧⌘B` (`Ctrl+Shift+B`) | Workspace | Start a new change on a bookmark |
 | `⌥↑` / `⌥↓`, `[` / `]`, `Esc` | Full view | Previous / next change, previous / next file, back to the revisions |
