@@ -92,6 +92,9 @@ pub(crate) struct WorkspaceData {
     pub aliases_map: RevsetAliasesMap,
     pub fileset_aliases_map: FilesetAliasesMap,
     pub query_choices: HashMap<String, String>,
+    /// Committer times read for the log's date order, by commit: a commit
+    /// never changes, so a reload orders by them without reading it again.
+    pub commit_times: std::cell::RefCell<HashMap<CommitId, i64>>,
 }
 
 /// state derived from a specific operation
@@ -145,6 +148,7 @@ impl WorkerSession {
             fileset_aliases_map,
             extensions: Default::default(),
             query_choices: preset_choices,
+            commit_times: Default::default(),
         };
 
         let operation = load_at_head(&workspace, &data).await?;
@@ -793,6 +797,7 @@ impl WorkspaceSession<'_> {
 
         Ok(messages::RepoConfig::Workspace {
             absolute_path,
+            workspace_name: self.name().as_symbol().to_string(),
             git_remotes,
             git_remote_urls,
             query_choices,

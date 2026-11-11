@@ -17,7 +17,8 @@ async fn log_all() -> Result<()> {
 
     let all_rows = queries::query_log(&ws, "all()", 100)?;
 
-    assert_eq!(24, all_rows.rows.len());
+    // the 24 commits of the fixture, less jj's root, which the log leaves out
+    assert_eq!(23, all_rows.rows.len());
     assert!(!all_rows.has_more);
 
     Ok(())
@@ -1156,6 +1157,37 @@ async fn log_by_date_has_the_same_rows_in_topological_order() -> Result<()> {
     for (ix, row) in by_date.rows.iter().enumerate() {
         assert_eq!(row.location.1, ix);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn log_by_date_pages_continue_where_the_last_one_ended() -> Result<()> {
+    let repo = mkrepo();
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+    let ids = |page: &crate::messages::queries::LogPage| -> Vec<String> {
+        page.rows
+            .iter()
+            .map(|row| row.revision.id.commit.hex.clone())
+            .collect()
+    };
+    let whole = ids(&queries::query_log_ordered(&ws, "all()", 100, true)?);
+
+    // pages of 5, each from a new session as after another request came
+    // between them: the order worked out for the first is kept
+    let revset = ws.evaluate_revset_str("all()")?;
+    let mut state = queries::QueryState::new(5).by_date(true);
+    let mut paged = Vec::new();
+    loop {
+        let mut query = queries::QuerySession::new(&ws, &*revset, state)?;
+        let page = query.get_page()?;
+        paged.extend(ids(&page));
+        state = query.state;
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(paged, whole);
     Ok(())
 }
 

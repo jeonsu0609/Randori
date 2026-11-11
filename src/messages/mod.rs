@@ -202,6 +202,9 @@ pub enum RepoConfig {
     Initial,
     Workspace {
         absolute_path: DisplayPath,
+        /// This workspace's name in the repository (`default` unless `jj
+        /// workspace add` named it), which headers give only for the others.
+        workspace_name: String,
         git_remotes: Vec<String>,
         /// `(name, fetch URL)` of each remote in `git_remotes`.
         git_remote_urls: Vec<(String, String)>,

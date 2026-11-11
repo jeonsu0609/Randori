@@ -182,6 +182,57 @@ async fn query_log_multi() -> Result<()> {
 }
 
 #[tokio::test]
+async fn query_log_failed_revset_keeps_the_log_being_paged() -> Result<()> {
+    let repo = mkrepo();
+    let (tx, rx) = channel::<SessionEvent>();
+    let (tx_load, rx_load) = channel::<Result<RepoConfig>>();
+    let (tx_page1, rx_page1) = channel::<Result<LogPage>>();
+    let (tx_bad, rx_bad) = channel::<Result<LogPage>>();
+    let (tx_page2, rx_page2) = channel::<Result<LogPage>>();
+    let (tx_reload, rx_reload) = channel::<Result<RepoConfig>>();
+
+    tx.send(SessionEvent::OpenWorkspace {
+        tx: tx_load,
+        wd: Some(repo.path().to_owned()),
+    })?;
+    tx.send(SessionEvent::QueryLog {
+        tx: tx_page1,
+        query: "all()".to_owned(),
+        by_date: false,
+    })?;
+    tx.send(SessionEvent::QueryLog {
+        tx: tx_bad,
+        query: "x(".to_owned(),
+        by_date: false,
+    })?;
+    tx.send(SessionEvent::QueryLogNextPage { tx: tx_page2 })?;
+    tx.send(SessionEvent::OpenWorkspace {
+        tx: tx_reload,
+        wd: None,
+    })?;
+    tx.send(SessionEvent::EndSession)?;
+
+    WorkerSession {
+        force_log_page_size: Some(7),
+        ..Default::default()
+    }
+    .handle_events(&rx)
+    .await?;
+
+    rx_load.recv()??;
+    let page1 = rx_page1.recv()??;
+    assert_eq!(7, page1.rows.len());
+    assert!(rx_bad.recv()?.is_err());
+    // the next page of all(), after the rows of the first
+    let page2 = rx_page2.recv()??;
+    assert_eq!(7, page2.rows.len());
+    assert_eq!(page2.rows[0].location.1, 7);
+    let config = rx_reload.recv()??;
+    assert_matches!(config, RepoConfig::Workspace { latest_query, .. } if latest_query == "all()");
+    Ok(())
+}
+
+#[tokio::test]
 async fn query_log_multi_restart() -> Result<()> {
     let repo = mkrepo();
     let (tx, rx) = channel::<SessionEvent>();

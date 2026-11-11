@@ -1,5 +1,6 @@
 use std::{
     borrow::Borrow,
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     io::Write,
     mem,
@@ -66,8 +67,11 @@ pub struct QueryState {
     stems: Vec<Option<LogStem>>,
     /// stem of a missing edge, kept until the next row so that nothing is drawn under its stub
     missing_stem: Option<usize>,
-    /// newest first across branches (jj's index order) instead of one branch at a time
+    /// newest first across branches instead of one branch at a time
     by_date: bool,
+    /// the revset's rows by date, once ordered: the pages after the first
+    /// take them from here instead of ordering the whole revset again
+    date_order: Option<std::rc::Rc<Vec<GraphNode<CommitId>>>>,
 }
 
 impl QueryState {
@@ -78,15 +82,85 @@ impl QueryState {
             stems: Vec::new(),
             missing_stem: None,
             by_date: false,
+            date_order: None,
         }
     }
 
-    /// Orders rows by when jj recorded them, newest first, interleaving
-    /// branches like `git log --date-order`; parents still follow children.
+    /// Orders rows by commit time, newest first, interleaving branches like
+    /// `git log --date-order`; parents still follow children.
     pub fn by_date(mut self, by_date: bool) -> QueryState {
         self.by_date = by_date;
         self
     }
+}
+
+/// The revset's graph newest first by committer time, as `git log
+/// --date-order`: a commit comes after every commit of the set with an edge
+/// to it, and of those ready, the latest goes first (the newer in jj's index
+/// on a tie). jj's index order is when jj learned of a commit, which for one
+/// imported from git is the import order: tags fetched later came first.
+/// The root commit (`root`) is left out, as the log leaves it out.
+fn date_ordered(
+    ws: &WorkspaceSession,
+    revset: &dyn Revset,
+    root: &CommitId,
+) -> Result<Vec<GraphNode<CommitId>>> {
+    let nodes: Vec<GraphNode<CommitId>> = revset
+        .stream_graph()
+        .try_filter(|(id, _)| std::future::ready(id != root))
+        .try_collect()
+        .block_on()?;
+    let index: HashMap<CommitId, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(ix, (id, _))| (id.clone(), ix))
+        .collect();
+    // how many commits of the set still have to come before each one
+    let mut waiting = vec![0usize; nodes.len()];
+    for (_, edges) in &nodes {
+        for edge in edges {
+            if let Some(&target) = index.get(&edge.target) {
+                waiting[target] += 1;
+            }
+        }
+    }
+    let mut known = ws.data.commit_times.borrow_mut();
+    let times: Vec<i64> = nodes
+        .iter()
+        .map(|(id, _)| match known.get(id) {
+            Some(&time) => Ok(time),
+            None => {
+                let time = ws.get_commit(id)?.committer().timestamp.timestamp.0;
+                known.insert(id.clone(), time);
+                Ok(time)
+            }
+        })
+        .collect::<Result<_>>()?;
+    drop(known);
+    // the stream is newest first in the index, so on a tie the lower index
+    let mut ready: std::collections::BinaryHeap<(i64, Reverse<usize>)> = waiting
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count == 0)
+        .map(|(ix, _)| (times[ix], Reverse(ix)))
+        .collect();
+    let mut order = Vec::with_capacity(nodes.len());
+    while let Some((_, Reverse(ix))) = ready.pop() {
+        order.push(ix);
+        for edge in &nodes[ix].1 {
+            if let Some(&target) = index.get(&edge.target) {
+                waiting[target] -= 1;
+                if waiting[target] == 0 {
+                    ready.push((times[target], Reverse(target)));
+                }
+            }
+        }
+    }
+    let mut slots: Vec<Option<GraphNode<CommitId>>> = nodes.into_iter().map(Some).collect();
+    Ok(order
+        .into_iter()
+        .filter_map(|ix| slots[ix].take())
+        .collect())
 }
 
 /// live instance of a query
@@ -106,38 +180,52 @@ impl<'q, 'w> QuerySession<'q, 'w> {
     pub fn new(
         ws: &'q WorkspaceSession<'w>,
         revset: &'q dyn Revset,
-        state: QueryState,
-    ) -> QuerySession<'q, 'w> {
+        mut state: QueryState,
+    ) -> Result<QuerySession<'q, 'w>> {
         let as_id: for<'a> fn(&'a CommitId) -> &'a CommitId = commit_id_identity;
-        let mut stream: Pin<Box<dyn Stream<Item = _> + 'q>> = if state.by_date {
-            // the index is topological: a commit is always added after its parents
-            revset.stream_graph()
-        } else {
-            Box::pin(TopoGroupedGraph::new(revset.stream_graph(), as_id).stream())
-        };
-        // skip already-yielded rows
+        // the root commit is jj's, empty and dated 1970: no row of its own,
+        // as GitKraken has nothing under the first commit (its edges go too)
+        let root = ws.repo().store().root_commit_id().clone();
         let mut stream_done = false;
-        for _ in 0..state.next_row {
-            match stream.next().block_on() {
-                Some(_) => {}
-                None => {
+        let stream: Pin<Box<dyn Stream<Item = _> + 'q>> = if state.by_date {
+            let ordered = match state.date_order.clone() {
+                Some(ordered) => ordered,
+                None => std::rc::Rc::new(date_ordered(ws, revset, &root)?),
+            };
+            state.date_order = Some(ordered.clone());
+            // already-yielded rows: the order is kept, so they are skipped by position
+            Box::pin(futures_util::stream::iter(
+                (state.next_row..ordered.len()).map(move |ix| Ok(ordered[ix].clone())),
+            ))
+        } else {
+            let mut stream: Pin<Box<dyn Stream<Item = _> + 'q>> = Box::pin(
+                TopoGroupedGraph::new(revset.stream_graph(), as_id)
+                    .stream()
+                    .filter(move |node| {
+                        std::future::ready(!matches!(node, Ok((id, _)) if *id == root))
+                    }),
+            );
+            // skip already-yielded rows
+            for _ in 0..state.next_row {
+                if stream.next().block_on().is_none() {
                     stream_done = true;
                     break;
                 }
             }
-        }
+            stream
+        };
 
-        let immutable_revset = ws.evaluate_immutable().unwrap();
+        let immutable_revset = ws.evaluate_immutable()?;
         let is_immutable = immutable_revset.containing_fn();
 
-        QuerySession {
+        Ok(QuerySession {
             ws,
             stream,
             lookahead: None,
             stream_done,
             state,
             is_immutable,
-        }
+        })
     }
 
     fn next_node(&mut self) -> Option<Result<GraphNode<CommitId>, RevsetEvaluationError>> {
@@ -252,12 +340,11 @@ impl<'q, 'w> QuerySession<'q, 'w> {
             // merge edges into existing stems or add new ones to the right
             let mut next_missing: Option<CommitId> = None;
             'edges: for edge in commit_edges.iter() {
+                if edge.target == root_id {
+                    continue;
+                }
                 if edge.edge_type == GraphEdgeType::Missing {
-                    if edge.target == root_id {
-                        continue;
-                    } else {
-                        next_missing = Some(edge.target.clone());
-                    }
+                    next_missing = Some(edge.target.clone());
                 }
 
                 let indirect = edge.edge_type != GraphEdgeType::Direct;
@@ -365,7 +452,7 @@ pub fn query_log_ordered(
 ) -> Result<LogPage> {
     let state = QueryState::new(max_results).by_date(by_date);
     let revset = ws.evaluate_revset_str(revset_str)?;
-    let mut session = QuerySession::new(ws, &*revset, state);
+    let mut session = QuerySession::new(ws, &*revset, state)?;
     session.get_page()
 }
 

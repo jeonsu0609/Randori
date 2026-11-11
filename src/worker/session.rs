@@ -344,7 +344,7 @@ impl Session for WorkspaceSession<'_> {
                         .session
                         .force_log_page_size
                         .unwrap_or(self.data.workspace_settings.query_log_page_size());
-                    handle_query(
+                    let started = handle_query(
                         &mut state,
                         &self,
                         tx,
@@ -353,8 +353,10 @@ impl Session for WorkspaceSession<'_> {
                         Some(QueryState::new(log_page_size).by_date(by_date)),
                     )
                     .await?;
-
-                    self.session.latest_query = Some(revset_string);
+                    // a revset that failed leaves the log being paged as it was
+                    if started {
+                        self.session.latest_query = Some(revset_string);
+                    }
                 }
                 SessionEvent::QueryLogNextPage { tx } => {
                     let revset_string = self.session.latest_query.as_deref();
@@ -551,7 +553,8 @@ impl Session for QuerySession<'_, '_> {
     }
 }
 
-/// helper function for transitioning from workspace state to query state
+/// helper function for transitioning from workspace state to query state;
+/// whether the query started (its first page was sent, not an error)
 async fn handle_query(
     state: &mut WorkspaceState,
     ws: &WorkspaceSession<'_>,
@@ -559,7 +562,7 @@ async fn handle_query(
     rx: &Receiver<SessionEvent>,
     revset_str: Option<&str>,
     query_state: Option<QueryState>,
-) -> Result<()> {
+) -> Result<bool> {
     let query_state = match query_state.or_else(|| state.unpaged_query.take()) {
         Some(x) => x,
         None => {
@@ -569,7 +572,7 @@ async fn handle_query(
 
             state.unhandled_event = None;
             state.unpaged_query = None;
-            return Ok(());
+            return Ok(false);
         }
     };
 
@@ -580,10 +583,12 @@ async fn handle_query(
 
             state.unhandled_event = None;
             state.unpaged_query = None;
-            return Ok(());
+            return Ok(false);
         }
     };
 
+    // past here a failure keeps `state.unpaged_query`: for a new query it
+    // is the log still being paged, for a next page it was taken already
     let revset = match ws
         .evaluate_revset_str(revset_str)
         .context("evaluate revset")
@@ -591,14 +596,19 @@ async fn handle_query(
         Ok(x) => x,
         Err(err) => {
             tx.send(Err(err))?;
-
             state.unhandled_event = None;
-            state.unpaged_query = None;
-            return Ok(());
+            return Ok(false);
         }
     };
 
-    let mut query = queries::QuerySession::new(ws, &*revset, query_state);
+    let mut query = match queries::QuerySession::new(ws, &*revset, query_state) {
+        Ok(query) => query,
+        Err(err) => {
+            tx.send(Err(err))?;
+            state.unhandled_event = None;
+            return Ok(false);
+        }
+    };
     let page = query.get_page();
     tx.send(page)?;
 
@@ -606,5 +616,5 @@ async fn handle_query(
 
     state.unhandled_event = Some(next_event);
     state.unpaged_query = Some(next_query);
-    Ok(())
+    Ok(true)
 }

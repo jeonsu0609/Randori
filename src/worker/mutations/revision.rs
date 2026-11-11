@@ -765,8 +765,9 @@ mod tests {
         let mut session = WorkerSession::default();
         let mut ws = session.load_workspace(repo.path()).await?;
 
+        // the fixture's commits, less jj's root, which the log leaves out
         let page = queries::query_log(&ws, "all()", 100)?;
-        assert_eq!(24, page.rows.len());
+        assert_eq!(23, page.rows.len());
 
         AbandonRevisions {
             set: RevSet::singleton(revs::resolve_conflict()),
@@ -775,7 +776,7 @@ mod tests {
         .await?;
 
         let page = queries::query_log(&ws, "all()", 100)?;
-        assert_eq!(23, page.rows.len());
+        assert_eq!(22, page.rows.len());
 
         Ok(())
     }
