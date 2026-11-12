@@ -33,7 +33,7 @@ you move, split and recombine freely. That is how jj treats history.
 | Side panel | As GitKraken's: a **filter** (`⌘⌥F`) over every section, then **Local**, **Remote** (by remote), **Workspaces** (jj's worktrees), **Pull requests** of the workspace's GitHub remote (below) and **Tags**, each folding under a header with its count. It lists every bookmark and tag of the repository, not only those the log has loaded, folded into folders at the `/` of their names (`release/2.0.0` under **release**; remote bookmarks under their remote), and a ✓ marks the bookmark you are on, whose folders open by themselves. Hover one for its full name and a **⋮** with its commands (the same as a right-click): check out, push, move, rename, track, copy its name, commit or change id, delete. Click one to select its revision (one the log does not show widens the revset to take it in), double-click to switch to it (`jj new` on it), drag it onto a revision to move it |
 | Revisions | Branch / tag, graph, description and author columns, GitKraken style (the change id column is off until you turn it on): drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. The ⚙ at the header's right end shows or hides the optional columns and resets the widths; the funnel beside it filters by author, dimming the other revisions as GitKraken's does. Instead of a time on every row, a hairline and a small label on it ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. Narrow, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Split puts the parent's version on the left and wraps long lines so both sides stay in view; drag the boundary between them to resize the sides, double-click it to even them. The palette and the View menu do the same from the keyboard; used on a unified diff, they switch it (and the layout diffs open in) to split. Double-click a file (or `⇧⌘D`) for its full view |
-| Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
+| Inspector | The selected revision: change id, an editable description in one box of two fields, a one-line summary and the description under it, as GitKraken's (immutable history stays read-only; jj keeps them as one message, with a blank line between), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Terminal | Your shell at the bottom of the tab (below) |
 | Status bar | Worker state, the running jj operation and its progress, the latest operation (what the toolbar's **Undo** undoes), the working copy and the number of loaded revisions |
 
@@ -114,36 +114,36 @@ operation log, and git credentials are asked for when a remote needs them.
 | Move a file to any revision | Drag it from the inspector onto the revision, or right-click → **Move to revision…** |
 | Discard a file's changes | Right-click it in the inspector, confirmed in a dialog |
 | Squash lines into the parent | In a revision other than the working copy, point at a changed line and click the **+** beside it: that line moves into the parent. For several, select them in the diff (drag over the line numbers), then **Squash into parent**: only the selected lines move, so they are to be in one hunk |
-| Split lines into a new commit | Select lines in the diff, then **Split off…** and describe the new commit: the selected lines go into it, before this one, and the rest stays (`jj split -i` with those lines picked) |
-| Split files into a new commit | `⌘`-click or `⇧`-click files in the inspector to pick them, then right-click → **Split into a new commit…** and describe it: the picked files' changes become a commit before this one, which keeps the rest and stays the working copy (`jj split <paths>`) |
+| Split lines into a new commit | Select lines in the diff, then **Split off…** and describe them: as `jj split -i` with those lines picked, the revision keeps its change id and the selected lines, with that description, and a new revision on it has the rest, with the old description, the bookmarks and (for the working copy) `@` |
+| Split files into a new commit | `⌘`-click or `⇧`-click files in the inspector to pick them, then right-click → **Split into a new commit…** and describe it, the same way (`jj split <paths>`). In the working copy, `⌘`-click and `⇧`-click tick the files' boxes instead, and **Split off** in the commit box splits what is ticked |
 | Resolve a conflict | Right-click the conflicted file → **Resolve in merge tool** (`ui.merge-editor`) |
 | Anything else | `⌘P` opens the command palette |
 | Push | `⌘⇧P` pushes the selection's bookmarks (an untracked bookmark goes to `origin`, or the only remote) |
 | Fetch | `⌘⇧F` fetches every remote |
 | Undo / redo | **Undo** and **Redo** in the toolbar, or the palette. As in GG and `jj undo`, Undo undoes the repository's latest operation whoever made it (the jj CLI, VS Code, a snapshot), which the status bar names; it snapshots first, so file changes it picks up are what is undone |
 
-### Staging and committing
+### Committing
 
-jj has no index: what Git stages goes into a revision of its own. Randori
-keeps GitKraken's way of working on top of that. Select the working copy and
-the inspector shows its work in progress: a commit message, **Unstaged
-files** (the working copy's changes) and **Staged files**, which are those of
-the *staging revision*, the undescribed revision right under the working copy
-(never another workspace's working copy). The message box starts with the
+jj has no index, and Randori adds none: what you see in `jj log` is all
+there is. Select the working copy and the inspector shows the next commit: a
+message (summary and description, Enter moving from one to the other) and
+the working copy's changed files, each with a box for whether the commit
+includes it, as GitHub Desktop has them. The message box starts with the
 working copy's description, if it has one, so committing everything keeps it.
 
 | To | Do |
 | --- | --- |
-| Stage a file | Point at it under Unstaged files and click its **+**, or **Stage all** |
-| Stage a line | In the working copy's diff, point at the line and click the **+** beside it; for several, drag over their line numbers and click **Stage lines** |
-| Stage a hunk | In the working copy file's full view, **Stage hunk** under it |
-| Unstage | The **−** of a staged file, of a line in a staged file's diff, or **Unstage all** |
-| Commit | Type the message and click **Commit** (or `⌘↩`): the staging revision is described, which makes it the commit. With nothing staged, the whole working copy is committed, as `jj commit` does |
+| Include a file | Tick its box, or `⌘`-click it (`⇧`-click for the files from the selected one to it); the box over the list includes every file, or none |
+| Include lines | In the working copy's diff, tick the box beside a changed line; for several, drag over their line numbers and click **Include lines** (**Leave lines out** when they are all in). A file with some of its lines in shows a dash |
+| Include a hunk | In the working copy file's full view, **Include hunk** under it |
+| Commit | Type the message and click **Commit** (or `⌘↩`). With nothing included, every change is committed, as `jj commit` does. With some, those are, as `jj commit -i` does: the working copy keeps its change id, its bookmarks and the changes included, gets the message, and a new working copy on it, undescribed, has the rest |
+| Split off | With some changes included, type a message and click **Split off**, as `jj split` does: what is included keeps the change id and gets the message, and the working copy (a new change) keeps the rest, its description and its bookmarks. For peeling a change off work you go on with |
 
-The first change staged makes the staging revision (`jj new --insert-before @
---no-edit`, then a squash into it); unstaging the last one abandons it. Each
-step is one jj operation, so Undo takes it back. The files on disk never
-change: only which revision holds the changes does.
+What is included is the tab's own until the commit: ticking boxes writes
+nothing to the repository, and the commit is one jj operation, which Undo
+takes back. The files on disk never change. A line edited after it was
+included is left out again (the commit box says so), so a commit never takes
+lines other than those you ticked.
 
 ### Full file view
 
@@ -156,7 +156,7 @@ the view's controls, which wrap where the window is narrow:
 
 | Part | What it shows |
 | --- | --- |
-| Diff | The file's diff in that revision, unified or split. Under every hunk, **Squash into parent** (**Stage hunk** in the working copy) and **Discard hunk** (the parent's lines back; Undo undoes it). Drag over line numbers for **Squash into parent** and **Split off…** of those lines, as in the inspector's diff. `⌥↑` `⌥↓` move between changes |
+| Diff | The file's diff in that revision, unified or split. Under every hunk, **Squash into parent** (**Include hunk** in the working copy) and **Discard hunk** (the parent's lines back; Undo undoes it). Drag over line numbers for **Squash into parent** and **Split off…** of those lines, as in the inspector's diff. `⌥↑` `⌥↓` move between changes |
 | File | The whole file as it is in that revision, with line numbers |
 | Blame | Each line with the revision that last changed it, the way `jj file annotate` finds it; click a revision to see its diff of the file. It is computed on a load of its own, so the tab stays usable while a long history is walked |
 | History | Every revision that changed the file among the ancestors of the one you opened, in the side panel's place; pick one to see the file as it was there |
@@ -213,7 +213,7 @@ write that fails says so instead of pretending the setting changed.
 | | Mark changed lines with | session | `+` and `−` signs, a coloured bar, or colour only |
 | | Syntax highlighting | session | On or off |
 | | Code font, size | session | The font of diffs, the file view and change ids, among the installed code fonts |
-| Describe | Subject length | session | The description editor counts the first line and colours the count past 50 and 72 (or your limits) |
+| Describe | Subject length | session | The summary field counts its characters against the second limit and colours the count past 50 and 72 (or your limits) |
 | | Issue links | session | One rule a line, a regular expression and a URL with `$0` for the match (`MELON-\d+ https://…/browse/$0`); matches in descriptions and pull requests become links |
 | jj | Name, Email | `user.name`, `user.email` | Who new changes are by; open tabs load their workspace again to pick them up |
 | | Snapshot when Randori comes to the front | `gg.queries.auto-snapshot` | Automatic (off in repositories over `gg.queries.large-repo-heuristic`, 100k commits), always or never |
@@ -378,6 +378,7 @@ here** (colocated with git when the folder already is one) and **Try again**
 | `--light` | Use the light theme |
 | `--check` | Open the workspace through the worker, print a summary and exit (no window) |
 | `--select-row <n>` | Select the n-th log row once loaded |
+| `--size <WxH>` | Open the window this size in points, e.g. `1000x700` |
 | `--screenshot <png>` | Render the first screen offscreen and exit; needs `--features screenshot` |
 | `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points, `move:X;Y` hovers, `scroll:X;Y;DY` turns the wheel, and `bench:X;Y;DY;N` turns it N times and prints how long each frame took to draw (median and slowest) |
 
@@ -393,6 +394,16 @@ The sample workspaces are a clone of this repository with two extra changes and
 a small notes repository, made under a placeholder identity
 (`JJ_USER="Randori Demo"`). Screenshot runs never touch your saved tabs.
 
+`script/ui-flow-test.sh` drives the commit flow through the app the same way
+(a summary typed and `⌘↩` with nothing included; a summary, Enter, a
+description; every change included and left out, which writes nothing; a
+file's box ticked; a file `⌘`-clicked; a file split off a described,
+bookmarked working copy; two line numbers dragged over and Include lines
+clicked;
+an unchanged description not saved again) on a throwaway repository and
+checks what jj recorded. CI runs it on macOS, and builds
+Randori for Windows.
+
 ## How it is built
 
 ```text
@@ -405,6 +416,8 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                    refs_panel   side panel: filter, local, remote, workspaces, tags, as folder trees
                    find         find a commit (⌘F)
                    inspector    revision details, changed files, diff
+                   message      the summary and description fields of a message
+                   included     what the next commit includes of the working copy
                    ops          jj mutations (new, describe, abandon, push, rebase, …)
                    pick         choosing a target revision from the keyboard
                    pulls        the pull requests section
@@ -417,11 +430,13 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                  github         GitHub remotes, token lookup, pull request and avatar query
                  terminal       a shell in a PTY (alacritty_terminal) drawn with GPUI
                  worker         one jj worker thread per tab
+                 harness        the screenshot harness (--screenshot, --keys)
                  assets         embedded icons
                  theme          Randori's colours over gpui-kit's (theme.json)
       │  SessionEvent requests over a channel per tab, push events back through EventSink
       ▼
-src/worker       GG's jj engine (jj-lib), one worker thread per tab
+src/worker       GG's jj engine (jj-lib), one worker thread per tab; Randori's
+                 own commands are mutations/split.rs and mutations/commit.rs
 src/messages     request and response types shared with the UI
 ```
 
