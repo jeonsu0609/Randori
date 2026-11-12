@@ -166,10 +166,11 @@ pub struct MoveChanges {
     pub paths: Vec<TreePath>,
 }
 
-/// Splits a revision in two, as `jj split` does: the changes to `paths`, and
-/// the lines in `hunks`, become a new revision before it, described with
-/// `description`, and the revision keeps the rest. It keeps its change id and
-/// description, so a working copy split stays the working copy.
+/// Splits a revision in two, as `jj split` does: the revision keeps its
+/// change id and only the changes to `paths` and the lines in `hunks`,
+/// described with `description`; a new revision on it has the rest, with the
+/// old description, and the revision's bookmarks, children and working copy
+/// move to it. A working copy split stays the working copy, as a new change.
 #[derive(Deserialize, Debug)]
 pub struct SplitRevision {
     pub id: RevId,
@@ -182,40 +183,21 @@ pub struct SplitRevision {
     pub description: String,
 }
 
-/// Stages changes of the working copy `id`, as Git stages them, in jj's
-/// terms: the changes to `paths`, and the lines in `hunks`, move into the
-/// staging revision, the undescribed mutable revision right under the
-/// working copy, made (inserted under it) when there is none. Describing the
-/// staging revision commits what is staged.
-#[derive(Deserialize, Debug)]
-pub struct StageChanges {
-    pub id: RevId,
-    pub paths: Vec<TreePath>,
-    #[serde(default)]
-    pub hunks: Vec<FileHunks>,
-}
-
-/// Unstages changes: the changes to `paths`, and the lines in `hunks`, go
-/// back from the staging revision under the working copy `id` into it.
-/// `hunks` read the staging revision's diff backwards (from its lines to its
-/// parent's, see [`FileHunks`]). A staging revision left with nothing is
-/// abandoned.
-#[derive(Deserialize, Debug)]
-pub struct UnstageChanges {
-    pub id: RevId,
-    pub paths: Vec<TreePath>,
-    #[serde(default)]
-    pub hunks: Vec<FileHunks>,
-}
-
-/// Commits under the working copy `id` with `description`: what is staged,
-/// by describing the staging revision (see [`StageChanges`]), which makes it
-/// a commit; with nothing staged, the working copy itself, as `jj commit`
-/// does: it is described and a new empty working copy starts on it.
+/// Commits the working copy `id` with `description`, as `jj commit` does:
+/// it is described, and a new empty working copy starts on it. With `paths`
+/// or `hunks`, as `jj commit -i` does: the described revision keeps only those
+/// changes, and the new working copy has the rest.
 #[derive(Deserialize, Debug)]
 pub struct CommitChanges {
     pub id: RevId,
     pub description: String,
+    /// Files whose changes all go into the commit.
+    #[serde(default)]
+    pub paths: Vec<TreePath>,
+    /// Files of which some lines go: their hunks, each with only the lines
+    /// that go changed (see [`FileHunks`]).
+    #[serde(default)]
+    pub hunks: Vec<FileHunks>,
 }
 
 /// Hunks of one file against the revision's parent. A hunk may hold only

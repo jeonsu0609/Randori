@@ -1,6 +1,8 @@
 mod change;
+mod commit;
 mod r#ref;
 mod revision;
+mod split;
 
 use std::collections::HashMap;
 use std::sync::Arc;
