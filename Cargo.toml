@@ -68,12 +68,13 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# gpui-kit 0.9.0 plus a movable divider in split diffs, from Randori's fork.
+# gpui-kit 0.9.0 plus three patches (split diff divider, header kept on a mode
+# switch, selection controls), from Randori's fork.
 # All gpui-kit crates come from the same commit, or gpui-component would build
 # against a second gpui-base. See doc/randori/gpui-kit-patch.md.
 [patch.crates-io]
-gpui-kit = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "5df648f91d9b87cc011fd3f41bdad244cf493043" }
-gpui-base = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "5df648f91d9b87cc011fd3f41bdad244cf493043" }
-gpui-component = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "5df648f91d9b87cc011fd3f41bdad244cf493043" }
-gpui-component-macros = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "5df648f91d9b87cc011fd3f41bdad244cf493043" }
-gpui-kit-assets = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "5df648f91d9b87cc011fd3f41bdad244cf493043" }
+gpui-kit = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "d5387024dc32ae69a369ab8976096affbe0d064c" }
+gpui-base = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "d5387024dc32ae69a369ab8976096affbe0d064c" }
+gpui-component = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "d5387024dc32ae69a369ab8976096affbe0d064c" }
+gpui-component-macros = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "d5387024dc32ae69a369ab8976096affbe0d064c" }
+gpui-kit-assets = { git = "https://github.com/jeonsu0609/gpui-kit", rev = "d5387024dc32ae69a369ab8976096affbe0d064c" }
