@@ -56,6 +56,18 @@ use crate::messages::mutations::{
     MutationResult, RedoOperation, RenameWorkspace, UndoOperation,
 };
 
+/// `text` as jj keeps a description: without the blank lines around it, and
+/// ending with a newline unless it is empty, as jj-cli's `complete_newline`
+/// leaves what `jj describe` and `jj commit -m` write.
+pub(super) fn jj_description(text: &str) -> String {
+    let text = text.trim_matches('\n');
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!("{text}\n")
+    }
+}
+
 macro_rules! precondition {
     ($($args:tt)*) => {
         return Ok(MutationResult::PreconditionError { message: format!($($args)*) })

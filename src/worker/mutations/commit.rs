@@ -72,7 +72,7 @@ impl Mutation for CommitChanges {
         let mut committed = tx
             .repo_mut()
             .rewrite_commit(&commit)
-            .set_description(self.description);
+            .set_description(super::jj_description(&self.description));
         if let Some(tree) = committed_tree {
             committed = committed.set_tree(tree);
         }
@@ -177,7 +177,8 @@ mod tests {
         assert_matches!(result, MutationResult::Updated { .. });
         let wc = ws.get_commit(ws.wc_id())?;
         let committed = ws.get_commit(&wc.parent_ids()[0])?;
-        assert_eq!(committed.description().trim(), "add x");
+        // stored as jj stores it, ending with a newline
+        assert_eq!(committed.description(), "add x\n");
         assert_eq!(committed.change_id(), &change);
         assert_eq!(committed.parent_ids(), &[base.id().clone()]);
         assert_eq!(

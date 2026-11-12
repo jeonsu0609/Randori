@@ -72,7 +72,7 @@ impl Mutation for SplitRevision {
             .repo_mut()
             .rewrite_commit(&commit)
             .set_tree(selected)
-            .set_description(self.description)
+            .set_description(super::jj_description(&self.description))
             .write()
             .await?;
         // the revision's tree as it was: on the first, what is left is the
@@ -271,6 +271,59 @@ pub(super) mod tests {
         // the files on disk are as they were
         assert_eq!(fs::read_to_string(repo.path().join("x.txt"))?, "x content");
         assert_eq!(fs::read_to_string(repo.path().join("y.txt"))?, "y content");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn children_of_a_split_revision_move_onto_the_rest() -> Result<()> {
+        // as `jj split -r target x.txt` leaves them: first (the change id,
+        // x.txt), then the rest (a new change, the old description, y.txt),
+        // then the child
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        fs::write(repo.path().join("x.txt"), "x\n").unwrap();
+        fs::write(repo.path().join("y.txt"), "y\n").unwrap();
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "target".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let target = ws.get_commit(ws.wc_id())?;
+        CreateRevision {
+            set: RevSet::singleton(ws.format_id(&target)),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        fs::write(repo.path().join("z.txt"), "z\n").unwrap();
+        let child_change = ws.get_commit(ws.wc_id())?.change_id().clone();
+
+        SplitRevision {
+            id: ws.format_id(&target),
+            paths: vec![tree_path("x.txt")],
+            hunks: vec![],
+            description: "first".to_owned(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let child = ws.get_commit(ws.wc_id())?;
+        assert_eq!(child.change_id(), &child_change);
+        let rest = ws.get_commit(&child.parent_ids()[0])?;
+        assert_ne!(rest.change_id(), target.change_id());
+        assert_eq!(rest.description(), "target\n");
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&rest)).await?,
+            vec!["y.txt"]
+        );
+        let first = ws.get_commit(&rest.parent_ids()[0])?;
+        assert_eq!(first.change_id(), target.change_id());
+        assert_eq!(first.description(), "first\n");
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&first)).await?,
+            vec!["x.txt"]
+        );
         Ok(())
     }
 

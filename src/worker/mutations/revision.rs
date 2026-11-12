@@ -356,7 +356,8 @@ impl Mutation for DescribeRevision {
             precondition!("Revision {} is immutable", self.id.change.prefix);
         }
 
-        if self.new_description == described.description() && !self.reset_author {
+        let new_description = super::jj_description(&self.new_description);
+        if new_description == described.description() && !self.reset_author {
             return Ok(MutationResult::Unchanged);
         }
 
@@ -380,7 +381,7 @@ impl Mutation for DescribeRevision {
         let mut commit_builder = tx
             .repo_mut()
             .rewrite_commit(&described)
-            .set_description(self.new_description);
+            .set_description(new_description);
 
         if self.reset_author {
             let new_author = commit_builder.committer().clone();
