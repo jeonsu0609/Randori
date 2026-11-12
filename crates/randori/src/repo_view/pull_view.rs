@@ -537,16 +537,12 @@ impl RepoView {
             .pt_3()
             .pb_2()
             .gap_2()
+            .bg(theme.list_head)
             .border_b_1()
             .border_color(theme.border)
             .child(
                 h_flex()
                     .gap_2()
-                    .child(
-                        gpui_kit::component::Icon::new(IconName::GitPullRequest)
-                            .small()
-                            .text_color(theme.muted_foreground),
-                    )
                     .child(
                         div()
                             .flex_none()
@@ -1320,7 +1316,7 @@ fn comment_card(
                         .gap_1()
                         .border_b_1()
                         .border_color(theme.border)
-                        .bg(theme.muted.opacity(0.35))
+                        .bg(theme.list_head)
                         .text_sm()
                         .child(div().font_semibold().child(author.login.clone()))
                         .child(

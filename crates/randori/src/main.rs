@@ -12,6 +12,7 @@ mod repo_view;
 mod settings;
 mod settings_window;
 mod terminal;
+mod theme;
 mod worker;
 
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ Options:
   --light              use the light theme
   --check              load the workspace through the worker, print a summary and exit
   --select-row <n>     select the n-th log row once loaded
+  --size <WxH>         open the window this size in points, e.g. 1000x700
   --screenshot <png>   render the first screen to a PNG and exit (needs --features screenshot)
   --keys <k1,k2,...>   with --screenshot: press these keys first, e.g. \"down,j,end\";
                        action:<name> runs an action as a menu would, e.g. action:randori::SquashFile";
@@ -44,6 +46,8 @@ struct Args {
     light: bool,
     check: bool,
     select_row: Option<usize>,
+    /// The window's size in points, for screenshots of a narrow window.
+    size: Option<(f32, f32)>,
     screenshot: Option<PathBuf>,
     keys: Vec<String>,
 }
@@ -74,6 +78,16 @@ fn parse_args() -> Args {
                 args.select_row = Some(
                     it.next()
                         .and_then(|v| v.to_str()?.parse().ok())
+                        .unwrap_or_else(|| fail()),
+                )
+            }
+            Some("--size") => {
+                args.size = Some(
+                    it.next()
+                        .and_then(|v| {
+                            let (w, h) = v.to_str()?.split_once('x')?;
+                            Some((w.parse().ok()?, h.parse().ok()?))
+                        })
                         .unwrap_or_else(|| fail()),
                 )
             }
@@ -124,6 +138,7 @@ fn main() -> Result<()> {
         .with_assets(assets::RandoriAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            theme::install(cx);
             // GitHub avatars (`img(url)`) and the pull request queries. Its
             // read timeout needs a Tokio runtime where the body is read, which
             // GPUI's executors are not; `repo_view::github_access::within` times
@@ -141,8 +156,12 @@ fn main() -> Result<()> {
             terminal::bind_keys(cx);
             settings_window::find_installed_fonts(cx);
 
+            let window_size = args.size.unwrap_or((1440., 900.));
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1440.), px(900.)), cx)),
+                window_bounds: Some(WindowBounds::centered(
+                    size(px(window_size.0), px(window_size.1)),
+                    cx,
+                )),
                 window_min_size: Some(size(px(960.), px(600.))),
                 app_id: Some("io.github.jeonsu0609.randori".into()),
                 ..TitleBar::window_options()
@@ -203,8 +222,17 @@ fn main() -> Result<()> {
                         // `action:<namespace::Name>` runs an action the way a menu item
                         // does, through the focused element.
                         // `click:X;Y`, `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` press the
-                        // mouse at window points, the way a pointer would (`;`, since
-                        // `,` separates the steps)
+                        // mouse at window points, the way a pointer would (`cmdclick:X;Y`
+                        // with ⌘ held), `scroll:X;Y;DY` turns the wheel, and `move:X;Y`
+                        // only moves it there, to hover (`;`, since `,` separates the steps)
+                        // `bench:X;Y;DY;N` turns the wheel N times and times
+                        // each frame drawn after it (render, layout and paint)
+                        if let Some(spec) = key.strip_prefix("bench:") {
+                            let _ =
+                                window.update(cx, |_, window, cx| bench_scroll(spec, window, cx));
+                            wait_until_settled(cx, &app).await;
+                            continue;
+                        }
                         if let Some(events) = pointer_events(&key) {
                             for event in events {
                                 let _ = window.update(cx, |_, window, cx| {
@@ -235,6 +263,10 @@ fn main() -> Result<()> {
                             continue;
                         };
                         let _ = window.update(cx, |_, window, cx| {
+                            // focus and key handlers come from the last frame
+                            // drawn, which a locked screen does not update
+                            window.refresh();
+                            window.draw(cx).clear(cx);
                             window.dispatch_keystroke(keystroke, cx);
                         });
                         wait_until_settled(cx, &app).await;
@@ -275,7 +307,44 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Waits until the selected tab has loaded (or there is no tab).
+/// The `bench:X;Y;DY;N` step: N wheel turns of DY points at X;Y, each
+/// followed by a frame drawn and timed. Prints the median and the slowest.
+#[cfg(feature = "screenshot")]
+fn bench_scroll(spec: &str, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+    let numbers: Result<Vec<f32>, _> = spec.split(';').map(|n| n.trim().parse()).collect();
+    let Ok(&[x, y, dy, n]) = numbers.as_deref() else {
+        eprintln!("bench: expected X;Y;DY;N");
+        return;
+    };
+    let position = gpui_kit::point(gpui_kit::px(x), gpui_kit::px(y));
+    window.refresh();
+    window.draw(cx).clear(cx);
+    let mut times = Vec::new();
+    for _ in 0..n as usize {
+        window.dispatch_event(
+            gpui_kit::PlatformInput::Scroll(gpui_kit::ScrollEvent {
+                position,
+                delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                    gpui_kit::px(0.),
+                    gpui_kit::px(dy),
+                )),
+                ..Default::default()
+            }),
+            cx,
+        );
+        let start = std::time::Instant::now();
+        window.draw(cx).clear(cx);
+        times.push(start.elapsed().as_secs_f64() * 1000.);
+    }
+    times.sort_by(f64::total_cmp);
+    if let (Some(median), Some(max)) = (times.get(times.len() / 2), times.last()) {
+        println!(
+            "bench: {} frames, median {median:.2} ms, max {max:.2} ms",
+            times.len()
+        );
+    }
+}
+
 /// Mouse events for a `--keys` pointer step, in window points.
 #[cfg(feature = "screenshot")]
 fn pointer_events(key: &str) -> Option<Vec<gpui_kit::PlatformInput>> {
@@ -289,11 +358,20 @@ fn pointer_events(key: &str) -> Option<Vec<gpui_kit::PlatformInput>> {
         .map(|n| n.trim().parse().ok())
         .collect::<Option<_>>()?;
     let at = |x: f32, y: f32| point(px(x), px(y));
+    // `cmdclick` holds ⌘ (the screenshot build is macOS only)
+    let modifiers = if kind == "cmdclick" {
+        Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        }
+    } else {
+        Modifiers::default()
+    };
     let down_with = |button, position, click_count| {
         PlatformInput::MouseDown(MouseDownEvent {
             button,
             position,
-            modifiers: Modifiers::default(),
+            modifiers,
             click_count,
             first_mouse: false,
         })
@@ -303,7 +381,7 @@ fn pointer_events(key: &str) -> Option<Vec<gpui_kit::PlatformInput>> {
         PlatformInput::MouseUp(MouseUpEvent {
             button,
             position,
-            modifiers: Modifiers::default(),
+            modifiers,
             click_count,
         })
     };
@@ -316,10 +394,21 @@ fn pointer_events(key: &str) -> Option<Vec<gpui_kit::PlatformInput>> {
         })
     };
     match (kind, numbers.as_slice()) {
-        ("click", [x, y]) => {
+        ("click" | "cmdclick", [x, y]) => {
             let p = at(*x, *y);
             Some(vec![moved(p, None), down(p, 1), up(p, 1)])
         }
+        // the pointer moves there, no button: hovers
+        ("move", [x, y]) => Some(vec![moved(at(*x, *y), None)]),
+        // the wheel turns at X;Y by DY points (negative scrolls down)
+        ("scroll", [x, y, dy]) => Some(vec![
+            moved(at(*x, *y), None),
+            PlatformInput::Scroll(gpui_kit::ScrollEvent {
+                position: at(*x, *y),
+                delta: gpui_kit::ScrollDelta::Pixels(point(px(0.), px(*dy))),
+                ..Default::default()
+            }),
+        ]),
         ("rclick", [x, y]) => {
             let p = at(*x, *y);
             Some(vec![
@@ -354,6 +443,7 @@ fn pointer_events(key: &str) -> Option<Vec<gpui_kit::PlatformInput>> {
     }
 }
 
+/// Waits until the selected tab has loaded (or there is no tab).
 async fn wait_until_settled(cx: &mut gpui_kit::AsyncApp, app: &gpui_kit::Entity<RandoriApp>) {
     loop {
         cx.background_executor()

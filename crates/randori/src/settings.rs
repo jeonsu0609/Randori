@@ -69,7 +69,8 @@ pub enum ChangeMarks {
 }
 
 /// Which of the revision list's optional columns are shown. The graph and
-/// the description always are.
+/// the description always are. The change id is off at first, as GitKraken's
+/// SHA column is: the inspector heads the selected one with it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColumnVisibility {
@@ -82,7 +83,7 @@ impl Default for ColumnVisibility {
     fn default() -> Self {
         Self {
             refs: true,
-            change: true,
+            change: false,
             author: true,
         }
     }

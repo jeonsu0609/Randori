@@ -524,12 +524,22 @@ impl RandoriApp {
                     Box::new(repo::SquashFile),
                 ),
                 (
+                    "Split picked files into a new commit…",
+                    IconName::GitCommitHorizontal,
+                    Box::new(repo::SplitFiles),
+                ),
+                (
+                    "Split selected lines into a new commit…",
+                    IconName::GitCommitHorizontal,
+                    Box::new(repo::SplitLines),
+                ),
+                (
                     "Discard file changes",
                     IconName::FileX,
                     Box::new(repo::RestoreFile),
                 ),
                 (
-                    "Squash selected hunk into parent",
+                    "Squash selected lines into parent",
                     IconName::ArrowDownToLine,
                     Box::new(repo::SquashHunk),
                 ),
@@ -917,6 +927,12 @@ impl RandoriApp {
         }
     }
 
+    /// The tabs and `+`, in the title bar. They block the mouse: on Windows
+    /// gpui-kit's title bar is a drag area, and GPUI answers a hit test over
+    /// it with the caption (HTCAPTION) unless something on top blocks the
+    /// mouse, so Windows starts moving the window on the press and a click
+    /// (`+`, a tab, its close button) never comes. The empty rest of the
+    /// strip still moves the window.
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         h_flex()
@@ -925,63 +941,71 @@ impl RandoriApp {
             .pr_2()
             .gap_1()
             .child(
-                TabBar::new("repos")
-                    .underline()
-                    .small()
-                    .min_w_0()
-                    .selected_index(self.active)
-                    .on_click(
-                        cx.listener(|app, ix: &usize, window, cx| app.activate(*ix, window, cx)),
-                    )
-                    .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
-                        let changed = self.display.mark_changed_tabs
-                            && tab.view.read(cx).working_copy_changed();
-                        Tab::new()
-                            .label(tab.title.clone())
-                            .prefix(
-                                Icon::new(IconName::FolderGit2)
-                                    .xsmall()
-                                    .text_color(theme.muted_foreground),
-                            )
-                            .suffix(
-                                h_flex()
-                                    .gap_0p5()
-                                    .when(changed, |this| {
-                                        this.child(
-                                            div()
-                                                .id(("tab-changed", ix))
-                                                .size_1p5()
-                                                .rounded_full()
-                                                .bg(theme.primary)
-                                                .tooltip(|window, cx| {
-                                                    gpui_kit::component::tooltip::Tooltip::new(
-                                                        "The working copy has changes",
-                                                    )
-                                                    .build(window, cx)
-                                                }),
-                                        )
-                                    })
-                                    .child(
-                                        Button::new(("close-tab", ix))
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(IconName::X)
-                                            .tooltip("Close tab")
-                                            .on_click(cx.listener(move |app, _, window, cx| {
-                                                cx.stop_propagation();
-                                                app.request_close_tab(ix, window, cx);
-                                            })),
-                                    ),
-                            )
-                    })),
+                div().id("tab-strip").occlude().min_w_0().child(
+                    TabBar::new("repos")
+                        .underline()
+                        .small()
+                        .min_w_0()
+                        .selected_index(self.active)
+                        .on_click(
+                            cx.listener(|app, ix: &usize, window, cx| {
+                                app.activate(*ix, window, cx)
+                            }),
+                        )
+                        .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
+                            let changed = self.display.mark_changed_tabs
+                                && tab.view.read(cx).working_copy_changed();
+                            Tab::new()
+                                .label(tab.title.clone())
+                                .prefix(
+                                    Icon::new(IconName::FolderGit2)
+                                        .xsmall()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .suffix(
+                                    h_flex()
+                                        .gap_0p5()
+                                        .when(changed, |this| {
+                                            this.child(
+                                                div()
+                                                    .id(("tab-changed", ix))
+                                                    .size_1p5()
+                                                    .rounded_full()
+                                                    .bg(theme.primary)
+                                                    .tooltip(|window, cx| {
+                                                        gpui_kit::component::tooltip::Tooltip::new(
+                                                            "The working copy has changes",
+                                                        )
+                                                        .build(window, cx)
+                                                    }),
+                                            )
+                                        })
+                                        .child(
+                                            Button::new(("close-tab", ix))
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(IconName::X)
+                                                .tooltip("Close tab")
+                                                .on_click(cx.listener(
+                                                    move |app, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        app.request_close_tab(ix, window, cx);
+                                                    },
+                                                )),
+                                        ),
+                                )
+                        })),
+                ),
             )
             .child(
-                Button::new("open-repo")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Plus)
-                    .tooltip("Open a workspace")
-                    .on_click(cx.listener(|app, _, window, cx| app.prompt_open(window, cx))),
+                div().id("open-repo-area").occlude().child(
+                    Button::new("open-repo")
+                        .ghost()
+                        .small()
+                        .icon(IconName::Plus)
+                        .tooltip("Open a workspace")
+                        .on_click(cx.listener(|app, _, window, cx| app.prompt_open(window, cx))),
+                ),
             )
             .child(div().flex_1())
     }
@@ -995,7 +1019,8 @@ impl RandoriApp {
             .items_center()
             .py_3()
             .gap_2()
-            .bg(theme.sidebar)
+            // the window's chrome, like the tab strip beside it
+            .bg(theme.title_bar)
             .border_r_1()
             .border_color(theme.border)
             .child(img(self.logo.clone()).size_7().mb_2())

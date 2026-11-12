@@ -1,325 +1,186 @@
 //! Toolbar, bookmarks panel, status bar and the resizable layout around them.
 
-use gpui_kit::component::menu::DropdownMenu as _;
-
 use super::*;
 
 impl RepoView {
-    /// The repository toolbar under the tab strip: panel toggle, workspace,
-    /// revset query and the repository commands.
+    /// The repository toolbar under the tab strip, laid out as GitKraken's:
+    /// panel toggle and the workspace and bookmark switchers at the left, the
+    /// repository commands in the middle (icon over name), Refresh and Search
+    /// at the right.
     pub(super) fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let switchers = self.render_switchers(cx);
         let theme = cx.theme();
         let ready = matches!(self.state, LoadState::Ready);
         let has_selection = self.selected.is_some();
-        let command = |id: &'static str, icon: IconName, tooltip: &'static str| {
-            Button::new(id).ghost().small().icon(icon).tooltip(tooltip)
-        };
+        let operation = self
+            .workspace
+            .as_ref()
+            .map(|ws| ws.operation.clone())
+            .unwrap_or_default();
+        let can_redo = self.workspace.as_ref().is_some_and(|ws| ws.can_redo);
+        // jj undo's: the latest operation, whoever made it
+        let undo_tip: SharedString = format!("Undo: {}", operation_label(&operation)).into();
+        let separator = || div().w_px().h_8().mx_1().bg(theme.border);
 
         h_flex()
-            .h_10()
+            .h_12()
             .flex_none()
             .px_2()
             .gap_1()
+            // the selected tab's shade, so the toolbar reads as its own
+            .bg(theme.tab_active)
             .border_b_1()
             .border_color(theme.border)
             .child(
-                Button::new("toggle-sidebar")
-                    .ghost()
-                    .small()
-                    .icon(IconName::PanelLeft)
-                    .selected(self.sidebar_visible)
-                    .tooltip("Show or hide bookmarks")
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.sidebar_visible = !view.sidebar_visible;
-                        cx.notify();
-                    })),
-            )
-            .child(switchers)
-            .child(div().flex_1())
-            .when(ready, |bar| {
-                // A typed revset is neither scope, so neither tab is selected.
-                let scope = self.log_scope().map(usize::from);
-                bar.child(
-                    TabBar::new("log-scope")
-                        .segmented()
-                        .xsmall()
-                        .when_some(scope, |tabs, ix| tabs.selected_index(ix))
-                        .on_click(cx.listener(|view, ix: &usize, window, cx| {
-                            view.set_log_scope(*ix == 1, window, cx)
-                        }))
-                        .child("Mine")
-                        .child("All branches"),
-                )
-                .child(div().w_1())
-                // both orders named, so the one shown is plain (as in Fork)
-                .child(
-                    TabBar::new("log-order")
-                        .segmented()
-                        .xsmall()
-                        .selected_index(usize::from(settings::get(cx).display.log_by_date))
-                        .on_click(|ix: &usize, _, cx| {
-                            let by_date = *ix == 1;
-                            settings::update_display(cx, |d| d.log_by_date = by_date)
-                        })
-                        .child("Topological")
-                        .child("By date"),
-                )
-                .child(div().w_2())
-            })
-            .when_some(
-                self.workspace
-                    .as_ref()
-                    .filter(|ws| ready && !ws.presets.is_empty())
-                    .map(|ws| (ws.presets.clone(), ws.query.clone())),
-                |bar, (presets, query)| {
-                    let view = cx.entity().downgrade();
-                    bar.child(
-                        Button::new("presets")
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        Button::new("toggle-sidebar")
                             .ghost()
-                            .xsmall()
-                            .label("Presets")
-                            .icon(IconName::ChevronDown)
-                            .tooltip("Revsets from gg.presets")
-                            .dropdown_menu_with_anchor(
-                                gpui_kit::Anchor::TopRight,
-                                move |mut menu, _, _| {
-                                    for (title, revset) in &presets {
-                                        let view = view.clone();
-                                        let revset = revset.clone();
-                                        menu =
-                                            menu.item(
-                                                gpui_kit::component::menu::PopupMenuItem::new(
-                                                    title.clone(),
-                                                )
-                                                .checked(revset == query)
-                                                .on_click(move |_, window, cx| {
-                                                    let revset = revset.clone();
-                                                    let _ = view.update(cx, |view, cx| {
-                                                        view.set_query(revset, window, cx)
-                                                    });
-                                                }),
-                                            );
-                                    }
-                                    menu
-                                },
-                            ),
+                            .small()
+                            .icon(IconName::PanelLeft)
+                            .selected(self.sidebar_visible)
+                            .tooltip("Show or hide the side panel (⌘B)")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.sidebar_visible = !view.sidebar_visible;
+                                cx.notify();
+                            })),
                     )
-                    .child(div().w_2())
-                },
+                    .child(switchers),
             )
-            .child(
-                div().w_72().child(
-                    Input::new(&self.revset)
-                        .small()
-                        .prefix(gpui_kit::component::Icon::new(IconName::Search).xsmall())
-                        .cleanable(true),
-                ),
-            )
-            .child(div().w_2())
-            .child(
-                command(
-                    "new-change",
-                    IconName::Plus,
-                    "New change on the selection (N)",
-                )
-                .disabled(!ready || !has_selection)
-                .on_click(cx.listener(|view, _, window, cx| view.new_child(window, cx))),
-            )
-            .child(
-                command("fetch", IconName::CloudDownload, "Fetch from all remotes")
-                    .disabled(!ready)
-                    .on_click(cx.listener(|view, _, window, cx| view.fetch_all(window, cx))),
-            )
-            .child(
-                command("push", IconName::Upload, "Push the selection's bookmarks")
-                    .disabled(!ready || !has_selection)
-                    .on_click(cx.listener(|view, _, window, cx| view.push_selected(window, cx))),
-            )
-            .child(
-                command("refresh", IconName::RefreshCw, "Reload revisions")
-                    .on_click(cx.listener(|view, _, _, cx| view.refresh_from_disk(true, cx))),
-            )
-            .child(
-                command(
-                    "terminal",
-                    IconName::SquareTerminal,
-                    "Show or hide the terminal (⌃`)",
-                )
-                .selected(self.terminal_open)
-                .disabled(!ready)
-                .on_click(cx.listener(|view, _, window, cx| view.toggle_terminal(window, cx))),
-            )
-    }
-    pub(super) fn render_refs_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let pulls = self.render_pulls(cx);
-        let theme = cx.theme();
-        let filter = self.ref_filter;
-        let visible: Vec<&RefItem> = self
-            .refs
-            .iter()
-            .filter(|item| match filter {
-                1 => item.chip.kind == RefKind::Local,
-                2 => item.chip.kind == RefKind::Remote,
-                3 => item.chip.kind == RefKind::Tag,
-                _ => true,
-            })
-            .collect();
-        let selected_row = self.selected;
-        let mark_unpushed = settings::get(cx).mark_unpushed;
-
-        v_flex()
-            .size_full()
-            .min_h_0()
-            .bg(theme.sidebar)
-            .children(pulls)
             .child(
                 h_flex()
-                    .h_10()
-                    .px_4()
-                    .gap_2()
                     .flex_none()
-                    .child(div().text_sm().font_medium().child("Bookmarks"))
+                    .h_full()
+                    .gap_0p5()
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(self.refs.len().to_string()),
+                        tool_button("undo", IconName::Undo2, "Undo", undo_tip, ready, false, cx)
+                            .on_click(cx.listener(|view, _, window, cx| view.undo(window, cx))),
+                    )
+                    .child(
+                        tool_button(
+                            "redo",
+                            IconName::Redo2,
+                            "Redo",
+                            "Redo".into(),
+                            ready && can_redo,
+                            false,
+                            cx,
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| view.redo(window, cx))),
+                    )
+                    .child(separator())
+                    .child(
+                        tool_button(
+                            "fetch",
+                            IconName::CloudDownload,
+                            "Fetch",
+                            "Fetch all remotes (⇧⌘F)".into(),
+                            ready,
+                            false,
+                            cx,
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| view.fetch_all(window, cx))),
+                    )
+                    .child(
+                        tool_button(
+                            "push",
+                            IconName::Upload,
+                            "Push",
+                            "Push the selection's bookmarks (⇧⌘P)".into(),
+                            ready && has_selection,
+                            false,
+                            cx,
+                        )
+                        .on_click(
+                            cx.listener(|view, _, window, cx| view.push_selected(window, cx)),
+                        ),
+                    )
+                    .child(separator())
+                    .child(
+                        tool_button(
+                            "bookmark",
+                            IconName::BookmarkPlus,
+                            "Bookmark",
+                            "Create a bookmark on the selection (B)".into(),
+                            ready && has_selection,
+                            false,
+                            cx,
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.prompt_create_bookmark(window, cx)
+                        })),
+                    )
+                    .child(
+                        tool_button(
+                            "new-change",
+                            IconName::Plus,
+                            "New",
+                            "New change on the selection (N)".into(),
+                            ready && has_selection,
+                            false,
+                            cx,
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| view.new_child(window, cx))),
+                    )
+                    .child(separator())
+                    .child(
+                        tool_button(
+                            "terminal",
+                            IconName::SquareTerminal,
+                            "Terminal",
+                            "Show or hide the terminal (⌃`)".into(),
+                            ready,
+                            self.terminal_open,
+                            cx,
+                        )
+                        .on_click(
+                            cx.listener(|view, _, window, cx| view.toggle_terminal(window, cx)),
+                        ),
                     ),
             )
             .child(
-                div().px_3().pb_2().flex_none().child(
-                    TabBar::new("ref-filter")
-                        .pill()
-                        .xsmall()
-                        .selected_index(filter)
-                        .on_click(cx.listener(|view, ix: &usize, _, cx| {
-                            view.ref_filter = *ix;
-                            cx.notify();
-                        }))
-                        .child("All")
-                        .child("Local")
-                        .child("Remote")
-                        .child("Tags"),
-                ),
-            )
-            .child(div().h_px().flex_none().bg(theme.border))
-            .child(
-                v_flex()
-                    .id("refs")
+                h_flex()
                     .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .when(visible.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .p_4()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child("No bookmarks in the loaded revisions."),
+                    .min_w_0()
+                    .h_full()
+                    .justify_end()
+                    .gap_0p5()
+                    .child(
+                        tool_button(
+                            "refresh",
+                            IconName::RefreshCw,
+                            "Refresh",
+                            "Reload the revisions (⌘R)".into(),
+                            true,
+                            false,
+                            cx,
                         )
-                    })
-                    .children(visible.into_iter().enumerate().map(|(ix, item)| {
-                        let row = item.row;
-                        let store = item.chip.store.clone();
-                        let menu_ref = item.chip.store.clone();
-                        let icon = match item.chip.kind {
-                            RefKind::Local => IconName::GitBranch,
-                            RefKind::Remote => IconName::CloudDownload,
-                            RefKind::Tag => IconName::Tag,
-                        };
-                        ListItem::new(("ref", ix))
-                            .px_4()
-                            .py_1p5()
-                            .selected(selected_row == Some(row))
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .min_w_0()
-                                    .gap_3()
-                                    .child(
-                                        gpui_kit::component::Icon::new(icon)
-                                            .small()
-                                            .text_color(theme.muted_foreground),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(
-                                                h_flex()
-                                                    .gap_1p5()
-                                                    .min_w_0()
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .font_medium()
-                                                            .truncate()
-                                                            .child(item.chip.name.clone()),
-                                                    )
-                                                    .when(
-                                                        mark_unpushed && item.chip.unpushed,
-                                                        |this| this.child(unpushed_mark(cx)),
-                                                    ),
-                                            )
-                                            .child(
-                                                h_flex()
-                                                    .gap_1()
-                                                    .min_w_0()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .font_family(
-                                                                theme.mono_font_family.clone(),
-                                                            )
-                                                            .text_color(theme.primary)
-                                                            .child(item.change.clone()),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .truncate()
-                                                            .child(item.summary.clone()),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(item.time.clone()),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |view, _, _, cx| view.select(row, cx)))
-                            .on_mouse_down(
-                                gpui_kit::MouseButton::Right,
-                                cx.listener(move |view, _, window, cx| {
-                                    view.ref_target = Some(store.clone());
-                                    view.command_focus().focus(window, cx);
-                                }),
-                            )
-                            .on_drag(
-                                DraggedRef {
-                                    store: item.chip.store.clone(),
-                                    label: item.chip.name.clone(),
-                                },
-                                |dragged, _, _, cx| {
-                                    cx.new(|_| DragChip {
-                                        label: format!("Move {}", dragged.label).into(),
-                                        icon: IconName::Bookmark,
-                                    })
-                                },
-                            )
-                            .context_menu({
-                                let focus = self.command_focus();
-                                move |menu, _, _| ref_menu(menu, &menu_ref, focus.clone())
-                            })
-                    })),
+                        .on_click(cx.listener(|view, _, _, cx| view.refresh_from_disk(true, cx))),
+                    )
+                    .child(
+                        tool_button(
+                            "search",
+                            IconName::Search,
+                            "Search",
+                            "Find a commit in the loaded revisions (⌘F)".into(),
+                            ready,
+                            self.find.is_some(),
+                            cx,
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            if view.find.is_some() {
+                                view.close_find(window, cx)
+                            } else {
+                                view.open_find(window, cx)
+                            }
+                        })),
+                    ),
             )
-            .into_any_element()
     }
+
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (state_color, state_label) = match &self.state {
@@ -330,7 +191,7 @@ impl RepoView {
         let working_copy = self
             .rows
             .iter()
-            .find(|row| row.revision.is_working_copy)
+            .find(|row| is_this_working_copy(&row.revision))
             .map(|row| row.revision.id.change.prefix.clone());
         StatusBar::new()
             .left(
@@ -356,19 +217,11 @@ impl RepoView {
                                 this.child(div().text_color(theme.muted_foreground).child(progress))
                             })
                     })
-                    // as GG has it: the latest operation, and beside it the
-                    // Undo that undoes it, so what Undo will undo is in view
+                    // the latest operation: what Undo in the toolbar undoes
                     // (jj and other tools record operations too)
                     .when_some(
                         self.workspace.as_ref().filter(|_| self.busy.is_empty()),
                         |this, ws| {
-                            // jj undo's way: a snapshot first, so what it
-                            // picks up (files, Git) is what is undone
-                            let undo_tip = format!(
-                                "Undo the latest operation: {}\nAs jj undo does, it snapshots \
-                                 first; changes it picks up are what is undone",
-                                ws.operation
-                            );
                             this.child(div().text_color(theme.muted_foreground).child("·"))
                                 .child(
                                     div()
@@ -376,37 +229,8 @@ impl RepoView {
                                         .max_w_128()
                                         .truncate()
                                         .text_color(theme.muted_foreground)
-                                        .child(ws.operation.clone()),
+                                        .child(operation_label(&ws.operation)),
                                 )
-                                .child(
-                                    Button::new("status-undo")
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::Undo2)
-                                        .label("Undo")
-                                        .tooltip(undo_tip)
-                                        // not while the workspace (re)loads
-                                        .disabled(!matches!(self.state, LoadState::Ready))
-                                        .on_click(
-                                            cx.listener(|view, _, window, cx| {
-                                                view.undo(window, cx)
-                                            }),
-                                        ),
-                                )
-                                .when(ws.can_redo, |this| {
-                                    this.child(
-                                        Button::new("status-redo")
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(IconName::Redo2)
-                                            .label("Redo")
-                                            .tooltip("Redo the latest undone operation")
-                                            .disabled(!matches!(self.state, LoadState::Ready))
-                                            .on_click(cx.listener(|view, _, window, cx| {
-                                                view.redo(window, cx)
-                                            })),
-                                    )
-                                })
                         },
                     ),
             )
@@ -430,8 +254,18 @@ impl RepoView {
                         self.rows.len(),
                         if self.has_more { "+" } else { "" }
                     ))
-                    .when(self.has_more, |this| {
-                        this.child(
+                    .when(self.has_more, |this| match self.more_error.clone() {
+                        // the next page failed: the log loads again, its pages too
+                        Some(error) => this.child(
+                            Button::new("load-more")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::TriangleAlert)
+                                .label("Retry")
+                                .tooltip(format!("The next revisions did not load: {error}"))
+                                .on_click(cx.listener(|view, _, _, cx| view.reload(cx))),
+                        ),
+                        None => this.child(
                             Button::new("load-more")
                                 .ghost()
                                 .xsmall()
@@ -441,7 +275,7 @@ impl RepoView {
                                     "Load more"
                                 })
                                 .on_click(cx.listener(|view, _, _, cx| view.load_more(cx))),
-                        )
+                        ),
                     }),
             )
     }
@@ -521,12 +355,7 @@ impl RepoView {
                         resizable_panel()
                             .size(rem * 18.)
                             .size_range(rem * 14. ..rem * 28.)
-                            // the full view's file history takes the side panel's place,
-                            // as GitKraken's does; the panel layout stays as it was
-                            .child(match self.center.file() {
-                                Some(focus) if focus.show_history => self.render_history(focus, cx),
-                                _ => self.render_refs_panel(cx),
-                            }),
+                            .child(pane::cached(&self.panes.side)),
                     )
                 })
                 .child(
@@ -541,12 +370,12 @@ impl RepoView {
                                     resizable_panel()
                                         .size(rem * 26.)
                                         .size_range(rem * 10. ..rem * 200.)
-                                        .child(self.render_log(cx)),
+                                        .child(pane::cached(&self.panes.log)),
                                 )
                                 .child(
                                     resizable_panel()
                                         .size_range(rem * 8. ..rem * 200.)
-                                        .child(self.render_changes(cx)),
+                                        .child(pane::cached(&self.panes.changes)),
                                 )
                                 .into_any_element(),
                         },
@@ -558,7 +387,7 @@ impl RepoView {
                         resizable_panel()
                             .size(rem * 22.)
                             .size_range(rem * 18. ..rem * 36.)
-                            .child(self.render_inspector(cx)),
+                            .child(pane::cached(&self.panes.inspector)),
                     )
                 })
                 .into_any_element()
@@ -567,15 +396,73 @@ impl RepoView {
     }
 }
 
-/// "Not pushed" next to a local bookmark its remotes do not have.
-pub(super) fn unpushed_mark(cx: &App) -> AnyElement {
+/// A toolbar command as GitKraken draws one: the icon over its name. Off
+/// when not `enabled`, and then a click does nothing; `selected` marks a
+/// toggle that is on.
+fn tool_button(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    tooltip: SharedString,
+    enabled: bool,
+    selected: bool,
+    cx: &App,
+) -> ToolButton {
     let theme = cx.theme();
-    h_flex()
-        .flex_none()
+    let hover = theme.muted;
+    let button = v_flex()
+        .id(id)
+        .h_full()
+        .min_w(gpui_kit::rems(3.5))
+        .px_2()
+        .items_center()
+        .justify_center()
         .gap_0p5()
-        .text_xs()
-        .text_color(theme.warning)
-        .child(gpui_kit::component::Icon::new(IconName::Upload).xsmall())
-        .child("not pushed")
-        .into_any_element()
+        .rounded(theme.radius)
+        .text_color(if enabled {
+            theme.foreground
+        } else {
+            theme.muted_foreground.opacity(0.5)
+        })
+        .when(selected, |this| this.bg(theme.accent))
+        .when(enabled, |this| {
+            this.cursor_pointer().hover(move |style| style.bg(hover))
+        })
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+        })
+        .child(gpui_kit::component::Icon::new(icon).small())
+        .child(div().text_xs().child(label));
+    ToolButton { button, enabled }
+}
+
+/// A [`tool_button`] waiting for what its click does.
+struct ToolButton {
+    button: gpui_kit::Stateful<gpui_kit::Div>,
+    enabled: bool,
+}
+
+impl ToolButton {
+    fn on_click(
+        self,
+        handler: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        if self.enabled {
+            self.button.on_click(handler)
+        } else {
+            self.button
+        }
+    }
+}
+
+/// The status bar's name for an operation: jj describes an undo or redo by
+/// the id of the operation it restores, which says nothing.
+pub(super) fn operation_label(operation: &str) -> SharedString {
+    if operation.starts_with("undo: ") {
+        "undo".into()
+    } else if operation.starts_with("redo: ") {
+        "redo".into()
+    } else {
+        operation.to_owned().into()
+    }
 }

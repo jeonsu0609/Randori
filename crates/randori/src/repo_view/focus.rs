@@ -5,6 +5,7 @@
 use gg_lib::messages::queries::{FileAnnotation, FileContent};
 use gpui_kit::component::diff::{DiffAnnotation, DiffLinePosition, DiffSide};
 
+use super::ops::ShownFile;
 use super::*;
 
 /// Revisions the history lists at most.
@@ -51,6 +52,8 @@ pub(super) struct FileFocus {
     pub(super) diff: Entity<DiffState>,
     /// `path`'s hunks in `rev`, for discard and squash.
     hunks: Vec<ChangeHunk>,
+    /// Lines selected in the diff, for Squash into parent and Split off.
+    pub(super) selection: Option<gpui_kit::component::diff::DiffLineRange>,
     diff_load: Load,
     file: Entity<DiffState>,
     file_load: Option<Load>,
@@ -61,6 +64,7 @@ pub(super) struct FileFocus {
     history_load: Option<Load>,
     pub(super) handle: FocusHandle,
     _tasks: Vec<Task<()>>,
+    _diff_events: gpui_kit::Subscription,
 }
 
 impl RepoView {
@@ -81,6 +85,23 @@ impl RepoView {
         let rev = detail.header.clone();
         let mode = self.diff_mode;
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode));
+        // its line selection, as the inspector's diff keeps its own
+        let diff_events = cx.subscribe(&diff, |view: &mut Self, _, event: &DiffEvent, cx| {
+            let Some(focus) = view.center.file_mut() else {
+                return;
+            };
+            match event {
+                DiffEvent::SelectionEnded(range) => focus.selection = Some(range.clone()),
+                // kept for the line buttons, as the inspector's diff does
+                DiffEvent::SelectionChanged(None) => {
+                    if !std::mem::take(&mut view.keep_line_selection) {
+                        focus.selection = None;
+                    }
+                }
+                _ => return,
+            }
+            cx.notify();
+        });
         let file_state = cx.new(|cx| DiffState::new([], cx).with_context_lines(None));
         let handle = cx.focus_handle();
         let mut focus = FileFocus {
@@ -98,6 +119,7 @@ impl RepoView {
             show_history: history,
             diff,
             hunks: Vec::new(),
+            selection: None,
             diff_load: Load::Loading,
             file: file_state,
             file_load: None,
@@ -108,6 +130,7 @@ impl RepoView {
             history_load: None,
             handle: handle.clone(),
             _tasks: Vec::new(),
+            _diff_events: diff_events,
         };
         // the selected revision's detail is loaded already
         show_diff_of(&mut focus, detail, cx);
@@ -403,6 +426,27 @@ impl RepoView {
         );
     }
 
+    /// Stages hunk `ix` of the working copy's file shown.
+    fn stage_focus_hunk(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(focus) = self.center.file() else {
+            return;
+        };
+        let Some(hunk) = focus.hunks.get(ix).cloned() else {
+            return;
+        };
+        let path = focus.path.clone();
+        self.stage(
+            format!("a hunk of {}", path.repo_path),
+            Vec::new(),
+            vec![gg_lib::messages::mutations::FileHunks {
+                path,
+                hunks: vec![hunk],
+            }],
+            window,
+            cx,
+        );
+    }
+
     /// Moves hunk `ix` of the shown revision into its parent.
     fn squash_focus_hunk(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some((rev, parent, path, hunk)) = self.focus_hunk(ix) else {
@@ -422,6 +466,20 @@ impl RepoView {
         );
     }
 
+    /// The full view's file (see [`RepoView::shown_diff_file`]).
+    pub(super) fn focus_shown_file(&self) -> Option<ShownFile<'_>> {
+        let focus = self.center.file()?;
+        Some(ShownFile {
+            id: focus.rev.id.clone(),
+            parent: focus.parent.clone(),
+            immutable: focus.rev.is_immutable,
+            path: focus.path.clone(),
+            diff_path: focus.path.repo_path.clone().into(),
+            hunks: &focus.hunks,
+            staged: false,
+        })
+    }
+
     fn focus_hunk(&self, ix: usize) -> Option<(RevId, RevId, TreePath, ChangeHunk)> {
         let focus = self.center.file()?;
         if focus.rev.is_immutable {
@@ -438,70 +496,97 @@ impl RepoView {
     // ----- drawing ------------------------------------------------------------------------------
 
     pub(super) fn render_focus(&self, focus: &FileFocus, cx: &mut Context<Self>) -> AnyElement {
+        // line by line, as in the inspector's diff
+        let line_actions = (focus.tab == FocusTab::Diff
+            && matches!(focus.diff_load, Load::Ready(()))
+            && !focus.rev.is_immutable)
+            .then(|| self.render_line_actions(cx));
         let theme = cx.theme();
         let tab_ix = match focus.tab {
             FocusTab::Diff => 0,
             FocusTab::File => 1,
             FocusTab::Blame => 2,
         };
-        let header = h_flex()
+        // two rows, as GitKraken's: the file and the way back, then the
+        // view's controls; the close button never gives way
+        let title = h_flex()
             .h_10()
             .flex_none()
             .px_3()
             .gap_2()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                gpui_kit::component::Icon::new(IconName::FileText)
-                    .small()
-                    .text_color(theme.muted_foreground),
-            )
-            // the name stays whole; a long directory and the summary give way
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .max_w(gpui_kit::rems(28.))
-                    .overflow_hidden()
-                    .text_sm()
-                    .when(!focus.dir.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("{}/", focus.dir)),
-                        )
-                    })
-                    .child(div().flex_none().font_medium().child(focus.name.clone())),
-            )
             .child(
                 h_flex()
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .gap_1p5()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("in")
+                    .gap_2()
+                    .text_sm()
+                    // the name stays whole; the summary gives way first (it has
+                    // only the room left), then the directory
                     .child(
-                        div()
-                            .flex_none()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_color(theme.primary)
-                            .child(focus.rev.id.change.prefix.clone()),
+                        h_flex()
+                            .max_w(gpui_kit::rems(28.))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .when(!focus.dir.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("{}/", focus.dir)),
+                                )
+                            })
+                            .child(div().flex_none().font_medium().child(focus.name.clone())),
                     )
                     .child(
-                        div().min_w_0().truncate().child(
-                            focus
-                                .rev
-                                .description
-                                .lines
-                                .first()
-                                .cloned()
-                                .unwrap_or_default(),
-                        ),
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .gap_1p5()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("in")
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(theme.primary)
+                                    .child(focus.rev.id.change.prefix.clone()),
+                            )
+                            .child(
+                                div().min_w_0().truncate().child(
+                                    focus
+                                        .rev
+                                        .description
+                                        .lines
+                                        .first()
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                ),
+                            ),
                     ),
             )
+            .child(
+                Button::new("focus-close")
+                    .ghost()
+                    .small()
+                    .icon(IconName::X)
+                    .tooltip("Back to the revisions (Esc)")
+                    .on_click(cx.listener(|view, _, window, cx| view.close_focus(window, cx))),
+            );
+        // wraps where the window is narrow: the line actions go under the
+        // controls rather than over them
+        let tools = h_flex()
+            .min_h_10()
+            .flex_none()
+            .flex_wrap()
+            .px_3()
+            .py_1()
+            .gap_2()
+            .border_t_1()
+            .border_color(theme.border)
             .child(
                 Button::new("focus-history")
                     .ghost()
@@ -563,14 +648,14 @@ impl RepoView {
                         .child("Split"),
                 )
             })
-            .child(
-                Button::new("focus-close")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::X)
-                    .tooltip("Back to the revisions (Esc)")
-                    .on_click(cx.listener(|view, _, window, cx| view.close_focus(window, cx))),
-            );
+            .child(h_flex().flex_grow(1.).justify_end().children(line_actions));
+        let header = v_flex()
+            .flex_none()
+            .bg(theme.list_head)
+            .border_b_1()
+            .border_color(theme.border)
+            .child(title)
+            .child(tools);
 
         let content = match focus.tab {
             FocusTab::Diff => self.render_focus_diff(focus, cx),
@@ -686,9 +771,16 @@ impl RepoView {
             Vec::new()
         };
         let view = cx.entity().downgrade();
-        let diff = split::styled_diff(&focus.diff, cx)
+        let mut styled = split::styled_diff(&focus.diff, cx)
             .line_number(true)
-            .header_visible(false)
+            .header_visible(false);
+        // in the working copy a hunk is staged, as its lines are
+        let mut stage = false;
+        if let Some(file) = self.focus_shown_file() {
+            stage = self.line_command(&file) == Some(super::inspector::LineCommand::Stage);
+            styled = self.with_line_buttons(styled, &file, cx);
+        }
+        let diff = styled
             .annotations(annotations)
             .render_annotation(move |annotation, _, cx| {
                 let gpui_kit::ElementId::NamedInteger(_, ix) = annotation.id() else {
@@ -704,7 +796,17 @@ impl RepoView {
                     .gap_1()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(
+                    .child(if stage {
+                        Button::new(("hunk-stage", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .label("Stage hunk")
+                            .on_click(move |_, window, cx| {
+                                let _ = squash
+                                    .update(cx, |view, cx| view.stage_focus_hunk(ix, window, cx));
+                            })
+                    } else {
                         Button::new(("hunk-squash", ix))
                             .ghost()
                             .xsmall()
@@ -713,15 +815,15 @@ impl RepoView {
                             .on_click(move |_, window, cx| {
                                 let _ = squash
                                     .update(cx, |view, cx| view.squash_focus_hunk(ix, window, cx));
-                            }),
-                    )
+                            })
+                    })
                     .child(
                         Button::new(("hunk-discard", ix))
                             .ghost()
                             .xsmall()
                             .icon(IconName::Undo2)
                             .label("Discard hunk")
-                            .tooltip("Put the parent's lines back (⌘Z undoes)")
+                            .tooltip("Restore the parent's lines")
                             .on_click(move |_, window, cx| {
                                 let _ = discard
                                     .update(cx, |view, cx| view.discard_focus_hunk(ix, window, cx));
@@ -988,6 +1090,8 @@ fn show_diff_of(focus: &mut FileFocus, detail: &Detail, cx: &mut Context<RepoVie
         .iter()
         .find(|patch| patch.path().as_ref() == path)
         .cloned();
+    // the lines selected were another revision's or file's
+    focus.selection = None;
     match (file, patch) {
         (Some(file), Some(patch)) => {
             focus.hunks = file.hunks.clone();

@@ -2,6 +2,7 @@
 //! the pure helpers that build them from GG's messages.
 
 use super::*;
+use gg_lib::messages::{ChangeLocation, ChangeRange, MultilineString};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum RefKind {
@@ -19,18 +20,193 @@ pub(super) struct RefChip {
     /// A local bookmark its remotes do not have yet (shown when
     /// `gg.ui.mark-unpushed-bookmarks` is on).
     pub(super) unpushed: bool,
+    /// A local bookmark where the working copy is, checked as GitKraken
+    /// checks the branch HEAD is on (see [`mark_current_ref`]).
+    pub(super) current: bool,
 }
 
-/// One row of the bookmarks panel.
+/// The log row whose bookmarks are spread out. Its chip or the list spread
+/// out from it keeps it open: the list reaches over the rows below, off the
+/// chip, and covers the chip itself.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub(super) struct RefsHover {
+    chip: Option<usize>,
+    list: Option<usize>,
+}
+
+impl RefsHover {
+    pub(super) fn open_row(&self) -> Option<usize> {
+        self.list.or(self.chip)
+    }
+
+    /// The pointer entered (`hovered`) or left row `ix`'s chip, or its list
+    /// when `list`. Whether that changes what is spread out.
+    pub(super) fn set(&mut self, ix: usize, list: bool, hovered: bool) -> bool {
+        let before = self.open_row();
+        let slot = if list { &mut self.list } else { &mut self.chip };
+        if hovered {
+            *slot = Some(ix);
+        } else if *slot == Some(ix) {
+            *slot = None;
+        }
+        self.open_row() != before
+    }
+}
+
+/// One bookmark, remote bookmark or tag of the side panel: every one of
+/// the repository, loaded in the log or not. Its names are worked out once,
+/// as the panel draws again with every frame the log scrolls.
+#[derive(Clone)]
 pub(super) struct RefItem {
     pub(super) chip: RefChip,
-    pub(super) row: usize,
-    pub(super) change: SharedString,
-    pub(super) summary: SharedString,
-    pub(super) time: SharedString,
+    /// The revision it is on, and its row when the log has it.
+    pub(super) id: RevId,
+    pub(super) row: Option<usize>,
+    /// Its full name as git spells it: `origin/release/2.0.0` for a remote
+    /// bookmark.
+    pub(super) full_name: SharedString,
+    /// The full name and the chip's, lowercase, for the panel's filter.
+    pub(super) search: String,
+    /// Where it sits in the panel's tree: its full name split at `/`, as
+    /// GitKraken folds `release/2.0.0` under `release` (and a remote
+    /// bookmark under its remote).
+    pub(super) path: Vec<SharedString>,
+}
+
+impl RefItem {
+    fn new(chip: RefChip, id: RevId, row: Option<usize>) -> RefItem {
+        let full_name: SharedString = match &chip.store {
+            StoreRef::RemoteBookmark {
+                bookmark_name,
+                remote_name,
+                ..
+            } => format!("{remote_name}/{bookmark_name}").into(),
+            _ => chip.name.clone(),
+        };
+        let search = format!("{full_name}\n{}", chip.name).to_lowercase();
+        let path = full_name
+            .split('/')
+            .map(|part| part.to_owned().into())
+            .collect();
+        RefItem {
+            chip,
+            id,
+            row,
+            full_name,
+            search,
+            path,
+        }
+    }
+}
+
+/// One workspace of the side panel (GitKraken's worktrees): its name and
+/// working-copy revision.
+#[derive(Clone)]
+pub(super) struct WorkspaceItem {
+    pub(super) name: SharedString,
+    pub(super) id: RevId,
+    pub(super) row: Option<usize>,
+    /// The workspace this tab shows.
+    pub(super) this: bool,
+}
+
+/// Whether `rev` is the working copy of the workspace this tab shows. GG's
+/// `is_working_copy` holds for every workspace's working copy, and
+/// `working_copy_of` names the workspace for the others.
+pub(super) fn is_this_working_copy(rev: &RevHeader) -> bool {
+    rev.is_working_copy && rev.working_copy_of.is_none()
+}
+
+/// Whether `detail` is a staging revision: undescribed, mutable and no
+/// workspace's working copy (see
+/// `StageChanges`; the worker checks it again when it stages).
+pub(super) fn is_staging_revision(detail: &Detail) -> bool {
+    // GG marks every workspace's working copy: none is staged into
+    !detail.header.is_immutable
+        && !detail.header.is_working_copy
+        && detail
+            .header
+            .description
+            .lines
+            .iter()
+            .all(|line| line.trim().is_empty())
+}
+
+/// The side panel's refs and workspaces from `headers` (the revisions with
+/// any), in the panel's order, not placed in the log yet (see
+/// [`place_panel_items`]). Unlike the log's chips, a remote bookmark in sync
+/// with its local one is listed too, as GitKraken's REMOTE lists every
+/// remote branch. `this_workspace` is the name of the workspace the tab
+/// shows: headers name only the other workspaces.
+pub(super) fn panel_items(
+    headers: &[RevHeader],
+    this_workspace: &str,
+) -> (Vec<RefItem>, Vec<WorkspaceItem>) {
+    let mut refs = Vec::new();
+    let mut workspaces = Vec::new();
+    for header in headers {
+        for r in &header.refs {
+            let chip = match r {
+                StoreRef::RemoteBookmark {
+                    bookmark_name,
+                    remote_name,
+                    ..
+                } => RefChip {
+                    name: format!("{bookmark_name}@{remote_name}").into(),
+                    kind: RefKind::Remote,
+                    store: r.clone(),
+                    unpushed: false,
+                    current: false,
+                },
+                // a local bookmark or tag: always a chip
+                _ => match ref_chips(std::slice::from_ref(r)).pop() {
+                    Some(chip) => chip,
+                    None => continue,
+                },
+            };
+            refs.push(RefItem::new(chip, header.id.clone(), None));
+        }
+        let workspace = |name: &str, this: bool| WorkspaceItem {
+            name: name.to_owned().into(),
+            id: header.id.clone(),
+            row: None,
+            this,
+        };
+        if let Some(other) = &header.working_copy_of {
+            workspaces.push(workspace(other, false));
+        } else if header.is_working_copy {
+            workspaces.push(workspace(this_workspace, true));
+        }
+    }
+    // in tree order, so a folder's refs come together (a conflicted bookmark
+    // is on several revisions: listed once)
+    refs.sort_by(|a, b| (&a.path, a.chip.kind as u8).cmp(&(&b.path, b.chip.kind as u8)));
+    refs.dedup_by(|a, b| a.chip.name == b.chip.name && a.chip.kind == b.chip.kind);
+    workspaces.sort_by(|a, b| b.this.cmp(&a.this).then_with(|| a.name.cmp(&b.name)));
+    (refs, workspaces)
+}
+
+/// Each panel item's row (`row_of_commit`), when the log has its revision, and the
+/// check on the `current` bookmark (see [`nearest_bookmark`]).
+pub(super) fn place_panel_items(
+    refs: &mut [RefItem],
+    workspaces: &mut [WorkspaceItem],
+    row_of_commit: &HashMap<String, usize>,
+    current: Option<&str>,
+) {
+    let row_of = |id: &RevId| row_of_commit.get(&id.commit.hex).copied();
+    for item in refs {
+        item.row = row_of(&item.id);
+        item.chip.current =
+            item.chip.kind == RefKind::Local && current == Some(item.chip.name.as_ref());
+    }
+    for item in workspaces {
+        item.row = row_of(&item.id);
+    }
 }
 
 /// The parts of a log row the virtual list needs, copied so the list closure owns them.
+#[derive(Clone)]
 pub(super) struct RowData {
     pub(super) id: RevId,
     pub(super) change_prefix: SharedString,
@@ -47,6 +223,9 @@ pub(super) struct RowData {
     pub(super) bucket_start: bool,
     pub(super) refs: Vec<RefChip>,
     pub(super) is_working_copy: bool,
+    /// The description after its first line, on one line, shown dimmed after
+    /// the summary as GitKraken does.
+    pub(super) body: Option<SharedString>,
 }
 
 pub(super) struct FileItem {
@@ -113,8 +292,31 @@ impl RowData {
             bucket_start: false,
             refs: ref_chips(&rev.refs),
             is_working_copy: rev.is_working_copy,
+            body: body_preview(&rev.description.lines),
         }
     }
+}
+
+/// The lines after the first, joined on one line; a row shows only so much.
+fn body_preview(lines: &[String]) -> Option<SharedString> {
+    const MAX: usize = 240;
+    let mut body = String::new();
+    for line in lines
+        .iter()
+        .skip(1)
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+    {
+        if !body.is_empty() {
+            body.push_str(" | ");
+        }
+        body.push_str(line);
+        if body.len() >= MAX {
+            break;
+        }
+    }
+    body.truncate(body.floor_char_boundary(MAX));
+    (!body.is_empty()).then(|| body.into())
 }
 
 impl From<&RevChange> for FileItem {
@@ -235,6 +437,7 @@ pub(super) fn ref_chips(refs: &[StoreRef]) -> Vec<RefChip> {
                 // moved since it was pushed, or the repository has remotes and
                 // none of them tracks it
                 unpushed: !*is_synced || (tracking_remotes.is_empty() && *potential_remotes > 0),
+                current: false,
             }),
             // A remote ref that is in sync with its local bookmark adds no information.
             StoreRef::RemoteBookmark {
@@ -248,6 +451,7 @@ pub(super) fn ref_chips(refs: &[StoreRef]) -> Vec<RefChip> {
                 kind: RefKind::Remote,
                 store: r.clone(),
                 unpushed: false,
+                current: false,
             }),
             StoreRef::RemoteBookmark { .. } => None,
             StoreRef::Tag { tag_name } => Some(RefChip {
@@ -255,9 +459,291 @@ pub(super) fn ref_chips(refs: &[StoreRef]) -> Vec<RefChip> {
                 kind: RefKind::Tag,
                 store: r.clone(),
                 unpushed: false,
+                current: false,
             }),
         })
         .collect()
+}
+
+/// The local bookmark nearest to the working copy, with its row: on `@`
+/// itself or the closest of its loaded ancestors. jj has no checked-out
+/// branch; this stands in for one. Where several bookmarks share that
+/// revision, `preferred` (the one last switched to) when it is among them,
+/// else the first.
+pub(super) fn nearest_bookmark(
+    rows: &[LogRow],
+    row_of_commit: &HashMap<String, usize>,
+    preferred: Option<&str>,
+) -> Option<(usize, String)> {
+    let start = rows
+        .iter()
+        .position(|row| is_this_working_copy(&row.revision))?;
+    // only the rows the search reaches are looked into
+    let parents = |ix: usize| -> Vec<usize> {
+        rows[ix]
+            .revision
+            .parent_ids
+            .iter()
+            .filter_map(|id| row_of_commit.get(&id.hex).copied())
+            .collect()
+    };
+    let names = |ix: usize| -> Vec<&str> {
+        rows[ix]
+            .revision
+            .refs
+            .iter()
+            .filter_map(|r| match r {
+                StoreRef::LocalBookmark { bookmark_name, .. } => Some(bookmark_name.as_str()),
+                _ => None,
+            })
+            .collect()
+    };
+    nearest_in(start, parents, names, preferred).map(|(ix, name)| (ix, name.to_owned()))
+}
+
+/// [`nearest_bookmark`] over row numbers: each row's parents and bookmark
+/// names, breadth first from `start`.
+fn nearest_in<'a>(
+    start: usize,
+    parents: impl Fn(usize) -> Vec<usize>,
+    names: impl Fn(usize) -> Vec<&'a str>,
+    preferred: Option<&str>,
+) -> Option<(usize, &'a str)> {
+    let mut queue = std::collections::VecDeque::from([start]);
+    let mut seen = std::collections::HashSet::from([start]);
+    while let Some(ix) = queue.pop_front() {
+        let names = names(ix);
+        if let Some(&first) = names.first() {
+            let name = preferred
+                .and_then(|preferred| names.iter().copied().find(|name| *name == preferred))
+                .unwrap_or(first);
+            return Some((ix, name));
+        }
+        for next in parents(ix) {
+            if seen.insert(next) {
+                queue.push_back(next);
+            }
+        }
+    }
+    None
+}
+
+/// Checks the current bookmark (see [`nearest_bookmark`]) and lists it first
+/// in its row, so a row's one visible chip is the current one. A bookmark
+/// checked before is checked no longer.
+pub(super) fn mark_current_ref(data: &mut [RowData], current: Option<(usize, &str)>) {
+    for chip in data.iter_mut().flat_map(|row| row.refs.iter_mut()) {
+        chip.current = false;
+    }
+    let Some((ix, name)) = current else {
+        return;
+    };
+    let refs = &mut data[ix].refs;
+    for chip in refs.iter_mut() {
+        chip.current = chip.kind == RefKind::Local && chip.name == name;
+    }
+    refs.sort_by_key(|chip| !chip.current);
+}
+
+/// A side of a diff, for one end of a line selection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Side {
+    Original,
+    Modified,
+}
+
+/// Which lines of a file's `hunks` a diff selection from `start` to `end`
+/// (a side and a line number on it) covers, one flag per hunk line, as the
+/// diff highlights them: on one side, the lines numbered in the range there;
+/// across the two, every patch line between the two ends.
+pub(super) fn selected_hunk_lines(
+    hunks: &[ChangeHunk],
+    start: (Side, usize),
+    end: (Side, usize),
+) -> Vec<Vec<bool>> {
+    // each line's numbers on the two sides, in patch order
+    let numbered: Vec<Vec<(Option<usize>, Option<usize>)>> = hunks
+        .iter()
+        .map(|hunk| {
+            let (mut old, mut new) = (hunk.location.from_file.start, hunk.location.to_file.start);
+            hunk.lines
+                .lines
+                .iter()
+                .map(|line| match line.as_bytes().first() {
+                    Some(b'-') => {
+                        old += 1;
+                        (Some(old - 1), None)
+                    }
+                    Some(b'+') => {
+                        new += 1;
+                        (None, Some(new - 1))
+                    }
+                    _ => {
+                        old += 1;
+                        new += 1;
+                        (Some(old - 1), Some(new - 1))
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let number = |(old, new): (Option<usize>, Option<usize>), side| match side {
+        Side::Original => old,
+        Side::Modified => new,
+    };
+    if start.0 == end.0 {
+        let (side, lo, hi) = (start.0, start.1.min(end.1), start.1.max(end.1));
+        return numbered
+            .iter()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|&line| number(line, side).is_some_and(|n| (lo..=hi).contains(&n)))
+                    .collect()
+            })
+            .collect();
+    }
+    let flat: Vec<(Option<usize>, Option<usize>)> = numbered.iter().flatten().copied().collect();
+    let at = |(side, line): (Side, usize)| flat.iter().position(|&l| number(l, side) == Some(line));
+    let (Some(a), Some(b)) = (at(start), at(end)) else {
+        return numbered
+            .iter()
+            .map(|lines| vec![false; lines.len()])
+            .collect();
+    };
+    let (lo, hi) = (a.min(b), a.max(b));
+    let mut ix = 0;
+    numbered
+        .iter()
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|_| {
+                    ix += 1;
+                    (lo..=hi).contains(&(ix - 1))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Where each changed line of `hunks` is in the diff: an added line by its
+/// number on the modified side, a removed one on the original side.
+pub(super) fn changed_line_positions(hunks: &[ChangeHunk]) -> Vec<(Side, usize)> {
+    let mut positions = Vec::new();
+    for hunk in hunks {
+        let (mut old, mut new) = (hunk.location.from_file.start, hunk.location.to_file.start);
+        for line in &hunk.lines.lines {
+            match line.as_bytes().first() {
+                Some(b'-') => {
+                    positions.push((Side::Original, old));
+                    old += 1;
+                }
+                Some(b'+') => {
+                    positions.push((Side::Modified, new));
+                    new += 1;
+                }
+                _ => {
+                    old += 1;
+                    new += 1;
+                }
+            }
+        }
+    }
+    positions
+}
+
+/// `hunk` with only its `selected` changes, as `git add -p` edits a hunk: a
+/// deletion left behind becomes context, an addition left behind goes.
+/// `None` when no selected line changes anything.
+pub(super) fn partial_hunk(hunk: &ChangeHunk, selected: &[bool]) -> Option<ChangeHunk> {
+    let mut lines = Vec::with_capacity(hunk.lines.lines.len());
+    let mut changes = false;
+    for (line, &picked) in hunk.lines.lines.iter().zip(selected) {
+        match line.as_bytes().first() {
+            Some(b'-' | b'+') if picked => {
+                changes = true;
+                lines.push(line.clone());
+            }
+            Some(b'-') => lines.push(format!(" {}", &line[1..])),
+            Some(b'+') => {}
+            _ => lines.push(line.clone()),
+        }
+    }
+    if !changes {
+        return None;
+    }
+    let to_len = lines.iter().filter(|line| !line.starts_with('-')).count();
+    Some(ChangeHunk {
+        location: ChangeLocation {
+            from_file: hunk.location.from_file.clone(),
+            to_file: ChangeRange {
+                start: hunk.location.to_file.start,
+                len: to_len,
+            },
+        },
+        lines: MultilineString { lines },
+    })
+}
+
+/// `hunk` read backwards with only its `selected` changes: applied to the
+/// revision's lines (its new side), it undoes those changes and keeps the
+/// rest, as unstaging lines needs. A selected addition is removed, a
+/// selected removal restored; an addition left alone is context, and a
+/// removal left alone is not in the revision. `None` when no selected line
+/// changes anything.
+pub(super) fn reverse_partial_hunk(hunk: &ChangeHunk, selected: &[bool]) -> Option<ChangeHunk> {
+    let mut lines = Vec::with_capacity(hunk.lines.lines.len());
+    let mut changes = false;
+    for (line, &picked) in hunk.lines.lines.iter().zip(selected) {
+        match line.as_bytes().first() {
+            Some(b'+') if picked => {
+                changes = true;
+                lines.push(format!("-{}", &line[1..]));
+            }
+            Some(b'-') if picked => {
+                changes = true;
+                lines.push(format!("+{}", &line[1..]));
+            }
+            Some(b'+') => lines.push(format!(" {}", &line[1..])),
+            Some(b'-') => {}
+            _ => lines.push(line.clone()),
+        }
+    }
+    if !changes {
+        return None;
+    }
+    let count = |side: u8| {
+        lines
+            .iter()
+            .filter(|line| line.as_bytes().first() != Some(&side))
+            .count()
+    };
+    Some(ChangeHunk {
+        location: ChangeLocation {
+            from_file: ChangeRange {
+                start: hunk.location.to_file.start,
+                len: count(b'+'),
+            },
+            to_file: ChangeRange {
+                start: hunk.location.to_file.start,
+                len: count(b'-'),
+            },
+        },
+        lines: MultilineString { lines },
+    })
+}
+
+/// Whether `selected` (as [`selected_hunk_lines`] gives it) holds every
+/// changed line of `hunks`.
+pub(super) fn selects_every_change(hunks: &[ChangeHunk], selected: &[Vec<bool>]) -> bool {
+    hunks.iter().zip(selected).all(|(hunk, picked)| {
+        hunk.lines
+            .lines
+            .iter()
+            .zip(picked)
+            .all(|(line, &picked)| picked || !matches!(line.as_bytes().first(), Some(b'-' | b'+')))
+    })
 }
 
 /// Builds a git-style patch for one file so gpui-kit's `Diff` can parse it.
@@ -380,7 +866,200 @@ pub(super) fn mark_bucket_starts(rows: &mut [RowData]) {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::{StoreRef, ref_chips, time_bucket, unified_start};
+    use super::{
+        RefsHover, RevHeader, Side, StoreRef, changed_line_positions, is_this_working_copy,
+        nearest_in, panel_items, partial_hunk, ref_chips, reverse_partial_hunk,
+        selected_hunk_lines, selects_every_change, time_bucket, unified_start,
+    };
+    use gg_lib::messages::ChangeHunk;
+    use gg_lib::messages::{ChangeLocation, ChangeRange, MultilineString};
+
+    fn hunk(from: (usize, usize), to: (usize, usize), lines: &[&str]) -> ChangeHunk {
+        ChangeHunk {
+            location: ChangeLocation {
+                from_file: ChangeRange {
+                    start: from.0,
+                    len: from.1,
+                },
+                to_file: ChangeRange {
+                    start: to.0,
+                    len: to.1,
+                },
+            },
+            lines: MultilineString {
+                lines: lines.iter().map(|line| format!("{line}\n")).collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_selection_covers_the_lines_the_diff_highlights() {
+        // old 10 `a`, 11 `b` removed; new 10 `A`, 11 `B` added; then old 12 / new 12 `c`
+        let hunks = [hunk((10, 3), (10, 3), &["-a", "-b", "+A", "+B", " c"])];
+        let flags = |start, end| selected_hunk_lines(&hunks, start, end).remove(0);
+        // one side: only lines numbered there
+        assert_eq!(
+            flags((Side::Modified, 11), (Side::Modified, 11)),
+            [false, false, false, true, false]
+        );
+        assert_eq!(
+            flags((Side::Original, 10), (Side::Original, 11)),
+            [true, true, false, false, false]
+        );
+        // across the sides: the patch lines between, in either direction
+        assert_eq!(
+            flags((Side::Original, 11), (Side::Modified, 10)),
+            [false, true, true, false, false]
+        );
+        assert_eq!(
+            flags((Side::Modified, 10), (Side::Original, 11)),
+            [false, true, true, false, false]
+        );
+    }
+
+    #[test]
+    fn a_reversed_hunk_undoes_the_selected_changes() {
+        // the revision has `A`, `B` and `c` where its parent had `a`, `b`, `c`
+        let full = hunk((10, 3), (10, 3), &["-a", "-b", "+A", "+B", " c"]);
+        // `-b` and `+A` undone: `b` back, `A` gone; `B` stays, `a` was never there
+        let back =
+            reverse_partial_hunk(&full, &[false, true, true, false, false]).expect("changes");
+        assert_eq!(back.lines.lines, ["+b\n", "-A\n", " B\n", " c\n"]);
+        assert_eq!(
+            (back.location.from_file.start, back.location.from_file.len),
+            (10, 3)
+        );
+        assert_eq!(back.location.to_file.len, 3);
+        assert!(reverse_partial_hunk(&full, &[false, false, false, false, true]).is_none());
+    }
+
+    #[test]
+    fn every_changed_line_has_its_place() {
+        // old 10 `a`, 11 `b` removed; new 10 `A`, 11 `B` added; then `c`
+        let hunks = [
+            hunk((10, 3), (10, 3), &["-a", "-b", "+A", "+B", " c"]),
+            hunk((20, 1), (20, 2), &[" d", "+e"]),
+        ];
+        assert_eq!(
+            changed_line_positions(&hunks),
+            [
+                (Side::Original, 10),
+                (Side::Original, 11),
+                (Side::Modified, 10),
+                (Side::Modified, 11),
+                (Side::Modified, 21),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_partial_hunk_keeps_the_selected_changes_only() {
+        let full = hunk((10, 3), (10, 3), &["-a", "-b", "+A", "+B", " c"]);
+        // `-b` and `+A`: `-a` stays as context, `+B` goes
+        let part = partial_hunk(&full, &[false, true, true, false, false]).expect("changes");
+        assert_eq!(part.lines.lines, [" a\n", "-b\n", "+A\n", " c\n"]);
+        assert_eq!(
+            (part.location.from_file.start, part.location.from_file.len),
+            (10, 3)
+        );
+        assert_eq!(
+            (part.location.to_file.start, part.location.to_file.len),
+            (10, 3)
+        );
+        // context only: nothing to move
+        assert!(partial_hunk(&full, &[false, false, false, false, true]).is_none());
+        // every change, or not
+        assert!(selects_every_change(
+            std::slice::from_ref(&full),
+            &[vec![true, true, true, true, false]]
+        ));
+        assert!(!selects_every_change(
+            &[full],
+            &[vec![true, true, true, false, false]]
+        ));
+    }
+
+    #[test]
+    fn spread_bookmarks_stay_open_from_chip_to_list() {
+        let mut hover = RefsHover::default();
+        assert!(hover.set(3, false, true));
+        assert_eq!(hover.open_row(), Some(3));
+        // the list opens over the chip: the chip is left, the list entered
+        assert!(!hover.set(3, true, true));
+        assert!(!hover.set(3, false, false));
+        assert_eq!(hover.open_row(), Some(3));
+        // a late leave of another row's chip changes nothing
+        assert!(!hover.set(7, false, false));
+        // off the list: closed
+        assert!(hover.set(3, true, false));
+        assert_eq!(hover.open_row(), None);
+    }
+
+    #[test]
+    fn the_current_bookmark_is_the_nearest_one() {
+        // rows newest first: @ (0) on b (1) on a (2); a merge @ also has c (3)
+        let parents = [vec![1], vec![2], vec![], vec![]];
+        let none: Vec<&str> = Vec::new();
+        let nearest = |names: &[Vec<&'static str>], preferred| {
+            nearest_in(
+                0,
+                |ix| parents[ix].clone(),
+                |ix| names[ix].clone(),
+                preferred,
+            )
+        };
+        let names = [none.clone(), vec!["qa", "van/qa"], vec!["main"], vec![]];
+        // the closest revision with bookmarks, its first one
+        assert_eq!(nearest(&names, None), Some((1, "qa")));
+        // the one switched to, where it shares the revision
+        assert_eq!(nearest(&names, Some("van/qa")), Some((1, "van/qa")));
+        // one switched to elsewhere does not count
+        assert_eq!(nearest(&names, Some("main")), Some((1, "qa")));
+        // a bookmark on @ itself comes before its parent's
+        let on_wc = [vec!["wip"], vec!["qa"], vec![], vec![]];
+        assert_eq!(nearest(&on_wc, None), Some((0, "wip")));
+        // further down when the parent has none
+        let lower = [none.clone(), none.clone(), vec!["main"], vec![]];
+        assert_eq!(nearest(&lower, None), Some((2, "main")));
+        // none loaded
+        assert_eq!(nearest_in(0, |_| Vec::new(), |_| Vec::new(), None), None);
+    }
+
+    #[test]
+    fn the_panel_names_every_workspace_once() {
+        let header = |hex: &str, is_working_copy: bool, of: Option<&str>| -> RevHeader {
+            serde_json::from_value(serde_json::json!({
+                "id": {
+                    "change": {"type": "ChangeId", "hex": hex, "prefix": hex, "rest": "", "offset": null, "is_divergent": false},
+                    "commit": {"type": "CommitId", "hex": hex, "prefix": hex, "rest": ""}
+                },
+                "description": {"lines": [""]},
+                "author": {"name": "a", "email": "a@example.com", "timestamp": "2026-11-12T01:00:00+09:00"},
+                "committed_at": "2026-11-12T01:00:00+09:00",
+                "has_conflict": false,
+                "is_working_copy": is_working_copy,
+                "working_copy_of": of,
+                "is_immutable": false,
+                "refs": [],
+                "parent_ids": []
+            }))
+            .expect("a header")
+        };
+        // GG marks every workspace's working copy, and names the others
+        let headers = [
+            header("aa", true, None),
+            header("bb", true, Some("default")),
+            header("cc", false, None),
+        ];
+        let (_, workspaces) = panel_items(&headers, "second");
+        let listed: Vec<(&str, bool)> = workspaces
+            .iter()
+            .map(|item| (item.name.as_ref(), item.this))
+            .collect();
+        assert_eq!(listed, [("second", true), ("default", false)]);
+        assert!(is_this_working_copy(&headers[0]));
+        assert!(!is_this_working_copy(&headers[1]));
+    }
 
     #[test]
     fn time_buckets_grow_with_age() {

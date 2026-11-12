@@ -18,8 +18,9 @@ you move, split and recombine freely. That is how jj treats history.
 
 > **Status:** early development. Randori reads and edits jj workspaces —
 > tabs, graph log, diffs, describe, new, edit, abandon, bookmarks, rebase by
-> drag and drop, file and hunk squashes, push, fetch, undo and redo, a command
-> palette, appearance settings and the GitHub pull requests of the workspace.
+> drag and drop, file and line squashes, file and line splits, push, fetch,
+> undo and redo, a command palette, appearance settings and the GitHub pull
+> requests of the workspace.
 > Conflicts open in your merge tool; an in-app conflict editor is not built yet.
 
 ## The window
@@ -27,14 +28,14 @@ you move, split and recombine freely. That is how jj treats history.
 | Region | What it shows |
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
-| Toolbar | The **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count, then **Mine / All branches**, **Topological / By date**, **Presets** (`gg.presets`), a **revset** field (Enter to query), and New, Fetch, Push, Reload and Terminal |
+| Toolbar | Laid out as GitKraken's. At the left, the **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count; in the middle, **Undo**, **Redo**, **Fetch**, **Push**, **Bookmark**, **New** and **Terminal**, each icon over its name (jj has no stash: work in progress is a change already, so **New** stands where GitKraken has Stash and Pop); at the right, **Refresh** and **Search** (find a commit, below) |
 | Rail | Revisions, Open, the command palette (`⌘P`, as in GitKraken) and Settings (below) |
-| Side panel | **Pull requests** of the workspace's GitHub remote (below), then the local and remote bookmarks and tags in the loaded revisions, filtered by kind. Click a bookmark to jump to its revision, right-click to push, rename, track or delete, drag onto a revision to move it there |
-| Revisions | Branch / tag, graph, change id, description and author columns, GitKraken style: drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. Instead of a time on every row, a hairline and a label ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. As in GitKraken the layout follows the list's width: wide, the labels have room right of the author; narrower, they sit over the row's end; narrower still, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
+| Side panel | As GitKraken's: a **filter** (`⌘⌥F`) over every section, then **Local**, **Remote** (by remote), **Workspaces** (jj's worktrees), **Pull requests** of the workspace's GitHub remote (below) and **Tags**, each folding under a header with its count. It lists every bookmark and tag of the repository, not only those the log has loaded, folded into folders at the `/` of their names (`release/2.0.0` under **release**; remote bookmarks under their remote), and a ✓ marks the bookmark you are on, whose folders open by themselves. Hover one for its full name and a **⋮** with its commands (the same as a right-click): check out, push, move, rename, track, copy its name, commit or change id, delete. Click one to select its revision (one the log does not show widens the revset to take it in), double-click to switch to it (`jj new` on it), drag it onto a revision to move it |
+| Revisions | Branch / tag, graph, description and author columns, GitKraken style (the change id column is off until you turn it on): drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. The ⚙ at the header's right end shows or hides the optional columns and resets the widths; the funnel beside it filters by author, dimming the other revisions as GitKraken's does. Instead of a time on every row, a hairline and a small label on it ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. Narrow, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Split puts the parent's version on the left and wraps long lines so both sides stay in view; drag the boundary between them to resize the sides, double-click it to even them. The palette and the View menu do the same from the keyboard; used on a unified diff, they switch it (and the layout diffs open in) to split. Double-click a file (or `⇧⌘D`) for its full view |
 | Inspector | The selected revision: change id, an editable description (immutable history stays read-only), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Terminal | Your shell at the bottom of the tab (below) |
-| Status bar | Worker state, the running jj operation and its progress, the latest operation with **Undo** beside it (and **Redo** after an undo), the working copy and the number of loaded revisions |
+| Status bar | Worker state, the running jj operation and its progress, the latest operation (what the toolbar's **Undo** undoes), the working copy and the number of loaded revisions |
 
 The **workspace** switcher lists the open tabs, then recently opened
 workspaces (`gg.ui.recent-workspaces`, the list GG keeps; off with
@@ -56,17 +57,36 @@ folder, never committed) and untracks them, leaving the files on disk.
 
 **By date** lists revisions newest first across branches, like GitKraken's
 graph or `git log --date-order`, instead of jj's order, which finishes one
-branch before the next. It uses the order jj recorded the commits in, which is
-by date in practice and always has parents below their children. The choice
+branch before the next. It orders by commit time and keeps every parent below
+its children. (Not by the order jj recorded the commits in: for a repository
+imported from git that is the import order, and tags fetched later would come
+first.) The choice
 is remembered for every tab (palette: **List revisions by date** / **Group
 revisions by branch**). By date, the age labels follow the commit time too, so
 a rebased old change sits with the day it was rewritten.
+
+The log loads a page of revisions at a time (`gg.queries.log-page-size`, 1000
+by default, as GitKraken starts with 2000) and the next one as you scroll,
+while 200 rows are still to go, so the history scrolls on to its first commit.
+jj's root commit (`zzzzzzzz`, empty and dated 1970) gets no row, as nothing
+sits under the first commit in GitKraken.
 
 **Mine** is jj's own log (`revsets.log`): your changes that are not in trunk
 yet, and trunk. Changes on other people's branches are immutable to jj and stay
 out of it. **All branches** shows every visible commit (`all()`), every branch
 and tag like GitKraken's graph. The last scope you pick is remembered, and a
 revset you type selects neither.
+
+The revset field over the revisions (the funnel, `/` or `⌘L`) chooses which
+revisions the log shows; it is not a search. A revset jj cannot use leaves the
+log as it was and says why under the field.
+
+**Search** in the toolbar (`⌘F`) finds a commit the way GitKraken's does: a
+bar over the revisions that matches its text against the loaded revisions'
+descriptions, authors, change and commit ids and bookmark names, counts them
+("3 of 47"), steps through them with Enter and `⇧Enter` (or its arrows) and
+dims the rest. Stepping past the last match loads the next page while there is
+one.
 
 Each tab runs its own jj worker thread (jj-lib is not thread-safe), so a slow
 fetch in one workspace never blocks another. Edits made outside Randori, in an
@@ -82,7 +102,7 @@ operation log, and git credentials are asked for when a remote needs them.
 
 | Command | How |
 | --- | --- |
-| New change on the selection | `N`, toolbar `+`, or the context menu |
+| New change on the selection | `N`, the toolbar's **New**, or the context menu |
 | Edit (make it the working copy) | `E` |
 | Describe | `D` to focus the inspector editor, `⌘↩` to save |
 | Create bookmark | `B`, then type a name and press Enter |
@@ -93,23 +113,50 @@ operation log, and git credentials are asked for when a remote needs them.
 | Squash a file into the parent | Right-click it in the inspector |
 | Move a file to any revision | Drag it from the inspector onto the revision, or right-click → **Move to revision…** |
 | Discard a file's changes | Right-click it in the inspector, confirmed in a dialog |
-| Squash one hunk into the parent | Select lines in the diff, then **Squash hunk into parent** |
+| Squash lines into the parent | In a revision other than the working copy, point at a changed line and click the **+** beside it: that line moves into the parent. For several, select them in the diff (drag over the line numbers), then **Squash into parent**: only the selected lines move, so they are to be in one hunk |
+| Split lines into a new commit | Select lines in the diff, then **Split off…** and describe the new commit: the selected lines go into it, before this one, and the rest stays (`jj split -i` with those lines picked) |
+| Split files into a new commit | `⌘`-click or `⇧`-click files in the inspector to pick them, then right-click → **Split into a new commit…** and describe it: the picked files' changes become a commit before this one, which keeps the rest and stays the working copy (`jj split <paths>`) |
 | Resolve a conflict | Right-click the conflicted file → **Resolve in merge tool** (`ui.merge-editor`) |
 | Anything else | `⌘P` opens the command palette |
 | Push | `⌘⇧P` pushes the selection's bookmarks (an untracked bookmark goes to `origin`, or the only remote) |
 | Fetch | `⌘⇧F` fetches every remote |
-| Undo / redo | **Undo** beside the latest operation in the status bar, or the palette. As in GG and `jj undo`, it undoes the repository's latest operation whoever made it (the jj CLI, VS Code, a snapshot), which the status bar names |
+| Undo / redo | **Undo** and **Redo** in the toolbar, or the palette. As in GG and `jj undo`, Undo undoes the repository's latest operation whoever made it (the jj CLI, VS Code, a snapshot), which the status bar names; it snapshots first, so file changes it picks up are what is undone |
+
+### Staging and committing
+
+jj has no index: what Git stages goes into a revision of its own. Randori
+keeps GitKraken's way of working on top of that. Select the working copy and
+the inspector shows its work in progress: a commit message, **Unstaged
+files** (the working copy's changes) and **Staged files**, which are those of
+the *staging revision*, the undescribed revision right under the working copy
+(never another workspace's working copy). The message box starts with the
+working copy's description, if it has one, so committing everything keeps it.
+
+| To | Do |
+| --- | --- |
+| Stage a file | Point at it under Unstaged files and click its **+**, or **Stage all** |
+| Stage a line | In the working copy's diff, point at the line and click the **+** beside it; for several, drag over their line numbers and click **Stage lines** |
+| Stage a hunk | In the working copy file's full view, **Stage hunk** under it |
+| Unstage | The **−** of a staged file, of a line in a staged file's diff, or **Unstage all** |
+| Commit | Type the message and click **Commit** (or `⌘↩`): the staging revision is described, which makes it the commit. With nothing staged, the whole working copy is committed, as `jj commit` does |
+
+The first change staged makes the staging revision (`jj new --insert-before @
+--no-edit`, then a squash into it); unstaging the last one abandons it. Each
+step is one jj operation, so Undo takes it back. The files on disk never
+change: only which revision holds the changes does.
 
 ### Full file view
 
 Double-clicking a changed file, the expand button above the diff, `⇧⌘D`, or
 **Open full view**, **Blame** and **File history** in the file's context menu
 open the file on its own, in the place of the revisions and the diff (`Esc`
-goes back):
+or the × at the header's right end goes back). The header has two rows, as
+GitKraken's: the file's path (the directory gives way before the name), then
+the view's controls, which wrap where the window is narrow:
 
 | Part | What it shows |
 | --- | --- |
-| Diff | The file's diff in that revision, unified or split. Under every hunk, **Squash into parent** and **Discard hunk** (the parent's lines back; Undo undoes it). `⌥↑` `⌥↓` move between changes |
+| Diff | The file's diff in that revision, unified or split. Under every hunk, **Squash into parent** (**Stage hunk** in the working copy) and **Discard hunk** (the parent's lines back; Undo undoes it). Drag over line numbers for **Squash into parent** and **Split off…** of those lines, as in the inspector's diff. `⌥↑` `⌥↓` move between changes |
 | File | The whole file as it is in that revision, with line numbers |
 | Blame | Each line with the revision that last changed it, the way `jj file annotate` finds it; click a revision to see its diff of the file. It is computed on a load of its own, so the tab stays usable while a long history is walked |
 | History | Every revision that changed the file among the ancestors of the one you opened, in the side panel's place; pick one to see the file as it was there |
@@ -156,11 +203,11 @@ write that fails says so instead of pretending the setting changed.
 | Page | Setting | Saved in | Effect |
 | --- | --- | --- | --- |
 | General | Theme | session | Light, dark or follow the system |
-| | Order | session | Topological (one branch at a time, as `jj log`) or by date (newest first across branches); the toolbar switches it too |
+| | Order | session | Topological (one branch at a time, as `jj log`) or by date (newest first across branches); the revisions' header switches it too |
 | | Mark tabs with changes | session | A dot on a tab whose working copy changes files |
 | | Source folders | session | The workspace picker lists the jj repositories in these folders, two levels down (not inside hidden, `target` or `node_modules` folders) |
 | | Fetch automatically | session | `jj git fetch` for every open tab every 5, 15, 30 or 60 minutes; a fetch that fails (no network, a password) is skipped quietly |
-| Revisions | Columns | session | Show or hide Branch / Tag, Change and Author; the graph and the description always show |
+| Revisions | Columns | session | Show or hide Branch / Tag, Change (off at first) and Author, as the ⚙ over the list does; the graph and the description always show |
 | | Mark bookmarks that are not pushed | `gg.ui.mark-unpushed-bookmarks` | Upload mark on local bookmarks that moved since their push, or that no remote tracks |
 | Diff | Diffs open as | session | Unified or split; the diff header's switch changes it too, in the changes panel and the full file view alike. The split's divider position is saved too |
 | | Mark changed lines with | session | `+` and `−` signs, a coloured bar, or colour only |
@@ -230,15 +277,17 @@ needs it.
 
 | Keys | Where | Action |
 | --- | --- | --- |
-| `↑` `↓` / `k` `j` | Revisions | Select the previous / next revision; the next page loads at the end |
+| `↑` `↓` / `k` `j` | Revisions | Select the previous / next revision; the next page loads before the end |
 | `Home` / `End` | Revisions | First / last loaded revision |
 | `R` | Revisions | Pick a new parent for the selection (Enter applies, Esc cancels; other commands wait until you do) |
-| `/` | Revisions | Edit the revset |
-| `⌘L` (`Ctrl+L`) | Workspace | Edit the revset |
+| `/` | Revisions | Edit the revset filter |
+| `⌘L` (`Ctrl+L`) | Workspace | Edit the revset filter |
+| `⌘F` (`Ctrl+F`) | Workspace | Find a commit; `Enter` / `⇧Enter` next / previous match, `Esc` closes |
+| `⌘⌥F` (`Ctrl+Alt+F`) | Workspace | Filter the side panel |
 | `Esc` | Workspace | Back to the revision list |
 | `⌘R` (`Ctrl+R`) | Workspace | Reload, with what jj recorded outside Randori |
 | `` ⌃` `` | Workspace | Show or hide the terminal |
-| `⌘B` (`Ctrl+B`) | Workspace | Show or hide the bookmarks panel |
+| `⌘B` (`Ctrl+B`) | Workspace | Show or hide the side panel |
 | `⌘O` (`Ctrl+O`) | Window | Open a workspace in a new tab |
 | `⌘W` (`Ctrl+W`) | Window | Close the tab; with no tab open, close the window |
 | `⌘Q` (`Ctrl+Q`) | Anywhere | Quit (asks first when descriptions are unsaved). Closing the window quits too |
@@ -254,9 +303,12 @@ commands (Randori, File, View, Window), with Hide (`⌘H`) and Services.
 
 The layout follows the professional workstation style of
 [Longbridge Pro](https://longbridge.com/desktop), the application GPUI Kit was
-extracted from: hairline-separated panels instead of cards, a narrow navigation
-rail, dense rows with stable columns, and an inspector beside the work area.
-Colors come only from theme tokens, so the light theme works unchanged.
+extracted from: panels told apart by their shade instead of cards (as in
+GitKraken, the log darkest, the side panels a step lighter, the toolbar the
+lightest), a narrow navigation rail, dense rows with stable columns, and an
+inspector beside the work area. Colors come only from theme tokens, which
+`crates/randori/src/theme.json` sets over gpui-kit's, so the light theme works
+unchanged.
 
 <details>
 <summary>Light theme</summary>
@@ -327,7 +379,7 @@ here** (colocated with git when the folder already is one) and **Try again**
 | `--check` | Open the workspace through the worker, print a summary and exit (no window) |
 | `--select-row <n>` | Select the n-th log row once loaded |
 | `--screenshot <png>` | Render the first screen offscreen and exit; needs `--features screenshot` |
-| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points |
+| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points, `move:X;Y` hovers, `scroll:X;Y;DY` turns the wheel, and `bench:X;Y;DY;N` turns it N times and prints how long each frame took to draw (median and slowest) |
 
 The screenshots above were produced with:
 
@@ -348,7 +400,10 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                  repo_view      one workspace: state, loading, selection, actions, keys
                    model        rows, refs, files and diffs built from worker data
                    log_list     graph log rows and header
-                   panels       toolbar, bookmarks panel, status bar, layout
+                   panels       toolbar, status bar, layout
+                   pane         parts drawn as views of their own, so a scroll redraws only the list
+                   refs_panel   side panel: filter, local, remote, workspaces, tags, as folder trees
+                   find         find a commit (⌘F)
                    inspector    revision details, changed files, diff
                    ops          jj mutations (new, describe, abandon, push, rebase, …)
                    pick         choosing a target revision from the keyboard
@@ -363,6 +418,7 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                  terminal       a shell in a PTY (alacritty_terminal) drawn with GPUI
                  worker         one jj worker thread per tab
                  assets         embedded icons
+                 theme          Randori's colours over gpui-kit's (theme.json)
       │  SessionEvent requests over a channel per tab, push events back through EventSink
       ▼
 src/worker       GG's jj engine (jj-lib), one worker thread per tab

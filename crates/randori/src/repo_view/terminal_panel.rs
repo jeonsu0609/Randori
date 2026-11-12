@@ -164,12 +164,7 @@ impl RepoView {
                     .gap_2()
                     .border_b_1()
                     .border_color(theme.border)
-                    .bg(theme.muted.opacity(0.35))
-                    .child(
-                        gpui_kit::component::Icon::new(IconName::SquareTerminal)
-                            .small()
-                            .text_color(theme.muted_foreground),
-                    )
+                    .bg(theme.list_head)
                     .child(
                         div()
                             .flex_1()

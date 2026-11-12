@@ -26,7 +26,7 @@ impl RepoView {
     fn working_copy_change(&self) -> Option<String> {
         self.rows
             .iter()
-            .find(|row| row.revision.is_working_copy)
+            .find(|row| is_this_working_copy(&row.revision))
             .map(|row| row.revision.id.change.hex.clone())
     }
 

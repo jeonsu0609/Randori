@@ -19,6 +19,12 @@ next to the crates.io one.
 | `split_ratio` | `Diff::split_ratio(f32)`: the original column's share of a Split diff (default 0.5, clamped to 0.1..=0.9). Without soft wrap neither column gets narrower than its longest line; Randori wraps split diffs, so the columns share the view's width. Part of the layout key, so wrapped rows are measured again when it changes |
 | header in view | `DiffState::set_mode` keeps a diff shown from its top at the top. Upstream reveals the first line's anchor, which scrolls the file header off when rows wrap. With a regression test |
 
+## Status
+
+Both pull requests were merged upstream on 2026-11-10 (longbridge/gpui-kit
+#3883 and #3884), after the latest release, v0.9.1 (2026-11-09). The fork is
+needed until a release has them; then step 2 below drops it.
+
 ## Updating
 
 1. When Randori moves to a new gpui-kit release, rebase the patch commit onto

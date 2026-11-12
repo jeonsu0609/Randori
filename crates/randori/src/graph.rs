@@ -25,7 +25,7 @@ use gpui_kit::{
 /// The rem size the constants below are written for.
 const BASE_REM: f32 = 16.;
 /// Height of one log row at `BASE_REM`. The list uses [`row_height`].
-const ROW_HEIGHT: f32 = 34.;
+const ROW_HEIGHT: f32 = 28.;
 /// Width of one graph lane; wide enough for an author avatar.
 const LANE_WIDTH: f32 = 20.;
 /// Space before the first lane and after the last.
@@ -376,15 +376,21 @@ type Location = (usize, usize);
 /// it starts a branch and takes the next colour. An edge that changes lane
 /// takes the colour of its right-hand endpoint, the side branch.
 fn branch_colors(columns: &[usize], edges: &[(Location, Location)]) -> (Vec<usize>, Vec<usize>) {
+    // each node's children straight above it in its lane, in edge order:
+    // looked up per row, as a scan of every edge per row grows with the
+    // square of the rows loaded
+    let mut above: Vec<Vec<usize>> = vec![Vec::new(); columns.len()];
+    for (child, parent) in edges {
+        if columns.get(parent.1) == Some(&parent.0) && child.0 == parent.0 && child.1 < parent.1 {
+            above[parent.1].push(child.1);
+        }
+    }
     let mut node_colors: Vec<Option<usize>> = vec![None; columns.len()];
     let mut next = 0;
-    for (row, &column) in columns.iter().enumerate() {
-        let inherited = edges
+    for row in 0..columns.len() {
+        let inherited = above[row]
             .iter()
-            .filter(|(child, parent)| {
-                *parent == (column, row) && child.0 == column && child.1 < row
-            })
-            .filter_map(|(child, _)| node_colors.get(child.1).copied().flatten())
+            .filter_map(|&child| node_colors.get(child).copied().flatten())
             .next();
         node_colors[row] = Some(inherited.unwrap_or_else(|| {
             let color = next;

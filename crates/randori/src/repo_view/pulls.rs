@@ -303,59 +303,57 @@ impl RepoView {
         }
     }
 
-    pub(super) fn render_pulls(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The PULL REQUESTS section of the side panel; `needle` (lowercase) is
+    /// the panel's filter, matched against titles and numbers.
+    pub(super) fn render_pulls(&self, needle: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let pulls = self.pulls.as_ref()?;
-        let theme = cx.theme();
         let selected_commit = self
             .selected
             .and_then(|ix| self.rows.get(ix))
             .map(|row| row.revision.id.commit.hex.clone());
+        let filtering = !needle.is_empty();
+        let shown = |pr: &&PullRequest| {
+            !filtering
+                || pr.title.to_lowercase().contains(needle)
+                || format!("#{}", pr.number).contains(needle)
+        };
+        let open = pulls.expanded || filtering;
+        let count = matches!(pulls.state, PullsState::Ready).then(|| {
+            if filtering {
+                pulls.list.iter().filter(shown).count()
+            } else {
+                pulls.total
+            }
+        });
 
-        let header = h_flex()
-            .id("pulls-header")
-            .h_10()
-            .px_4()
-            .gap_2()
-            .flex_none()
-            .cursor_pointer()
-            .on_click(cx.listener(|view, _, _, cx| {
-                if let Some(pulls) = &mut view.pulls {
-                    pulls.expanded = !pulls.expanded;
-                }
-                cx.notify();
-            }))
-            .child(
-                gpui_kit::component::Icon::new(if pulls.expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
+        let header = super::refs_panel::panel_header(
+            "pulls-header",
+            IconName::GitPullRequest,
+            "Pull requests",
+            count,
+            open,
+            cx,
+        )
+        .on_click(cx.listener(|view, _, _, cx| {
+            if let Some(pulls) = &mut view.pulls {
+                pulls.expanded = !pulls.expanded;
+            }
+            cx.notify();
+        }))
+        .when(pulls.fetching, |this| this.child(Spinner::new().xsmall()))
+        .child(
+            Button::new("pulls-refresh")
+                .ghost()
                 .xsmall()
-                .text_color(theme.muted_foreground),
-            )
-            .child(div().text_sm().font_medium().child("Pull requests"))
-            .when(matches!(pulls.state, PullsState::Ready), |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(pulls.total.to_string()),
-                )
-            })
-            .child(div().flex_1())
-            .when(pulls.fetching, |this| this.child(Spinner::new().xsmall()))
-            .child(
-                Button::new("pulls-refresh")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::RefreshCw)
-                    .tooltip("Refresh pull requests")
-                    .disabled(pulls.fetching)
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        cx.stop_propagation();
-                        view.refresh_pulls(true, cx)
-                    })),
-            );
+                .icon(IconName::RefreshCw)
+                .tooltip("Refresh pull requests")
+                .disabled(pulls.fetching)
+                .on_click(cx.listener(|view, _, _, cx| {
+                    cx.stop_propagation();
+                    view.refresh_pulls(true, cx)
+                })),
+        );
+        let theme = cx.theme();
 
         let note = |text: SharedString| {
             div()
@@ -405,15 +403,22 @@ impl RepoView {
                 .max_h(gpui_kit::rems(18.))
                 .overflow_y_scrollbar()
                 .pb_1()
-                .children(pulls.list.iter().enumerate().map(|(ix, pr)| {
-                    let selected = selected_commit.as_deref() == Some(pr.head_oid.as_str());
-                    let number = pr.number;
-                    render_pull(pr, ix, selected, cx)
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.open_pull(number, window, cx)
-                        }))
-                        .into_any_element()
-                }))
+                .children(
+                    pulls
+                        .list
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, pr)| shown(pr))
+                        .map(|(ix, pr)| {
+                            let selected = selected_commit.as_deref() == Some(pr.head_oid.as_str());
+                            let number = pr.number;
+                            render_pull(pr, ix, selected, cx)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.open_pull(number, window, cx)
+                                }))
+                                .into_any_element()
+                        }),
+                )
                 .when(pulls.total > pulls.list.len(), |this| {
                     let url = format!("{}/pulls", pulls.repo.web_url());
                     this.child(
@@ -433,8 +438,7 @@ impl RepoView {
             v_flex()
                 .flex_none()
                 .child(header)
-                .when(pulls.expanded, |this| this.child(body))
-                .child(div().h_px().bg(theme.border))
+                .when(open, |this| this.child(body))
                 .into_any_element(),
         )
     }

@@ -103,38 +103,59 @@ struct BookmarkChoice {
 }
 
 impl RepoView {
-    /// The local bookmark nearest to the working copy: on `@` itself or the
-    /// closest of its loaded ancestors.
+    /// The local bookmark nearest to the working copy (see
+    /// [`nearest_bookmark`]).
     pub(super) fn current_bookmark(&self) -> Option<SharedString> {
-        let start = self
-            .rows
-            .iter()
-            .position(|row| row.revision.is_working_copy)?;
-        let by_commit: HashMap<&str, usize> = self
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(ix, row)| (row.revision.id.commit.hex.as_str(), ix))
-            .collect();
-        let mut queue = std::collections::VecDeque::from([start]);
-        let mut seen = std::collections::HashSet::from([start]);
-        while let Some(ix) = queue.pop_front() {
-            let revision = &self.rows[ix].revision;
-            if let Some(name) = revision.refs.iter().find_map(|r| match r {
-                StoreRef::LocalBookmark { bookmark_name, .. } => Some(bookmark_name.clone()),
-                _ => None,
-            }) {
-                return Some(name.into());
-            }
-            for parent in &revision.parent_ids {
-                if let Some(&next) = by_commit.get(parent.hex.as_str())
-                    && seen.insert(next)
-                {
-                    queue.push_back(next);
-                }
-            }
+        self.current_bookmark.clone()
+    }
+
+    /// Starts a new change on a ref's revision, `jj new <name>`: the closest
+    /// jj has to a checkout. A local bookmark switched to is then the one
+    /// marked current where others share its revision. Where the working
+    /// copy already is a new change on that revision, only the mark moves.
+    pub(super) fn switch_to(
+        &mut self,
+        name: SharedString,
+        local: bool,
+        id: RevId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.switched_to = local.then(|| name.to_string());
+        if self.is_new_change_on(&id) {
+            self.rebuild_derived();
+            cx.notify();
+            return;
         }
-        None
+        self.check_picked_up_after();
+        self.run_mutation(
+            format!("New change on {name}"),
+            Box::new(gg_lib::messages::mutations::CreateRevision {
+                set: RevSet {
+                    from: id.clone(),
+                    to: id,
+                },
+            }),
+            None,
+            window,
+            cx,
+        )
+    }
+
+    /// The working copy is an empty, undescribed change on `id` alone: what
+    /// `jj new` on it would make again.
+    fn is_new_change_on(&self, id: &RevId) -> bool {
+        !self.working_copy_changed
+            && self.rows.iter().any(|row| {
+                let rev = &row.revision;
+                is_this_working_copy(rev)
+                    && rev
+                        .description
+                        .lines
+                        .iter()
+                        .all(|line| line.trim().is_empty())
+                    && matches!(rev.parent_ids.as_slice(), [parent] if parent.hex == id.commit.hex)
+            })
     }
 
     /// Asks for every revision with a conflict that can still be resolved,
@@ -377,22 +398,11 @@ impl RepoView {
                 let Some(choice) = choices.get(ix) else {
                     return;
                 };
-                let (name, id) = (choice.name.clone(), choice.rev.id.clone());
+                let (name, local, id) =
+                    (choice.name.clone(), !choice.remote, choice.rev.id.clone());
                 let _ = view.update(cx, |view, cx| {
                     view.close_focus(window, cx);
-                    view.check_picked_up_after();
-                    view.run_mutation(
-                        format!("New change on {name}"),
-                        Box::new(gg_lib::messages::mutations::CreateRevision {
-                            set: RevSet {
-                                from: id.clone(),
-                                to: id,
-                            },
-                        }),
-                        None,
-                        window,
-                        cx,
-                    )
+                    view.switch_to(name, local, id, window, cx)
                 });
             },
         );
@@ -443,9 +453,7 @@ impl RepoView {
                     .icon(IconName::GitBranch)
                     .label(bookmark.unwrap_or_else(|| "no bookmark".into()))
                     .disabled(!ready)
-                    .tooltip(
-                        "The bookmark nearest to the working copy · start a new change on another",
-                    )
+                    .tooltip("Current bookmark · switch to another")
                     .on_click(
                         cx.listener(|view, _, window, cx| view.open_bookmark_picker(window, cx)),
                     ),
@@ -465,9 +473,7 @@ impl RepoView {
                             )
                         })
                         .text_color(theme.danger)
-                        .tooltip(
-                            "Mutable revisions with conflicts, loaded or not · go to the next one",
-                        )
+                        .tooltip("Conflicts · go to the next")
                         .on_click(
                             cx.listener(|view, _, window, cx| {
                                 view.select_next_conflict(window, cx)

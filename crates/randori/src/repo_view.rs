@@ -25,7 +25,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffEvent, DiffFile, DiffLineRange, DiffMode, DiffState},
     h_flex,
-    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    input::{InputEvent, InputState, Textarea, TextareaState},
     list::ListItem,
     menu::{ContextMenuExt as _, PopupMenu},
     resizable::{h_resizable, resizable_panel, v_resizable},
@@ -46,6 +46,7 @@ use gpui_kit::{
 use crate::graph::{Graph, row_height};
 
 mod dnd;
+mod find;
 mod focus;
 mod github_access;
 mod inspector;
@@ -53,11 +54,13 @@ mod log_list;
 mod menus;
 mod model;
 mod ops;
+mod pane;
 mod panels;
 mod pick;
 mod picked_up;
 mod pull_view;
 mod pulls;
+mod refs_panel;
 mod split;
 mod switcher;
 pub use switcher::scan_source_folders;
@@ -70,6 +73,7 @@ use focus::{FOCUS_CONTEXT, FocusTab};
 use menus::*;
 use model::*;
 use pick::*;
+use refs_panel::PanelSection;
 
 /// What fills the middle of a tab; one at a time, so opening one closes the
 /// other.
@@ -171,10 +175,17 @@ pub mod actions {
             CancelPick,
             // files and hunks (on the selected file in the inspector)
             SquashFile,
+            SplitFiles,
             RestoreFile,
             ResolveInTool,
             DiffInTool,
             SquashHunk,
+            SplitLines,
+            // find a commit in the loaded revisions
+            FindCommit,
+            CloseFind,
+            // the side panel's filter
+            FocusPanelFilter,
             // repository
             InitRepository,
             Undo,
@@ -183,6 +194,22 @@ pub mod actions {
             Push,
         ]
     );
+}
+
+/// jj's revset errors on one line: the parser draws the revset with a caret
+/// under the error (` --> 1:3`, `1 | x(`, `  ^---`) and says what it
+/// expected after `= `; the header has room for the first line and that.
+fn one_line_error(error: &str) -> String {
+    let mut lines = error.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let head = first
+        .split_once(" -->")
+        .map_or(first, |(head, _)| head)
+        .trim_end();
+    match lines.filter_map(|line| line.strip_prefix("= ")).next_back() {
+        Some(expected) => format!("{head} {expected}"),
+        None => head.to_owned(),
+    }
 }
 
 /// Revset of the "All branches" scope: every visible commit, which in a git
@@ -231,6 +258,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CancelPick, Some(LOG_CONTEXT)),
         KeyBinding::new("delete", AbandonRevision, Some(LOG_CONTEXT)),
         KeyBinding::new(platform_key!("l"), FocusRevset, Some(REPO_CONTEXT)),
+        KeyBinding::new(platform_key!("f"), FindCommit, Some(REPO_CONTEXT)),
+        KeyBinding::new(platform_key!("alt-f"), FocusPanelFilter, Some(REPO_CONTEXT)),
+        KeyBinding::new("escape", CloseFind, Some("RandoriFind")),
         KeyBinding::new("escape", FocusLog, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("r"), Reload, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("b"), ToggleSidebar, Some(REPO_CONTEXT)),
@@ -256,6 +286,8 @@ enum LoadState {
 
 struct WorkspaceInfo {
     path: SharedString,
+    /// The workspace's name in the repository.
+    name: SharedString,
     /// The workspace's directory, where the terminal starts.
     root: PathBuf,
     query: String,
@@ -279,13 +311,47 @@ pub struct RepoView {
     worker: Worker,
     state: LoadState,
     workspace: Option<WorkspaceInfo>,
+    /// The parts drawn as views of their own (see `pane`).
+    panes: Panes,
     rows: Vec<LogRow>,
+    /// Each row's number by its commit id, added to as pages load.
+    row_of_commit: HashMap<String, usize>,
     row_data: Rc<Vec<RowData>>,
     graph: Rc<Graph>,
-    refs: Vec<RefItem>,
-    ref_filter: usize,
+    /// The side panel's bookmarks, tags and workspaces: every one of the
+    /// repository, from a query of their own (see `refs_panel`).
+    panel_refs: Vec<RefItem>,
+    panel_workspaces: Vec<WorkspaceItem>,
+    panel_filter: Entity<InputState>,
+    panel_collapsed: std::collections::HashSet<PanelSection>,
+    /// Folders of the panel's trees folded or unfolded against their
+    /// default (see `refs_panel`).
+    panel_folders: HashMap<PanelSection, std::collections::HashSet<String>>,
+    /// Bumped per panel query, so a late answer is dropped.
+    panel_generation: u64,
+    /// The log row whose bookmarks are spread out: the one whose chip, or
+    /// whose spread-out list (it reaches over the rows below), is hovered.
+    refs_hover: RefsHover,
+    /// The find bar over the revision list, while it is open.
+    find: Option<find::FindBar>,
+    /// Authors (lowercase emails) the log is filtered by: the other
+    /// revisions are dimmed, as GitKraken's author filter does.
+    author_filter: Rc<std::collections::BTreeSet<SharedString>>,
+    /// Why the revset last typed could not be used; the log still shows the
+    /// one before it.
+    query_error: Option<SharedString>,
+    /// The local bookmark this tab last switched to: of bookmarks sharing a
+    /// revision, the one marked current.
+    switched_to: Option<String>,
+    /// The bookmark standing in for a checked-out branch (see
+    /// [`nearest_bookmark`]), found again whenever the rows change.
+    current_bookmark: Option<SharedString>,
     has_more: bool,
     loading_more: bool,
+    /// Why the last next page failed: no page is asked for again until the
+    /// log reloads (the status bar's Retry), or scrolling to the end would
+    /// ask every frame.
+    more_error: Option<SharedString>,
     /// Bumped whenever the rows are replaced, so a late "next page" is dropped.
     log_generation: u64,
     /// Directory and revset the tab was opened with (for Try again / init).
@@ -296,6 +362,21 @@ pub struct RepoView {
     detail: Option<Detail>,
     detail_loading: bool,
     selected_file: Option<usize>,
+    /// The staging revision under this tab's working copy while the working
+    /// copy is the revision inspected (see `StageChanges`): what is staged.
+    staged: Option<Detail>,
+    /// The staged file shown in the diff, instead of a working copy one.
+    staged_file: Option<usize>,
+    /// The message of the next commit, in the working copy's inspector.
+    commit_input: Entity<TextareaState>,
+    /// A commit is on its way: its message is cleared when it is made.
+    commit_pending: bool,
+    /// The working copy (change id) whose description the message box was
+    /// filled with, once: a description it has is the commit's to keep.
+    commit_prefilled: Option<String>,
+    /// Files picked in the inspector with ⌘- or ⇧-click, by path, for Split.
+    /// They stay picked when the revision reloads, not when another is shown.
+    marked_files: Vec<SharedString>,
     diff: Entity<DiffState>,
     diff_mode: DiffMode,
     revset: Entity<InputState>,
@@ -329,8 +410,12 @@ pub struct RepoView {
     /// Keyboard alternative to drag and drop: the operation waiting for a
     /// target revision, chosen with the selection and confirmed with Enter.
     pick: Option<Pick>,
-    /// Lines selected in the diff; picks the hunk for "Squash hunk into parent".
+    /// Lines selected in the diff, for Squash into parent and Split off.
     diff_selection: Option<DiffLineRange>,
+    /// A press on the line buttons is under way: gpui-kit clears a diff's
+    /// line selection on any press, and the buttons' click acts on it after,
+    /// so the clear it reports (after the press) leaves it.
+    keep_line_selection: bool,
     /// Unsaved descriptions of changes the user moved away from, by change id.
     description_drafts: HashMap<String, String>,
     /// Keeps the open one-field dialog's Enter handler alive.
@@ -404,27 +489,41 @@ impl RepoView {
             }
         });
 
-        let revset =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Revset, e.g. ancestors(@, 50)"));
-        let _subscriptions = vec![cx.subscribe_in(
-            &revset,
-            window,
-            |view: &mut Self, state, event: &InputEvent, _, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    let query = state.read(cx).value().trim().to_owned();
-                    if !query.is_empty() {
-                        view.run_query(query, cx);
-                    }
+        let revset = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Filter with a revset, e.g. ancestors(@, 50)")
+        });
+        let panel_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter (⌘⌥F)"));
+        let _subscriptions = vec![
+            cx.subscribe(&panel_filter, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    cx.notify();
                 }
-            },
-        )];
+            }),
+            cx.subscribe_in(
+                &revset,
+                window,
+                |view: &mut Self, state, event: &InputEvent, _, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        let query = state.read(cx).value().trim().to_owned();
+                        if !query.is_empty() {
+                            view.run_query(query, cx);
+                        }
+                    }
+                },
+            ),
+        ];
 
         let diff_mode = diff_mode_of(settings::get(cx).display.diff);
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(diff_mode));
         let diff_events = cx.subscribe(&diff, |view: &mut Self, _, event: &DiffEvent, cx| {
             match event {
                 DiffEvent::SelectionEnded(range) => view.diff_selection = Some(range.clone()),
-                DiffEvent::SelectionChanged(None) => view.diff_selection = None,
+                // not when a press on the line buttons cleared it: they act on it
+                DiffEvent::SelectionChanged(None) => {
+                    if !std::mem::take(&mut view.keep_line_selection) {
+                        view.diff_selection = None;
+                    }
+                }
                 _ => return,
             }
             cx.notify();
@@ -435,7 +534,24 @@ impl RepoView {
                 .auto_grow(3, 10)
                 .placeholder("Describe this change")
         });
+        let commit_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .placeholder("Commit message")
+        });
         let mut _subscriptions = _subscriptions;
+        _subscriptions.push(cx.subscribe_in(
+            &commit_input,
+            window,
+            |view: &mut Self, _, event: &InputEvent, window, cx| match event {
+                // ⌘↩ / Ctrl+↩ commits, as it saves a description
+                InputEvent::PressEnter {
+                    secondary: true, ..
+                } => view.commit_changes(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        ));
         _subscriptions
             .push(cx.observe_global::<Settings>(|view: &mut Self, cx| view.apply_settings(cx)));
         _subscriptions.push(diff_events);
@@ -452,17 +568,31 @@ impl RepoView {
             },
         ));
 
+        let panes = Panes::new(&cx.entity(), cx);
         let mut view = Self {
+            panes,
             worker,
             state: LoadState::Loading,
             workspace: None,
             rows: Vec::new(),
+            row_of_commit: HashMap::new(),
             row_data: Rc::default(),
             graph: Rc::default(),
-            refs: Vec::new(),
-            ref_filter: 0,
+            panel_refs: Vec::new(),
+            panel_workspaces: Vec::new(),
+            panel_filter,
+            panel_collapsed: refs_panel::default_collapsed(),
+            panel_folders: Default::default(),
+            panel_generation: 0,
+            refs_hover: RefsHover::default(),
+            find: None,
+            author_filter: Rc::default(),
+            query_error: None,
+            switched_to: None,
+            current_bookmark: None,
             has_more: false,
             loading_more: false,
+            more_error: None,
             log_generation: 0,
             wd: None,
             initial_query: None,
@@ -471,6 +601,12 @@ impl RepoView {
             detail: None,
             detail_loading: false,
             selected_file: None,
+            staged: None,
+            staged_file: None,
+            commit_input,
+            commit_pending: false,
+            commit_prefilled: None,
+            marked_files: Vec::new(),
             diff,
             diff_mode,
             revset,
@@ -492,6 +628,7 @@ impl RepoView {
             description_for: None,
             description_drafts: HashMap::new(),
             diff_selection: None,
+            keep_line_selection: false,
             pick: None,
             dialog_subscription: None,
             avatars: Rc::default(),
@@ -596,6 +733,7 @@ impl RepoView {
                     match worker.open_workspace(wd)? {
                         RepoConfig::Workspace {
                             absolute_path,
+                            workspace_name,
                             latest_query,
                             query_choices,
                             status,
@@ -616,6 +754,7 @@ impl RepoView {
                             Ok((
                                 WorkspaceInfo {
                                     path: display_path(&path).into(),
+                                    name: workspace_name.into(),
                                     root: PathBuf::from(&path),
                                     query,
                                     default_query,
@@ -650,6 +789,7 @@ impl RepoView {
                         let remote_urls = workspace.remote_urls.clone();
                         view.workspace = Some(workspace);
                         view.replace_rows(page, true, cx);
+                        view.load_panel_refs(cx);
                         view.start_pulls(&remote_urls, cx);
                         view.state = LoadState::Ready;
                         // only the tab that has the keyboard takes it to its list; a
@@ -763,11 +903,14 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Shows the revisions of `query`. A revset that cannot be used leaves
+    /// the log as it was, with the reason under the field.
     fn run_query(&mut self, query: String, cx: &mut Context<Self>) {
-        if let Some(workspace) = &mut self.workspace {
-            workspace.query = query;
-        }
-        self.reload(cx);
+        let previous = self
+            .workspace
+            .as_mut()
+            .map(|workspace| std::mem::replace(&mut workspace.query, query));
+        self.reload_or_revert(previous, cx);
     }
 
     /// Re-runs the current query, e.g. after the repository changed.
@@ -775,6 +918,12 @@ impl RepoView {
     /// Pages loaded with "Load more" are fetched again so the list does not shrink
     /// under the user, and the scroll position is left alone.
     fn reload(&mut self, cx: &mut Context<Self>) {
+        self.reload_or_revert(None, cx);
+    }
+
+    /// [`Self::reload`]; when it fails and `revert` is the query shown before,
+    /// that query stays and the failure is the field's error.
+    fn reload_or_revert(&mut self, revert: Option<String>, cx: &mut Context<Self>) {
         let Some(query) = self.workspace.as_ref().map(|ws| ws.query.clone()) else {
             return;
         };
@@ -788,12 +937,26 @@ impl RepoView {
                 .background_spawn(async move { worker.query_log_pages(query, by_date, keep) })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                match result {
-                    Ok(page) => {
+                match (result, revert) {
+                    (Ok(page), revert) => {
                         view.state = LoadState::Ready;
                         view.replace_rows(page, false, cx);
+                        if revert.is_some() {
+                            // a revset typed now replaces the error; the
+                            // repository is as it was, and so the panel
+                            view.query_error = None;
+                        } else {
+                            view.load_panel_refs(cx);
+                        }
                     }
-                    Err(err) => view.state = LoadState::Failed(format!("{err:#}").into()),
+                    // the worker keeps paging the log shown, as the rows here stay
+                    (Err(err), Some(previous)) if matches!(view.state, LoadState::Ready) => {
+                        if let Some(workspace) = &mut view.workspace {
+                            workspace.query = previous;
+                        }
+                        view.query_error = Some(one_line_error(&format!("{err:#}")).into());
+                    }
+                    (Err(err), _) => view.state = LoadState::Failed(format!("{err:#}").into()),
                 }
                 cx.notify();
             });
@@ -870,7 +1033,7 @@ impl RepoView {
     }
 
     fn load_more(&mut self, cx: &mut Context<Self>) {
-        if !self.has_more || self.loading_more {
+        if !self.has_more || self.loading_more || self.more_error.is_some() {
             return;
         }
         self.loading_more = true;
@@ -892,11 +1055,16 @@ impl RepoView {
                 match result {
                     Ok(page) => {
                         view.has_more = page.has_more;
+                        let from = view.rows.len();
                         view.rows.extend(page.rows);
-                        view.rebuild_derived();
+                        view.extend_derived();
+                        view.update_find(false, from, cx);
                         view.request_missing_avatars(cx);
                     }
-                    Err(err) => log::warn!("next log page failed: {err:#}"),
+                    Err(err) => {
+                        log::warn!("next log page failed: {err:#}");
+                        view.more_error = Some(one_line_error(&format!("{err:#}")).into());
+                    }
                 }
                 cx.notify();
             });
@@ -912,6 +1080,7 @@ impl RepoView {
             .and_then(|ix| self.rows.get(ix))
             .map(|row| row.revision.id.change.hex.clone());
         self.has_more = page.has_more;
+        self.more_error = None;
         self.rows = page.rows;
         self.rebuild_derived();
 
@@ -931,7 +1100,7 @@ impl RepoView {
             .or_else(|| {
                 self.rows
                     .iter()
-                    .position(|row| row.revision.is_working_copy)
+                    .position(|row| is_this_working_copy(&row.revision))
             })
             .or(if self.rows.is_empty() { None } else { Some(0) });
         match selected {
@@ -940,11 +1109,13 @@ impl RepoView {
                 // Nothing to inspect: drop any detail still on its way.
                 self.selected = None;
                 self.detail = None;
+                self.marked_files.clear();
                 self.detail_task = None;
                 self.detail_loading = false;
                 self.select_file(None, cx);
             }
         }
+        self.update_find(false, 0, cx);
         self.refresh_focus(cx);
         self.refresh_conflicts(cx);
         self.run_picked_up_check(cx);
@@ -952,42 +1123,50 @@ impl RepoView {
     }
 
     fn rebuild_derived(&mut self) {
-        let now = Local::now();
         self.derived_at = std::time::Instant::now();
+        self.row_data = Rc::new(Vec::new());
+        self.row_of_commit.clear();
+        // the rows may be others now; the pointer opens them again as it moves
+        self.refs_hover = RefsHover::default();
+        self.extend_derived();
+    }
+
+    /// The derived rows for the rows not derived yet (a page just loaded):
+    /// the rows before it keep theirs, so each page costs its own rows only.
+    /// The graph is drawn again whole, as a new page can join its lines.
+    fn extend_derived(&mut self) {
+        let now = Local::now();
         self.graph = Rc::new(Graph::new(&self.rows));
-        let mut row_data: Vec<RowData> =
-            self.rows.iter().map(|row| RowData::new(row, now)).collect();
-        if self.log_by_date {
-            // the rows follow commit time there; grouping by author time would
-            // jump back and forth wherever history was rewritten
-            for (data, row) in row_data.iter_mut().zip(&self.rows) {
+        // a copy only while a frame's list still holds the rows
+        let row_data = Rc::make_mut(&mut self.row_data);
+        let by_date = self.log_by_date;
+        let from = row_data.len();
+        self.row_of_commit.extend(
+            self.rows[from..]
+                .iter()
+                .enumerate()
+                .map(|(ix, row)| (row.revision.id.commit.hex.clone(), from + ix)),
+        );
+        row_data.extend(self.rows[from..].iter().map(|row| {
+            let mut data = RowData::new(row, now);
+            if by_date {
+                // the rows follow commit time there; grouping by author time
+                // would jump back and forth wherever history was rewritten
                 let (bucket, label) = time_bucket(row.revision.committed_at, now);
                 data.bucket = bucket;
                 data.bucket_label = label.into();
             }
-        }
-        mark_bucket_starts(&mut row_data);
-        self.row_data = Rc::new(row_data);
-        self.refs = self
-            .rows
-            .iter()
-            .enumerate()
-            .flat_map(|(ix, row)| {
-                let data = &self.row_data[ix];
-                ref_chips(&row.revision.refs)
-                    .into_iter()
-                    .map(move |chip| RefItem {
-                        chip,
-                        row: ix,
-                        change: data.change_prefix.clone(),
-                        summary: data
-                            .summary
-                            .clone()
-                            .unwrap_or_else(|| "(no description set)".into()),
-                        time: data.time.clone(),
-                    })
-            })
-            .collect();
+            data
+        }));
+        mark_bucket_starts(row_data);
+        let current =
+            nearest_bookmark(&self.rows, &self.row_of_commit, self.switched_to.as_deref());
+        mark_current_ref(
+            row_data,
+            current.as_ref().map(|(ix, name)| (*ix, name.as_str())),
+        );
+        self.current_bookmark = current.map(|(_, name)| name.into());
+        self.place_panel_items();
     }
 
     /// Selects a row because the user asked for it: the list scrolls to it.
@@ -1030,16 +1209,71 @@ impl RepoView {
             from: row.revision.id.clone(),
             to: row.revision.id.clone(),
         };
+        // the staging revision is asked for only where there may be one: not
+        // under a parent the log shows described, immutable or a working copy
+        let may_stage = is_this_working_copy(&row.revision)
+            && match row.revision.parent_ids.as_slice() {
+                [parent] => self.row_of_commit.get(&parent.hex).is_none_or(|&ix| {
+                    let parent = &self.rows[ix].revision;
+                    !parent.is_immutable
+                        && !parent.is_working_copy
+                        && parent
+                            .description
+                            .lines
+                            .iter()
+                            .all(|line| line.trim().is_empty())
+                }),
+                _ => false,
+            };
         self.detail_loading = true;
         let worker = self.worker.clone();
         self.detail_task = Some(cx.spawn(async move |this, cx| {
             // Parsing every file's patch can take a while on a large commit;
             // keep it off the UI thread with the query itself.
             let result = cx
-                .background_spawn(async move { worker.query_revisions(set).map(build_detail) })
+                .background_spawn(async move {
+                    let detail = worker.query_revisions(set).map(build_detail)?;
+                    // this tab's working copy: what its staging revision holds
+                    let staging = detail
+                        .as_ref()
+                        .filter(|detail| may_stage && !detail.header.is_immutable)
+                        .and_then(|detail| match detail.parent_ids.as_slice() {
+                            [parent] => Some(parent.clone()),
+                            _ => None,
+                        });
+                    let staged = match staging {
+                        Some(parent) => worker
+                            .query_revisions(RevSet {
+                                from: parent.clone(),
+                                to: parent,
+                            })
+                            .map(build_detail)?
+                            .filter(is_staging_revision),
+                        None => None,
+                    };
+                    anyhow::Ok((detail, staged))
+                })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.detail_loading = false;
+                let (result, staged) = match result {
+                    Ok((detail, staged)) => (Ok(detail), staged),
+                    Err(err) => (Err(err), None),
+                };
+                // the staged file shown stays, by path, while it is staged
+                let staged_path = view
+                    .staged_file
+                    .and_then(|ix| view.staged.as_ref()?.files.get(ix))
+                    .map(|file| file.path.clone());
+                view.staged = staged;
+                view.staged_file = None;
+                let staged_keep = staged_path.and_then(|path| {
+                    view.staged
+                        .as_ref()?
+                        .files
+                        .iter()
+                        .position(|file| file.path == path)
+                });
                 match result {
                     Ok(Some(detail)) => {
                         // after a reload, stay on the file that was selected
@@ -1051,17 +1285,31 @@ impl RepoView {
                             detail.files.iter().position(|file| file.path == path)
                         });
                         let first = (!detail.files.is_empty()).then_some(0);
+                        let same_revision = view.detail.as_ref().is_some_and(|old| {
+                            old.header.id.change.hex == detail.header.id.change.hex
+                        });
+                        if same_revision {
+                            view.marked_files
+                                .retain(|path| detail.files.iter().any(|file| &file.path == path));
+                        } else {
+                            view.marked_files.clear();
+                        }
                         view.detail = Some(detail);
-                        view.select_file(keep.or(first), cx);
+                        match staged_keep {
+                            Some(ix) if keep.is_none() => view.select_staged_file(ix, cx),
+                            _ => view.select_file(keep.or(first), cx),
+                        }
                     }
                     Ok(None) => {
                         view.detail = None;
+                        view.marked_files.clear();
                         view.select_file(None, cx);
                     }
                     Err(err) => {
                         // Never leave the previous revision on screen for the new selection.
                         log::warn!("revision query failed: {err:#}");
                         view.detail = None;
+                        view.marked_files.clear();
                         view.select_file(None, cx);
                     }
                 }
@@ -1072,20 +1320,35 @@ impl RepoView {
 
     fn select_file(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
         self.selected_file = ix;
+        self.staged_file = None;
         self.diff_selection = None;
-        let file = ix
-            .and_then(|ix| self.detail.as_ref()?.files.get(ix))
-            .map(|file| file.path.clone());
-        let patch = file.and_then(|path| {
-            self.detail
-                .as_ref()?
-                .patches
-                .iter()
-                .find(|patch| patch.path() == &path)
-                .cloned()
-        });
+        let patch = ix.and_then(|ix| file_patch(self.detail.as_ref()?, ix));
         self.diff.update(cx, |state, cx| state.set_files(patch, cx));
         cx.notify();
+    }
+
+    /// Shows staged file `ix` (of the staging revision) in the diff.
+    fn select_staged_file(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.selected_file = None;
+        self.staged_file = Some(ix);
+        self.diff_selection = None;
+        let patch = self
+            .staged
+            .as_ref()
+            .and_then(|staged| file_patch(staged, ix));
+        self.diff.update(cx, |state, cx| state.set_files(patch, cx));
+        cx.notify();
+    }
+
+    /// The working copy is inspected as GitKraken's work in progress: its
+    /// changes unstaged, its staging revision's staged, and a commit message.
+    /// This tab's, mutable, on one parent.
+    pub(super) fn staging_mode(&self) -> bool {
+        self.detail.as_ref().is_some_and(|detail| {
+            is_this_working_copy(&detail.header)
+                && !detail.header.is_immutable
+                && detail.parent_ids.len() == 1
+        })
     }
 
     /// The diff header's switch: changes this tab and the layout new diffs open in.
@@ -1193,6 +1456,8 @@ impl RepoView {
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_description(window, cx);
+        self.prefill_commit_message(window, cx);
+        self.focus_find_if_new(window, cx);
         if !self.picked_up.is_empty() {
             cx.defer_in(window, |view, window, cx| view.notify_picked_up(window, cx));
         }
@@ -1326,8 +1591,13 @@ impl Render for RepoView {
                     {
                         return;
                     }
-                    view.description_input
-                        .update(cx, |state, cx| state.focus(window, cx));
+                    // the working copy is described by committing it
+                    let input = if view.staging_mode() {
+                        &view.commit_input
+                    } else {
+                        &view.description_input
+                    };
+                    input.update(cx, |state, cx| state.focus(window, cx));
                 }),
             )
             .on_action(
@@ -1387,6 +1657,9 @@ impl Render for RepoView {
             .on_action(cx.listener(|view, _: &actions::SquashFile, window, cx| {
                 view.squash_file_into_parent(window, cx)
             }))
+            .on_action(cx.listener(|view, _: &actions::SplitFiles, window, cx| {
+                view.prompt_split_files(window, cx)
+            }))
             .on_action(cx.listener(|view, _: &actions::RestoreFile, window, cx| {
                 view.confirm_restore_file(window, cx)
             }))
@@ -1399,6 +1672,20 @@ impl Render for RepoView {
             .on_action(cx.listener(|view, _: &actions::SquashHunk, window, cx| {
                 view.squash_hunk_into_parent(window, cx)
             }))
+            .on_action(cx.listener(|view, _: &actions::SplitLines, window, cx| {
+                view.prompt_split_lines(window, cx)
+            }))
+            .on_action(
+                cx.listener(|view, _: &actions::FindCommit, window, cx| view.open_find(window, cx)),
+            )
+            .on_action(
+                cx.listener(|view, _: &actions::FocusPanelFilter, window, cx| {
+                    view.sidebar_visible = true;
+                    view.panel_filter
+                        .update(cx, |state, cx| state.focus(window, cx));
+                    cx.notify();
+                }),
+            )
             .on_action(cx.listener(|view, _: &actions::Undo, window, cx| view.undo(window, cx)))
             .on_action(cx.listener(|view, _: &actions::Redo, window, cx| view.redo(window, cx)))
             .on_action(
@@ -1417,6 +1704,27 @@ impl Render for RepoView {
 }
 
 impl RepoView {
+    /// Fills the empty message box with the working copy's description, once
+    /// per working copy: committing everything describes it with the box's
+    /// message, which would drop a description typed before (`jj describe`).
+    fn prefill_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.staging_mode() {
+            return;
+        }
+        let Some(header) = self.detail.as_ref().map(|detail| &detail.header) else {
+            return;
+        };
+        if self.commit_prefilled.as_deref() == Some(header.id.change.hex.as_str()) {
+            return;
+        }
+        self.commit_prefilled = Some(header.id.change.hex.clone());
+        let description = header.description.lines.join("\n").trim().to_owned();
+        if !description.is_empty() && self.commit_input.read(cx).value().trim().is_empty() {
+            self.commit_input
+                .update(cx, |state, cx| state.set_value(description, window, cx));
+        }
+    }
+
     /// Loads the selected revision's description into the editor when the
     /// selection changes. For the same change it follows jj's text (e.g. after
     /// a save or a snapshot) only while the user has no unsaved edits.
@@ -1477,6 +1785,43 @@ impl RepoView {
     }
 }
 
+/// The tab's panes (see `pane`): the parts a scroll of the revisions leaves
+/// as they were, and the revisions, whose scroll draws only them.
+struct Panes {
+    log: Entity<pane::Pane>,
+    side: Entity<pane::Pane>,
+    inspector: Entity<pane::Pane>,
+    changes: Entity<pane::Pane>,
+}
+
+impl Panes {
+    fn new(owner: &Entity<RepoView>, cx: &mut Context<RepoView>) -> Self {
+        let mut pane = |render: pane::PaneRender| cx.new(|cx| pane::Pane::new(owner, render, cx));
+        Self {
+            log: pane(|view, cx| view.render_log(cx)),
+            // the full view's file history takes the side panel's place,
+            // as GitKraken's does; the panel layout stays as it was
+            side: pane(|view, cx| match view.center.file() {
+                Some(focus) if focus.show_history => view.render_history(focus, cx),
+                _ => view.render_refs_panel(cx),
+            }),
+            inspector: pane(|view, cx| view.render_inspector(cx)),
+            changes: pane(|view, cx| view.render_changes(cx)),
+        }
+    }
+}
+
+/// The patch of `detail`'s file `ix`, matched by path: a patch that does not
+/// parse leaves `patches` shorter than `files`.
+fn file_patch(detail: &Detail, ix: usize) -> Option<DiffFile> {
+    let path = &detail.files.get(ix)?.path;
+    detail
+        .patches
+        .iter()
+        .find(|patch| patch.path() == path)
+        .cloned()
+}
+
 fn diff_mode_of(layout: DiffLayout) -> DiffMode {
     match layout {
         DiffLayout::Unified => DiffMode::Unified,
@@ -1525,3 +1870,21 @@ pub enum RepoViewEvent {
 }
 
 impl gpui_kit::EventEmitter<RepoViewEvent> for RepoView {}
+
+#[cfg(test)]
+mod tests {
+    use super::one_line_error;
+
+    #[test]
+    fn a_revset_error_fits_on_one_line() {
+        let parse = "evaluate revset: parse revset:  --> 1:3\n  |\n1 | x(\n  |   ^---\n  |\n  = expected <EOI> or <expression>";
+        assert_eq!(
+            one_line_error(parse),
+            "evaluate revset: parse revset: expected <EOI> or <expression>"
+        );
+        assert_eq!(
+            one_line_error("evaluate revset: Revision `nope` doesn't exist"),
+            "evaluate revset: Revision `nope` doesn't exist"
+        );
+    }
+}
