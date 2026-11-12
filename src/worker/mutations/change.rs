@@ -23,8 +23,8 @@ pub use crate::{
     messages::{
         ChangeHunk, TreePath,
         mutations::{
-            CopyChanges, CopyHunk, IgnoreNewFiles, MoveChanges, MoveHunk, MutationOptions,
-            MutationResult,
+            CommitChanges, CopyChanges, CopyHunk, FileHunks, IgnoreNewFiles, MoveChanges, MoveHunk,
+            MutationOptions, MutationResult, SplitRevision, StageChanges, UnstageChanges,
         },
     },
     worker::{Mutation, gui_util::WorkspaceSession},
@@ -176,6 +176,295 @@ impl Mutation for MoveChanges {
             )
             .await?
         {
+            Some(new_status) => Ok(MutationResult::Updated {
+                new_status,
+                new_selection: None,
+            }),
+            None => Ok(MutationResult::Unchanged),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl Mutation for SplitRevision {
+    async fn execute(
+        self: Box<Self>,
+        ws: &mut WorkspaceSession,
+        options: &MutationOptions,
+    ) -> Result<MutationResult> {
+        if self.paths.is_empty() && self.hunks.iter().all(|file| file.hunks.is_empty()) {
+            precondition!("Nothing to split off");
+        }
+        let mut tx = ws.start_transaction().await?;
+
+        let commit = ws.resolve_change_id(&self.id)?;
+        if ws.check_immutable([commit.id().clone()])? && !options.ignore_immutable {
+            precondition!("Revision is immutable");
+        }
+
+        let parents = commit.parents().await?;
+        if self.hunks.iter().any(|file| !file.hunks.is_empty()) && parents.len() != 1 {
+            precondition!("Cannot split lines off a merge commit");
+        }
+        // the parents' tree with the selected files and lines as the revision has them
+        let parent_tree = rewrite::merge_commit_trees(tx.repo(), &parents).await?;
+        let selected = tree_with_changes(
+            tx.repo().store(),
+            &parent_tree,
+            &commit.tree(),
+            (
+                commit.conflict_label(),
+                conflict_label_for_commits(&parents),
+            ),
+            &self.paths,
+            &self.hunks,
+        )
+        .await?;
+        if selected.tree_ids() == parent_tree.tree_ids() {
+            precondition!("The selected files do not change in this revision");
+        }
+
+        let first = tx
+            .repo_mut()
+            .new_commit(
+                parents.iter().map(|parent| parent.id().clone()).collect(),
+                selected,
+            )
+            .set_description(self.description)
+            .write()
+            .await?;
+        // its tree as it was: on the new parent, what is left is the rest
+        tx.repo_mut()
+            .rewrite_commit(&commit)
+            .set_parents(vec![first.id().clone()])
+            .write()
+            .await?;
+
+        match ws
+            .finish_transaction(tx, format!("split commit {}", commit.id().hex()))
+            .await?
+        {
+            Some(new_status) => Ok(MutationResult::Updated {
+                new_status,
+                new_selection: None,
+            }),
+            None => Ok(MutationResult::Unchanged),
+        }
+    }
+}
+
+/// The staging revision of a working copy whose parents are `parents` (see
+/// [`StageChanges`]): its one parent, when that is undescribed, mutable (so
+/// not the root) and no workspace's working copy, which staging would rewrite.
+fn staging_revision(ws: &WorkspaceSession, parents: &[Commit]) -> Result<Option<Commit>> {
+    let [parent] = parents else {
+        return Ok(None);
+    };
+    let working_copy = ws
+        .repo()
+        .view()
+        .wc_commit_ids()
+        .values()
+        .any(|id| id == parent.id());
+    let staging = parent.description().trim().is_empty()
+        && !working_copy
+        && !ws.check_immutable([parent.id().clone()])?;
+    Ok(staging.then(|| parent.clone()))
+}
+
+#[async_trait(?Send)]
+impl Mutation for StageChanges {
+    async fn execute(
+        self: Box<Self>,
+        ws: &mut WorkspaceSession,
+        options: &MutationOptions,
+    ) -> Result<MutationResult> {
+        if self.paths.is_empty() && self.hunks.iter().all(|file| file.hunks.is_empty()) {
+            precondition!("Nothing to stage");
+        }
+        let mut tx = ws.start_transaction().await?;
+
+        let commit = ws.resolve_change_id(&self.id)?;
+        if ws.check_immutable([commit.id().clone()])? && !options.ignore_immutable {
+            precondition!("Revision is immutable");
+        }
+        let parents = commit.parents().await?;
+        let [parent] = parents.as_slice() else {
+            precondition!("Cannot stage changes of a merge commit");
+        };
+        let staged = tree_with_changes(
+            tx.repo().store(),
+            &parent.tree(),
+            &commit.tree(),
+            (commit.conflict_label(), parent.conflict_label()),
+            &self.paths,
+            &self.hunks,
+        )
+        .await?;
+        if staged.tree_ids() == parent.tree().tree_ids() {
+            precondition!("The selected changes are not in this revision");
+        }
+
+        // into the staging revision, or a new one under the working copy
+        let staging = match staging_revision(ws, &parents)? {
+            Some(staging) => {
+                tx.repo_mut()
+                    .rewrite_commit(&staging)
+                    .set_tree(staged)
+                    .write()
+                    .await?
+            }
+            None => {
+                tx.repo_mut()
+                    .new_commit(vec![parent.id().clone()], staged)
+                    .write()
+                    .await?
+            }
+        };
+        // the working copy's files as they were: on the staging revision,
+        // what is left is what is not staged
+        tx.repo_mut()
+            .rewrite_commit(&commit)
+            .set_parents(vec![staging.id().clone()])
+            .write()
+            .await?;
+
+        match ws.finish_transaction(tx, "stage changes").await? {
+            Some(new_status) => Ok(MutationResult::Updated {
+                new_status,
+                new_selection: None,
+            }),
+            None => Ok(MutationResult::Unchanged),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl Mutation for UnstageChanges {
+    async fn execute(
+        self: Box<Self>,
+        ws: &mut WorkspaceSession,
+        options: &MutationOptions,
+    ) -> Result<MutationResult> {
+        if self.paths.is_empty() && self.hunks.iter().all(|file| file.hunks.is_empty()) {
+            precondition!("Nothing to unstage");
+        }
+        let mut tx = ws.start_transaction().await?;
+
+        let commit = ws.resolve_change_id(&self.id)?;
+        if ws.check_immutable([commit.id().clone()])? && !options.ignore_immutable {
+            precondition!("Revision is immutable");
+        }
+        let parents = commit.parents().await?;
+        let Some(staging) = staging_revision(ws, &parents)? else {
+            precondition!("Nothing is staged");
+        };
+        let below = staging.parents().await?;
+        let below_tree = rewrite::merge_commit_trees(tx.repo(), &below).await?;
+        // the staging revision without the selected changes: the files as
+        // its parents have them, the lines read backwards
+        let kept = tree_with_changes(
+            tx.repo().store(),
+            &staging.tree(),
+            &below_tree,
+            (conflict_label_for_commits(&below), staging.conflict_label()),
+            &self.paths,
+            &self.hunks,
+        )
+        .await?;
+        if kept.tree_ids() == staging.tree().tree_ids() {
+            precondition!("The selected changes are not staged");
+        }
+
+        let new_parents = if kept.tree_ids() == below_tree.tree_ids() {
+            // nothing left staged: no staging revision
+            tx.repo_mut().record_abandoned_commit(&staging);
+            staging.parent_ids().to_vec()
+        } else {
+            let staging = tx
+                .repo_mut()
+                .rewrite_commit(&staging)
+                .set_tree(kept)
+                .write()
+                .await?;
+            vec![staging.id().clone()]
+        };
+        // the working copy's files as they were, so the changes are its again
+        tx.repo_mut()
+            .rewrite_commit(&commit)
+            .set_parents(new_parents)
+            .write()
+            .await?;
+
+        match ws.finish_transaction(tx, "unstage changes").await? {
+            Some(new_status) => Ok(MutationResult::Updated {
+                new_status,
+                new_selection: None,
+            }),
+            None => Ok(MutationResult::Unchanged),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl Mutation for CommitChanges {
+    async fn execute(
+        self: Box<Self>,
+        ws: &mut WorkspaceSession,
+        options: &MutationOptions,
+    ) -> Result<MutationResult> {
+        if self.description.trim().is_empty() {
+            precondition!("A commit needs a description");
+        }
+        let mut tx = ws.start_transaction().await?;
+
+        let commit = ws.resolve_change_id(&self.id)?;
+        if ws.check_immutable([commit.id().clone()])? && !options.ignore_immutable {
+            precondition!("Revision is immutable");
+        }
+        let parents = commit.parents().await?;
+        // a staging revision with nothing in it has nothing to commit: it
+        // goes, and the working copy is committed on what is under it
+        let mut staging = staging_revision(ws, &parents)?;
+        let mut empty_staging = None;
+        if let Some(revision) = &staging {
+            let below = rewrite::merge_commit_trees(tx.repo(), &revision.parents().await?).await?;
+            if revision.tree().tree_ids() == below.tree_ids() {
+                empty_staging = staging.take();
+            }
+        }
+        let message = match staging {
+            Some(staging) => {
+                tx.repo_mut()
+                    .rewrite_commit(&staging)
+                    .set_description(self.description)
+                    .write()
+                    .await?;
+                format!("commit staged changes {}", staging.id().hex())
+            }
+            None => {
+                let mut builder = tx
+                    .repo_mut()
+                    .rewrite_commit(&commit)
+                    .set_description(self.description);
+                if let Some(empty) = &empty_staging {
+                    builder = builder.set_parents(empty.parent_ids().to_vec());
+                }
+                let committed = builder.write().await?;
+                if let Some(empty) = &empty_staging {
+                    tx.repo_mut().record_abandoned_commit(empty);
+                }
+                let next = tx
+                    .repo_mut()
+                    .new_commit(vec![committed.id().clone()], committed.tree())
+                    .write()
+                    .await?;
+                tx.repo_mut().edit(ws.name().to_owned(), &next).await?;
+                format!("commit {}", commit.id().hex())
+            }
+        };
+
+        match ws.finish_transaction(tx, message).await? {
             Some(new_status) => Ok(MutationResult::Updated {
                 new_status,
                 new_selection: None,
@@ -731,6 +1020,59 @@ fn combine_messages(sources: &[&Commit], destination: &Commit, abandon_source: b
     }
 }
 
+/// `base` with the changes `paths` and `hunks` pick from `source`: each of
+/// `paths` as `source` has it, and `hunks` applied to `base`'s lines. Lines
+/// move without the file's mode: a file keeps `base`'s, and one `base` lacks
+/// takes `source`'s and ends its last line as `source` does. `labels` name
+/// `source` and `base` in conflicts.
+async fn tree_with_changes(
+    store: &Arc<jj_lib::store::Store>,
+    base: &MergedTree,
+    source: &MergedTree,
+    labels: (String, String),
+    paths: &[TreePath],
+    hunks: &[FileHunks],
+) -> Result<MergedTree> {
+    let mut tree = if paths.is_empty() {
+        base.clone()
+    } else {
+        let matcher = build_matcher(paths)?;
+        rewrite::restore_tree(source, base, labels.0, labels.1, matcher.as_ref()).await?
+    };
+    for file in hunks.iter().filter(|file| !file.hunks.is_empty()) {
+        let repo_path = RepoPath::from_internal_string(&file.path.repo_path)?;
+        let mut content = read_file_content(store, base, repo_path).await?;
+        let new_file = content.is_empty();
+        // from the bottom up, so the lines a hunk starts at are still the base's
+        let mut hunks = file.hunks.clone();
+        hunks.sort_by_key(|hunk| std::cmp::Reverse(hunk.location.from_file.start));
+        for hunk in &hunks {
+            content = apply_hunk_to_base(&content, hunk)?;
+        }
+        // applying keeps the base's last newline; a new file has no base,
+        // so its last line ends as the source's does
+        if new_file
+            && !content.is_empty()
+            && read_file_content(store, source, repo_path)
+                .await?
+                .ends_with(b"\n")
+        {
+            content.push(b'\n');
+        }
+        let blob = store.write_file(repo_path, &mut content.as_slice()).await?;
+        let mode_of = |value: Merge<Option<TreeValue>>| match value.into_resolved() {
+            Ok(Some(TreeValue::File { executable, .. })) => Some(executable),
+            _ => None,
+        };
+        let executable = match mode_of(base.path_value(repo_path).await?) {
+            Some(executable) => executable,
+            None => mode_of(source.path_value(repo_path).await?).unwrap_or(false),
+        };
+        tree = update_tree_entry(store, &tree, repo_path, blob, executable).await?;
+    }
+    Ok(tree)
+}
+
 async fn update_tree_entry(
     _store: &Arc<jj_lib::store::Store>,
     original_tree: &MergedTree,
@@ -836,8 +1178,8 @@ mod tests {
     use super::*;
     use crate::{
         messages::{
-            ChangeLocation, ChangeRange, MultilineString, RevSet,
-            mutations::{CreateRevision, DescribeRevision},
+            ChangeLocation, ChangeRange, MultilineString, RevId, RevSet,
+            mutations::{CreateRevision, DescribeRevision, FileHunks},
             queries::RevsResult,
         },
         worker::{
@@ -849,6 +1191,526 @@ mod tests {
     use assert_matches::assert_matches;
     use futures_util::AsyncReadExt;
     use std::fs;
+
+    fn tree_path(path: &str) -> TreePath {
+        TreePath {
+            repo_path: path.to_owned(),
+            relative_path: "".into(),
+        }
+    }
+
+    async fn changed_paths(ws: &WorkspaceSession<'_>, id: RevId) -> Result<Vec<String>> {
+        match query_by_id(ws, id).await? {
+            RevsResult::Detail { changes, .. } => {
+                Ok(changes.into_iter().map(|c| c.path.repo_path).collect())
+            }
+            RevsResult::NotFound { .. } => panic!("revision not found"),
+        }
+    }
+
+    #[tokio::test]
+    async fn split_revision_puts_the_selected_files_before_it() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        fs::write(repo.path().join("x.txt"), "x content").unwrap();
+        fs::write(repo.path().join("y.txt"), "y content").unwrap();
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "work".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc = ws.get_commit(ws.wc_id())?;
+        let wc_id = ws.format_id(&wc);
+        let old_parents = wc.parent_ids().to_vec();
+
+        let result = SplitRevision {
+            id: wc_id.clone(),
+            paths: vec![tree_path("x.txt")],
+            hunks: vec![],
+            description: "add x".to_owned(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Updated { .. });
+
+        // the same change is still the working copy, with the rest of it
+        let wc = ws.get_commit(ws.wc_id())?;
+        assert_eq!(ws.format_id(&wc).change.hex, wc_id.change.hex);
+        assert!(wc.description().starts_with("work"));
+        assert_eq!(changed_paths(&ws, ws.format_id(&wc)).await?, vec!["y.txt"]);
+
+        // under it, the new revision with the selected file, where it was
+        let first = ws.get_commit(&wc.parent_ids()[0])?;
+        assert_eq!(wc.parent_ids().len(), 1);
+        assert_eq!(first.description().trim(), "add x");
+        assert_eq!(first.parent_ids(), old_parents.as_slice());
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&first)).await?,
+            vec!["x.txt"]
+        );
+
+        // the files on disk are as they were
+        assert_eq!(fs::read_to_string(repo.path().join("x.txt"))?, "x content");
+        assert_eq!(fs::read_to_string(repo.path().join("y.txt"))?, "y content");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn split_revision_takes_only_the_selected_lines() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        // a parent with the file, and a working copy that adds two lines to it
+        fs::write(repo.path().join("f.txt"), "a\nb\n").unwrap();
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "base".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let base = ws.get_commit(ws.wc_id())?;
+        CreateRevision {
+            set: RevSet::singleton(ws.format_id(&base)),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        fs::write(repo.path().join("f.txt"), "a\nb\nc\nd\n").unwrap();
+        fs::write(repo.path().join("g.txt"), "g\n").unwrap();
+        DescribeRevision {
+            id: ws.format_id(&ws.get_commit(ws.wc_id())?),
+            new_description: "work".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc_id = ws.format_id(&ws.get_commit(ws.wc_id())?);
+
+        // the hunk `+c +d`, with `+d` left behind
+        let partial = ChangeHunk {
+            location: ChangeLocation {
+                from_file: ChangeRange { start: 3, len: 0 },
+                to_file: ChangeRange { start: 3, len: 1 },
+            },
+            lines: MultilineString {
+                lines: vec!["+c\n".to_owned()],
+            },
+        };
+        let result = SplitRevision {
+            id: wc_id,
+            paths: vec![],
+            hunks: vec![FileHunks {
+                path: tree_path("f.txt"),
+                hunks: vec![partial],
+            }],
+            description: "add c".to_owned(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Updated { .. });
+
+        let wc = ws.get_commit(ws.wc_id())?;
+        let first = ws.get_commit(&wc.parent_ids()[0])?;
+        assert_eq!(first.description().trim(), "add c");
+        assert_eq!(first.parent_ids(), &[base.id().clone()]);
+        let store = ws.repo().store().clone();
+        let f = RepoPath::from_internal_string("f.txt")?;
+        let read = |tree| {
+            let store = store.clone();
+            async move { read_file_content(&store, &tree, f).await }
+        };
+        assert_eq!(read(first.tree()).await?, b"a\nb\nc\n");
+        // the rest stays in the working copy: `+d`, and all of g.txt
+        assert_eq!(read(wc.tree()).await?, b"a\nb\nc\nd\n");
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&first)).await?,
+            vec!["f.txt"]
+        );
+        let mut rest = changed_paths(&ws, ws.format_id(&wc)).await?;
+        rest.sort();
+        assert_eq!(rest, vec!["f.txt", "g.txt"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn split_revision_ends_lines_as_the_files_do() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        // a parent whose file has no last newline, and a working copy that
+        // adds a line to it (and the newline), and a new file of two lines
+        fs::write(repo.path().join("f.txt"), "a\nb").unwrap();
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "base".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let base = ws.get_commit(ws.wc_id())?;
+        CreateRevision {
+            set: RevSet::singleton(ws.format_id(&base)),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        fs::write(repo.path().join("f.txt"), "a\nX\nb\n").unwrap();
+        fs::write(repo.path().join("n.txt"), "1\n2\n").unwrap();
+        DescribeRevision {
+            id: ws.format_id(&ws.get_commit(ws.wc_id())?),
+            new_description: "work".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc_id = ws.format_id(&ws.get_commit(ws.wc_id())?);
+
+        let added = |at: usize, line: &str| ChangeHunk {
+            location: ChangeLocation {
+                from_file: ChangeRange { start: at, len: 0 },
+                to_file: ChangeRange { start: at, len: 1 },
+            },
+            lines: MultilineString {
+                lines: vec![format!("+{line}\n")],
+            },
+        };
+        // `+X` alone, not the newline; the new file's first line alone
+        let result = SplitRevision {
+            id: wc_id,
+            paths: vec![],
+            hunks: vec![
+                FileHunks {
+                    path: tree_path("f.txt"),
+                    hunks: vec![added(2, "X")],
+                },
+                FileHunks {
+                    path: tree_path("n.txt"),
+                    hunks: vec![added(1, "1")],
+                },
+            ],
+            description: "some lines".to_owned(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Updated { .. });
+
+        let wc = ws.get_commit(ws.wc_id())?;
+        let first = ws.get_commit(&wc.parent_ids()[0])?;
+        let store = ws.repo().store().clone();
+        let read = |tree, path: &'static str| {
+            let store = store.clone();
+            async move { read_file_content(&store, &tree, RepoPath::from_internal_string(path)?).await }
+        };
+        // the parent's file still ends without a newline; the new file's
+        // line ends as its lines in the revision do
+        assert_eq!(read(first.tree(), "f.txt").await?, b"a\nX\nb");
+        assert_eq!(read(first.tree(), "n.txt").await?, b"1\n");
+        // the revision's files are as they were
+        assert_eq!(read(wc.tree(), "f.txt").await?, b"a\nX\nb\n");
+        assert_eq!(read(wc.tree(), "n.txt").await?, b"1\n2\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_changes_gather_under_the_working_copy() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        // a described base with f.txt, and a working copy that changes it and adds g.txt
+        fs::write(repo.path().join("f.txt"), "a\nb\n").unwrap();
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "base".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let base = ws.get_commit(ws.wc_id())?;
+        CreateRevision {
+            set: RevSet::singleton(ws.format_id(&base)),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        fs::write(repo.path().join("f.txt"), "a\nb\nc\nd\n").unwrap();
+        fs::write(repo.path().join("g.txt"), "g\n").unwrap();
+        let wc_id = |ws: &WorkspaceSession<'_>| -> Result<RevId> {
+            Ok(ws.format_id(&ws.get_commit(ws.wc_id())?))
+        };
+        let store = ws.repo().store().clone();
+        let read = |tree: MergedTree, path: &'static str| {
+            let store = store.clone();
+            async move { read_file_content(&store, &tree, RepoPath::from_internal_string(path)?).await }
+        };
+        let added_c = ChangeHunk {
+            location: ChangeLocation {
+                from_file: ChangeRange { start: 3, len: 0 },
+                to_file: ChangeRange { start: 3, len: 1 },
+            },
+            lines: MultilineString {
+                lines: vec!["+c\n".to_owned()],
+            },
+        };
+
+        // g.txt: a staging revision is made under the working copy
+        let result = StageChanges {
+            id: wc_id(&ws)?,
+            paths: vec![tree_path("g.txt")],
+            hunks: vec![],
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Updated { .. });
+        let wc = ws.get_commit(ws.wc_id())?;
+        let staging = ws.get_commit(&wc.parent_ids()[0])?;
+        assert!(staging.description().is_empty());
+        assert_eq!(staging.parent_ids(), &[base.id().clone()]);
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&staging)).await?,
+            vec!["g.txt"]
+        );
+        assert_eq!(changed_paths(&ws, ws.format_id(&wc)).await?, vec!["f.txt"]);
+
+        // `+c` of f.txt: into the same staging revision, no other is made
+        StageChanges {
+            id: wc_id(&ws)?,
+            paths: vec![],
+            hunks: vec![FileHunks {
+                path: tree_path("f.txt"),
+                hunks: vec![added_c.clone()],
+            }],
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc = ws.get_commit(ws.wc_id())?;
+        let staging = ws.get_commit(&wc.parent_ids()[0])?;
+        assert_eq!(staging.parent_ids(), &[base.id().clone()]);
+        assert_eq!(read(staging.tree(), "f.txt").await?, b"a\nb\nc\n");
+        assert_eq!(read(wc.tree(), "f.txt").await?, b"a\nb\nc\nd\n");
+
+        // `+c` unstaged, read backwards: the staging revision's line goes
+        let removed_c = ChangeHunk {
+            location: ChangeLocation {
+                from_file: ChangeRange { start: 3, len: 1 },
+                to_file: ChangeRange { start: 3, len: 0 },
+            },
+            lines: MultilineString {
+                lines: vec!["-c\n".to_owned()],
+            },
+        };
+        UnstageChanges {
+            id: wc_id(&ws)?,
+            paths: vec![],
+            hunks: vec![FileHunks {
+                path: tree_path("f.txt"),
+                hunks: vec![removed_c],
+            }],
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc = ws.get_commit(ws.wc_id())?;
+        let staging = ws.get_commit(&wc.parent_ids()[0])?;
+        assert_eq!(read(staging.tree(), "f.txt").await?, b"a\nb\n");
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&staging)).await?,
+            vec!["g.txt"]
+        );
+
+        // g.txt too: nothing is staged, and the staging revision goes
+        UnstageChanges {
+            id: wc_id(&ws)?,
+            paths: vec![tree_path("g.txt")],
+            hunks: vec![],
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc = ws.get_commit(ws.wc_id())?;
+        assert_eq!(wc.parent_ids(), &[base.id().clone()]);
+        let mut rest = changed_paths(&ws, ws.format_id(&wc)).await?;
+        rest.sort();
+        assert_eq!(rest, vec!["f.txt", "g.txt"]);
+        // the files on disk never changed
+        assert_eq!(
+            fs::read_to_string(repo.path().join("f.txt"))?,
+            "a\nb\nc\nd\n"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_commit_takes_the_staged_changes_or_else_all() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        let wc_id = |ws: &WorkspaceSession<'_>| -> Result<RevId> {
+            Ok(ws.format_id(&ws.get_commit(ws.wc_id())?))
+        };
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "base".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let base = ws.get_commit(ws.wc_id())?;
+        CreateRevision {
+            set: RevSet::singleton(ws.format_id(&base)),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        fs::write(repo.path().join("x.txt"), "x\n").unwrap();
+        fs::write(repo.path().join("y.txt"), "y\n").unwrap();
+
+        // x.txt staged and committed: the commit has it, the working copy y.txt
+        StageChanges {
+            id: wc_id(&ws)?,
+            paths: vec![tree_path("x.txt")],
+            hunks: vec![],
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        CommitChanges {
+            id: wc_id(&ws)?,
+            description: "add x".to_owned(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc = ws.get_commit(ws.wc_id())?;
+        let committed = ws.get_commit(&wc.parent_ids()[0])?;
+        assert_eq!(committed.description().trim(), "add x");
+        assert_eq!(committed.parent_ids(), &[base.id().clone()]);
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&committed)).await?,
+            vec!["x.txt"]
+        );
+        assert_eq!(changed_paths(&ws, ws.format_id(&wc)).await?, vec!["y.txt"]);
+
+        // nothing staged: the working copy is the commit, and a new one starts
+        CommitChanges {
+            id: wc_id(&ws)?,
+            description: "add y".to_owned(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc = ws.get_commit(ws.wc_id())?;
+        let committed = ws.get_commit(&wc.parent_ids()[0])?;
+        assert_eq!(committed.description().trim(), "add y");
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&committed)).await?,
+            vec!["y.txt"]
+        );
+        assert!(changed_paths(&ws, ws.format_id(&wc)).await?.is_empty());
+        assert!(wc.description().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn committing_everything_drops_an_empty_staging_revision() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "base".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let base = ws.get_commit(ws.wc_id())?;
+        // an empty undescribed revision on the base, and the working copy on it
+        for _ in 0..2 {
+            let on = ws.get_commit(ws.wc_id())?;
+            CreateRevision {
+                set: RevSet::singleton(ws.format_id(&on)),
+            }
+            .execute_unboxed(&mut ws)
+            .await?;
+        }
+        fs::write(repo.path().join("x.txt"), "x\n").unwrap();
+
+        CommitChanges {
+            id: ws.format_id(&ws.get_commit(ws.wc_id())?),
+            description: "add x".to_owned(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc = ws.get_commit(ws.wc_id())?;
+        let committed = ws.get_commit(&wc.parent_ids()[0])?;
+        assert_eq!(committed.description().trim(), "add x");
+        // straight on the base: the empty revision is gone
+        assert_eq!(committed.parent_ids(), &[base.id().clone()]);
+        assert_eq!(
+            changed_paths(&ws, ws.format_id(&committed)).await?,
+            vec!["x.txt"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nothing_is_unstaged_without_a_staging_revision() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        fs::write(repo.path().join("x.txt"), "x").unwrap();
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "described".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let described = ws.get_commit(ws.wc_id())?;
+        CreateRevision {
+            set: RevSet::singleton(ws.format_id(&described)),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        // the parent is described: it is a commit, not a staging revision
+        let result = UnstageChanges {
+            id: ws.format_id(&ws.get_commit(ws.wc_id())?),
+            paths: vec![tree_path("x.txt")],
+            hunks: vec![],
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::PreconditionError { .. });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn split_revision_refuses_files_it_does_not_change() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        fs::write(repo.path().join("x.txt"), "x content").unwrap();
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "work".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let wc_id = ws.format_id(&ws.get_commit(ws.wc_id())?);
+
+        for paths in [vec![], vec![tree_path("not-changed.txt")]] {
+            let result = SplitRevision {
+                id: wc_id.clone(),
+                paths,
+                hunks: vec![],
+                description: "nothing".to_owned(),
+            }
+            .execute_unboxed(&mut ws)
+            .await?;
+            assert_matches!(result, MutationResult::PreconditionError { .. });
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn move_changes_all_paths() -> Result<()> {

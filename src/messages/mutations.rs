@@ -166,6 +166,67 @@ pub struct MoveChanges {
     pub paths: Vec<TreePath>,
 }
 
+/// Splits a revision in two, as `jj split` does: the changes to `paths`, and
+/// the lines in `hunks`, become a new revision before it, described with
+/// `description`, and the revision keeps the rest. It keeps its change id and
+/// description, so a working copy split stays the working copy.
+#[derive(Deserialize, Debug)]
+pub struct SplitRevision {
+    pub id: RevId,
+    /// Files whose changes all go.
+    pub paths: Vec<TreePath>,
+    /// Files of which some lines go: their hunks, each with only the lines
+    /// that go changed (the rest of it as context, see [`FileHunks`]).
+    #[serde(default)]
+    pub hunks: Vec<FileHunks>,
+    pub description: String,
+}
+
+/// Stages changes of the working copy `id`, as Git stages them, in jj's
+/// terms: the changes to `paths`, and the lines in `hunks`, move into the
+/// staging revision, the undescribed mutable revision right under the
+/// working copy, made (inserted under it) when there is none. Describing the
+/// staging revision commits what is staged.
+#[derive(Deserialize, Debug)]
+pub struct StageChanges {
+    pub id: RevId,
+    pub paths: Vec<TreePath>,
+    #[serde(default)]
+    pub hunks: Vec<FileHunks>,
+}
+
+/// Unstages changes: the changes to `paths`, and the lines in `hunks`, go
+/// back from the staging revision under the working copy `id` into it.
+/// `hunks` read the staging revision's diff backwards (from its lines to its
+/// parent's, see [`FileHunks`]). A staging revision left with nothing is
+/// abandoned.
+#[derive(Deserialize, Debug)]
+pub struct UnstageChanges {
+    pub id: RevId,
+    pub paths: Vec<TreePath>,
+    #[serde(default)]
+    pub hunks: Vec<FileHunks>,
+}
+
+/// Commits under the working copy `id` with `description`: what is staged,
+/// by describing the staging revision (see [`StageChanges`]), which makes it
+/// a commit; with nothing staged, the working copy itself, as `jj commit`
+/// does: it is described and a new empty working copy starts on it.
+#[derive(Deserialize, Debug)]
+pub struct CommitChanges {
+    pub id: RevId,
+    pub description: String,
+}
+
+/// Hunks of one file against the revision's parent. A hunk may hold only
+/// some of its changes, as `git add -p` edits one: a deletion left behind is
+/// a context line there, an addition left behind is not in it.
+#[derive(Deserialize, Debug, Clone)]
+pub struct FileHunks {
+    pub path: TreePath,
+    pub hunks: Vec<ChangeHunk>,
+}
+
 /// Copies file-level changes from one revision into another.
 #[derive(Deserialize, Debug)]
 pub struct CopyChanges {
