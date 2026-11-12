@@ -455,7 +455,7 @@ impl RepoView {
     /// refs spread out from it.
     fn hover_refs(&mut self, ix: usize, list: bool, hovered: bool, cx: &mut Context<Self>) {
         if self.refs_hover.set(ix, list, hovered) {
-            cx.notify();
+            self.notify_pane(PaneId::Log, cx);
         }
     }
 
@@ -716,7 +716,8 @@ impl RepoView {
                     let view = view.read(cx);
                     (
                         author_choices(
-                            view.row_data
+                            view.log
+                                .row_data
                                 .iter()
                                 .map(|row| (&row.author, &row.author_email)),
                         ),
@@ -759,12 +760,12 @@ impl RepoView {
         if !filter.remove(email) {
             filter.insert(email.clone());
         }
-        cx.notify();
+        self.notify_pane(PaneId::Log, cx);
     }
 
     fn clear_author_filter(&mut self, cx: &mut Context<Self>) {
         self.author_filter = Rc::default();
-        cx.notify();
+        self.notify_pane(PaneId::Log, cx);
     }
 
     /// Resolved widths of the columns.
@@ -778,7 +779,7 @@ impl RepoView {
             width(shown.change, c.change),
             width(shown.author, c.author),
         );
-        let graph = c.graph.map(rems).unwrap_or_else(|| self.graph.width());
+        let graph = c.graph.map(rems).unwrap_or_else(|| self.log.graph.width());
         let compact_author = avatars_only(self.log_width.get(), refs + graph.0 + change, author);
         Columns {
             refs: rems(refs),
@@ -833,7 +834,7 @@ impl RepoView {
             Column::Change => c.change = width,
             Column::Author => c.author = width,
         }
-        cx.notify();
+        self.notify_pane(PaneId::Log, cx);
     }
 
     /// Saves the dragged widths, which every tab then uses.
@@ -861,8 +862,8 @@ impl RepoView {
 
     pub(super) fn render_log(&self, cx: &mut Context<Self>) -> AnyElement {
         let cols = self.columns(cx);
-        let rows = self.row_data.clone();
-        let graph = self.graph.clone();
+        let rows = self.log.row_data.clone();
+        let graph = self.log.graph.clone();
         let focus = self.log_focus.clone();
         let selected = self.selected;
         let avatars = self.avatars.clone();
@@ -870,7 +871,8 @@ impl RepoView {
         let owner = cx.entity().downgrade();
         let refs_open = self.refs_hover.open_row();
         let find_bar = self.find.as_ref().map(|find| self.render_find(find, cx));
-        let wants_more = self.has_more && !self.loading_more && self.more_error.is_none();
+        let wants_more =
+            self.paging.has_more && !self.paging.loading && self.paging.error.is_none();
         let more_owner = owner.clone();
         // rows to dim: those a find with text does not match, and those of
         // authors the filter leaves out

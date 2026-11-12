@@ -13,8 +13,7 @@ use gg_lib::messages::mutations::{
     AbandonRevisions, BackoutRevisions, CheckoutRevision, CopyChanges, CreateRef, CreateRevision,
     DeleteRef, DescribeRevision, DuplicateRevisions, ExternalDiff, ExternalResolve, FileHunks,
     GitFetch, GitPush, GitRefspec, MoveChanges, MoveHunk, MoveRef, MoveRevisions, MutationResult,
-    RedoOperation, RenameBookmark, SplitRevision, StageChanges, TrackBookmark, UndoOperation,
-    UnstageChanges, UntrackBookmark,
+    RedoOperation, RenameBookmark, SplitRevision, TrackBookmark, UndoOperation, UntrackBookmark,
 };
 use gg_lib::messages::{
     ChangeHunk, InputRequest, InputResponse, RevHeader, RevId, RevSet, StoreRef, TreePath,
@@ -34,7 +33,7 @@ use gpui_kit::{
 
 use super::RepoView;
 use super::model::{
-    Side, partial_hunk, reverse_partial_hunk, selected_hunk_lines, selects_every_change,
+    Side, changed_line_positions, partial_hunk, selected_hunk_lines, selects_every_change,
 };
 
 type BoxedMutation = Box<dyn Mutation + Send + Sync>;
@@ -44,7 +43,7 @@ type Retry = Rc<dyn Fn(InputResponse) -> BoxedMutation>;
 impl RepoView {
     pub(super) fn selected_header(&self) -> Option<&RevHeader> {
         self.selected
-            .and_then(|ix| self.rows.get(ix))
+            .and_then(|ix| self.log.rows.get(ix))
             .map(|row| &row.revision)
     }
 
@@ -80,11 +79,12 @@ impl RepoView {
                 if let Some(ix) = view.busy.iter().position(|busy| *busy == label) {
                     view.busy.remove(ix);
                 }
-                if std::mem::take(&mut view.commit_pending)
+                if std::mem::take(&mut view.next_commit.pending)
                     && matches!(result, Ok(MutationResult::Updated { .. }))
                 {
-                    view.commit_input
-                        .update(cx, |state, cx| state.set_value("", window, cx));
+                    view.next_commit.message.set("", window, cx);
+                    view.next_commit.included.clear();
+                    view.next_commit.lines_left_out = false;
                 }
                 match result {
                     Ok(result) => view.apply_result(&label, result, retry, window, cx),
@@ -307,16 +307,22 @@ impl RepoView {
         }
     }
 
-    /// Saves the inspector's description editor to the selected revision.
+    /// Saves the inspector's description editor to the revision it was
+    /// loaded from (not a row selected since, whose detail is on its way).
     pub(super) fn save_description(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(header) = self.selected_header() else {
-            return;
-        };
-        let id = header.id.clone();
-        let new_description = self.description_input.read(cx).value().to_string();
-        if new_description == header.description.lines.join("\n") {
+        // what Save is offered for: the text as the fields read it back
+        if !self.description_dirty(cx) {
             return;
         }
+        let Some(id) = self
+            .inspected
+            .detail
+            .as_ref()
+            .map(|detail| detail.header.id.clone())
+        else {
+            return;
+        };
+        let new_description = self.description.editor.text(cx);
         self.run_mutation(
             "Describe",
             Box::new(DescribeRevision {
@@ -339,7 +345,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(parent) = self.rows.get(target).map(|row| row.revision.id.clone()) else {
+        let Some(parent) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
             return;
         };
         if parent.commit == source.commit {
@@ -378,7 +384,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(to_id) = self.rows.get(target).map(|row| row.revision.id.clone()) else {
+        let Some(to_id) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
             return;
         };
         let name = match &r#ref {
@@ -399,60 +405,69 @@ impl RepoView {
 
     /// The revision shown in the inspector and its first parent.
     fn detail_ids(&self) -> Option<(RevId, RevId)> {
-        let detail = self.detail.as_ref()?;
+        let detail = self.inspected.detail.as_ref()?;
         let parent = detail.parent_ids.first()?.clone();
         Some((detail.header.id.clone(), parent))
     }
 
     fn selected_file_path(&self) -> Option<TreePath> {
-        let detail = self.detail.as_ref()?;
+        let detail = self.inspected.detail.as_ref()?;
         detail
             .files
-            .get(self.selected_file?)
+            .get(self.inspected.file?)
             .map(|file| file.tree_path.clone())
     }
 
     /// A click on file `ix` in the inspector: ⌘ adds it to the picked files
     /// or takes it out, ⇧ picks the files from the selected one to it, a
-    /// plain click picks none. The diff shows the file clicked.
+    /// plain click picks none. In the working copy, whose files have boxes
+    /// for the next commit (which Split off also takes), ⌘ and ⇧ tick the
+    /// boxes instead. The diff shows the file clicked.
     pub(super) fn click_file(
         &mut self,
         ix: usize,
         modifiers: gpui_kit::Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let Some(files) = self.detail.as_ref().map(|detail| &detail.files) else {
+        if self.commit_mode() && (modifiers.secondary(cx) || modifiers.shift) {
+            self.include_clicked(ix, modifiers.shift, cx);
+            self.select_file(Some(ix), cx);
+            return;
+        }
+        let Some(files) = self.inspected.detail.as_ref().map(|detail| &detail.files) else {
             return;
         };
         let path = |ix: usize| files.get(ix).map(|file| file.path.clone());
         if modifiers.secondary(cx) {
             // the file shown so far is picked with the first one added
-            if self.marked_files.is_empty()
+            if self.inspected.marked.is_empty()
                 && let Some(shown) = self
-                    .selected_file
+                    .inspected
+                    .file
                     .filter(|shown| *shown != ix)
                     .and_then(path)
             {
-                self.marked_files.push(shown);
+                self.inspected.marked.push(shown);
             }
             if let Some(clicked) = path(ix) {
                 match self
-                    .marked_files
+                    .inspected
+                    .marked
                     .iter()
                     .position(|marked| *marked == clicked)
                 {
                     Some(at) => {
-                        self.marked_files.remove(at);
+                        self.inspected.marked.remove(at);
                     }
-                    None => self.marked_files.push(clicked),
+                    None => self.inspected.marked.push(clicked),
                 }
             }
         } else if modifiers.shift {
-            let anchor = self.selected_file.unwrap_or(ix);
+            let anchor = self.inspected.file.unwrap_or(ix);
             let (start, end) = (anchor.min(ix), anchor.max(ix));
-            self.marked_files = (start..=end).filter_map(path).collect();
+            self.inspected.marked = (start..=end).filter_map(path).collect();
         } else {
-            self.marked_files.clear();
+            self.inspected.marked.clear();
         }
         self.select_file(Some(ix), cx);
     }
@@ -460,18 +475,31 @@ impl RepoView {
     /// The files Split takes: the picked ones in the list's order, else the
     /// selected one.
     fn split_paths(&self) -> Vec<TreePath> {
-        let Some(detail) = self.detail.as_ref() else {
+        let Some(detail) = self.inspected.detail.as_ref() else {
             return Vec::new();
         };
-        if self.marked_files.is_empty() {
+        if self.inspected.marked.is_empty() {
             return self.selected_file_path().into_iter().collect();
         }
         detail
             .files
             .iter()
-            .filter(|file| self.marked_files.contains(&file.path))
+            .filter(|file| self.inspected.marked.contains(&file.path))
             .map(|file| file.tree_path.clone())
             .collect()
+    }
+
+    /// The description of revision `id`, the one inspected or the one the
+    /// file's full view shows, as its editor would start.
+    fn description_of(&self, id: &RevId) -> String {
+        let inspected = self.inspected.detail.as_ref().map(|detail| &detail.header);
+        let shown = self.center.file().map(|focus| &focus.rev);
+        [inspected, shown]
+            .into_iter()
+            .flatten()
+            .find(|header| header.id.commit.hex == id.commit.hex)
+            .map(|header| header.description.lines.join("\n").trim().to_owned())
+            .unwrap_or_default()
     }
 
     /// Asks for a description, then moves the picked files' changes into a
@@ -492,10 +520,11 @@ impl RepoView {
         self.prompt_text(
             format!("Split {what} into a new commit"),
             "Description",
-            String::new(),
+            // as `jj split` offers it: the revision's own description
+            self.description_of(&id),
             "Split",
             move |view, description, window, cx| {
-                view.marked_files.clear();
+                view.inspected.marked.clear();
                 view.run_mutation(
                     format!("Split {what}"),
                     Box::new(SplitRevision {
@@ -550,7 +579,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(to) = self.rows.get(target).map(|row| row.revision.id.clone()) else {
+        let Some(to) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
             return;
         };
         if to.commit == from.commit {
@@ -635,23 +664,8 @@ impl RepoView {
         if self.center.file().is_some() {
             return self.focus_shown_file();
         }
-        if let Some(staged) = self
-            .staged_file
-            .and_then(|ix| self.staged.as_ref()?.files.get(ix))
-        {
-            let staging = self.staged.as_ref()?;
-            return Some(ShownFile {
-                id: staging.header.id.clone(),
-                parent: staging.parent_ids.first().cloned(),
-                immutable: staging.header.is_immutable,
-                path: staged.tree_path.clone(),
-                diff_path: staged.path.clone(),
-                hunks: &staged.hunks,
-                staged: true,
-            });
-        }
-        let detail = self.detail.as_ref()?;
-        let file = detail.files.get(self.selected_file?)?;
+        let detail = self.inspected.detail.as_ref()?;
+        let file = detail.files.get(self.inspected.file?)?;
         Some(ShownFile {
             id: detail.header.id.clone(),
             parent: detail.parent_ids.first().cloned(),
@@ -659,7 +673,6 @@ impl RepoView {
             path: file.tree_path.clone(),
             diff_path: file.path.clone(),
             hunks: &file.hunks,
-            staged: false,
         })
     }
 
@@ -667,7 +680,7 @@ impl RepoView {
     pub(super) fn selected_lines(&self) -> Option<LineSelection> {
         let range = match self.center.file() {
             Some(focus) => focus.selection.as_ref()?,
-            None => self.diff_selection.as_ref()?,
+            None => self.line_selection.as_ref()?,
         };
         let file = self.shown_diff_file()?;
         if range.path().as_ref() != file.diff_path.as_ref() {
@@ -679,12 +692,17 @@ impl RepoView {
         )
     }
 
-    /// Forgets the line selection of both diffs, after a mutation took it.
-    pub(super) fn clear_line_selection(&mut self) {
-        self.diff_selection = None;
-        self.keep_line_selection = false;
+    /// Forgets the line selection of both diffs, and its highlight, after a
+    /// command took it.
+    pub(super) fn clear_line_selection(&mut self, cx: &mut Context<Self>) {
+        self.line_selection = None;
+        self.diff
+            .update(cx, |diff, cx| diff.set_selected_lines(None, cx));
         if let Some(focus) = self.center.file_mut() {
             focus.selection = None;
+            focus
+                .diff
+                .update(cx, |diff, cx| diff.set_selected_lines(None, cx));
         }
     }
 
@@ -697,7 +715,7 @@ impl RepoView {
     }
 
     /// Moves one changed line, `line` on `side` of the diff on screen, into
-    /// the parent revision: the line's + in the diff, jj's way of staging it.
+    /// the parent revision: the line's + in the diff outside the working copy.
     pub(super) fn squash_line(
         &mut self,
         side: Side,
@@ -713,191 +731,216 @@ impl RepoView {
         }
     }
 
-    // ----- staging ----------------------------------------------------------------------------
+    // ----- the next commit's changes ---------------------------------------------------------
 
-    /// Stages changes of the working copy inspected: `paths` whole, and the
-    /// lines of `hunks`.
-    pub(super) fn stage(
-        &mut self,
-        what: String,
-        paths: Vec<TreePath>,
-        hunks: Vec<FileHunks>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(id) = self.detail.as_ref().map(|detail| detail.header.id.clone()) else {
+    /// ⌘-click (`range` false) or ⇧-click (`range`: every file from the
+    /// selected one to `ix`) in the working copy: the files' boxes ticked, or
+    /// cleared when file `ix` was in already, as its box would be.
+    fn include_clicked(&mut self, ix: usize, range: bool, cx: &mut Context<Self>) {
+        let Some(files) = self.inspected.detail.as_ref().map(|detail| &detail.files) else {
             return;
         };
-        self.clear_line_selection();
-        self.run_mutation(
-            format!("Stage {what}"),
-            Box::new(StageChanges { id, paths, hunks }),
-            None,
-            window,
-            cx,
-        );
+        let Some(clicked) = files.get(ix) else {
+            return;
+        };
+        let included = &mut self.next_commit.included;
+        let tick = included.file(&clicked.tree_path.repo_path, &clicked.hunks)
+            != super::included::Inclusion::All;
+        let anchor = if range {
+            self.inspected
+                .file
+                .filter(|&at| at < files.len())
+                .unwrap_or(ix)
+        } else {
+            ix
+        };
+        for file in &files[anchor.min(ix)..=anchor.max(ix)] {
+            included.set_file(&file.tree_path.repo_path, tick);
+        }
+        self.next_commit.lines_left_out = false;
+        cx.notify();
     }
 
-    /// Unstages changes back into the working copy inspected: `paths` whole,
-    /// and `hunks` of the staging revision read backwards.
-    fn unstage(
-        &mut self,
-        what: String,
-        paths: Vec<TreePath>,
-        hunks: Vec<FileHunks>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(id) = self.detail.as_ref().map(|detail| detail.header.id.clone()) else {
-            return;
-        };
-        self.clear_line_selection();
-        self.run_mutation(
-            format!("Unstage {what}"),
-            Box::new(UnstageChanges { id, paths, hunks }),
-            None,
-            window,
-            cx,
-        );
-    }
-
-    pub(super) fn stage_file(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(file) = self.detail.as_ref().and_then(|detail| detail.files.get(ix)) else {
-            return;
-        };
-        let (what, path) = (file.tree_path.repo_path.clone(), file.tree_path.clone());
-        self.stage(what, vec![path], Vec::new(), window, cx);
-    }
-
-    pub(super) fn stage_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(detail) = self.detail.as_ref() else {
-            return;
-        };
-        let paths: Vec<TreePath> = detail
-            .files
-            .iter()
-            .map(|file| file.tree_path.clone())
-            .collect();
-        if paths.is_empty() {
+    /// Includes every change of the working copy in the next commit, or none.
+    pub(super) fn include_all(&mut self, included: bool, cx: &mut Context<Self>) {
+        if !self.commit_mode() {
             return;
         }
-        self.stage(
-            format!("{} files", paths.len()),
-            paths,
-            Vec::new(),
-            window,
-            cx,
-        );
-    }
-
-    pub(super) fn unstage_file(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(file) = self.staged.as_ref().and_then(|staged| staged.files.get(ix)) else {
+        let Some(detail) = self.inspected.detail.as_ref() else {
             return;
         };
-        let (what, path) = (file.tree_path.repo_path.clone(), file.tree_path.clone());
-        self.unstage(what, vec![path], Vec::new(), window, cx);
+        self.next_commit.included.set_all(&detail.files, included);
+        self.next_commit.lines_left_out = false;
+        cx.notify();
     }
 
-    pub(super) fn unstage_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(staged) = self.staged.as_ref() else {
-            return;
-        };
-        let paths: Vec<TreePath> = staged
-            .files
-            .iter()
-            .map(|file| file.tree_path.clone())
-            .collect();
-        if paths.is_empty() {
+    /// Includes the working copy's file `ix` whole in the next commit, or
+    /// leaves it out.
+    pub(super) fn include_file(&mut self, ix: usize, included: bool, cx: &mut Context<Self>) {
+        if !self.commit_mode() {
             return;
         }
-        self.unstage(
-            format!("{} files", paths.len()),
-            paths,
-            Vec::new(),
-            window,
-            cx,
-        );
+        let Some(file) = self
+            .inspected
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.files.get(ix))
+        else {
+            return;
+        };
+        let path = file.tree_path.repo_path.clone();
+        self.next_commit.included.set_file(&path, included);
+        self.next_commit.lines_left_out = false;
+        cx.notify();
     }
 
-    /// Stages (or, in a staged file, unstages) the changes between `start`
-    /// and `end` of the diff on screen: a line's + or −, or the lines
-    /// dragged over.
-    pub(super) fn stage_lines(
+    /// Whether the diff on screen is the working copy's, whose lines the next
+    /// commit includes. By change id: a snapshot makes the working copy
+    /// another commit, and a diff read before it still is the working copy's
+    /// (lines whose text changed do not count, see `included`).
+    pub(super) fn includes_lines(&self, file: &ShownFile) -> bool {
+        self.commit_mode()
+            && self
+                .inspected
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.header.id.change.hex == file.id.change.hex)
+    }
+
+    /// Includes the changed lines between `start` and `end` of the diff on
+    /// screen (a line's box, or the lines dragged over) in the next commit,
+    /// or leaves them out when every one of them is in.
+    pub(super) fn toggle_lines(
         &mut self,
         start: (Side, usize),
         end: (Side, usize),
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(file) = self.shown_diff_file() else {
+        let Some(file) = self
+            .shown_diff_file()
+            .filter(|file| self.includes_lines(file))
+        else {
             return;
         };
-        let path = file.path.clone();
-        if file.staged {
-            let Some((hunks, every)) = file.reversed_lines(start, end) else {
-                return;
-            };
-            let what = format!("{} of {}", changed_lines(&hunks), path.repo_path);
-            let (paths, hunks) = file_changes(path, hunks, every);
-            self.unstage(what, paths, hunks, window, cx);
-        } else {
-            let Some(selection) = file.lines(start, end) else {
-                return;
-            };
-            let what = format!("{} of {}", changed_lines(&selection.hunks), path.repo_path);
-            let (paths, hunks) = file_changes(path, selection.hunks, selection.every);
-            self.stage(what, paths, hunks, window, cx);
+        let keys = file.changed_lines_between(start, end);
+        if keys.is_empty() {
+            return;
         }
+        let (path, hunks) = (file.path.repo_path.clone(), file.hunks.to_vec());
+        let included = &mut self.next_commit.included;
+        let every = keys.iter().all(|&key| included.line(&path, key));
+        included.set_lines(&path, &hunks, &keys, !every);
+        self.next_commit.lines_left_out = false;
+        cx.notify();
     }
 
-    /// The lines dragged over in the diff on screen, staged or unstaged.
-    pub(super) fn stage_selected_lines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The lines dragged over in the diff on screen, included or left out.
+    pub(super) fn toggle_selected_lines(&mut self, cx: &mut Context<Self>) {
         let range = match self.center.file() {
             Some(focus) => focus.selection.clone(),
-            None => self.diff_selection.clone(),
+            None => self.line_selection.clone(),
         };
         if let Some(range) = range {
-            self.stage_lines(
+            self.toggle_lines(
                 (side_of(range.side()), range.start()),
                 (side_of(range.end_side()), range.end()),
-                window,
                 cx,
             );
+            self.clear_line_selection(cx);
         }
     }
 
-    /// Commits with the message typed: what is staged, or, with nothing
-    /// staged, the working copy (see `CommitChanges`).
-    pub(super) fn commit_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let message = self.commit_input.read(cx).value().trim().to_owned();
-        if message.is_empty() || !self.staging_mode() {
+    /// Whether every changed line dragged over in the diff on screen is in
+    /// the next commit, so their button leaves them out.
+    pub(super) fn selected_lines_included(&self) -> bool {
+        let range = match self.center.file() {
+            Some(focus) => focus.selection.as_ref(),
+            None => self.line_selection.as_ref(),
+        };
+        let (Some(range), Some(file)) = (range, self.shown_diff_file()) else {
+            return false;
+        };
+        let keys = file.changed_lines_between(
+            (side_of(range.side()), range.start()),
+            (side_of(range.end_side()), range.end()),
+        );
+        !keys.is_empty()
+            && keys
+                .iter()
+                .all(|&key| self.next_commit.included.line(&file.path.repo_path, key))
+    }
+
+    /// Splits the changes included off the working copy with the message
+    /// typed, as `jj split` does: the working copy keeps the rest, its
+    /// description and its bookmarks (see `SplitRevision`).
+    pub(super) fn split_included(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let message = self.next_commit.message.text(cx);
+        if message.is_empty() || !self.commit_mode() || self.blocked_by_pick(window, cx) {
             return;
         }
-        let Some(id) = self.detail.as_ref().map(|detail| detail.header.id.clone()) else {
+        let Some(detail) = self.inspected.detail.as_ref() else {
             return;
         };
-        let staged = self
-            .staged
-            .as_ref()
-            .is_some_and(|staged| !staged.files.is_empty());
-        let changed = self
-            .detail
-            .as_ref()
-            .is_some_and(|detail| !detail.files.is_empty());
-        if (!staged && !changed) || self.blocked_by_pick(window, cx) {
+        let included = &self.next_commit.included;
+        let (paths, hunks) = included.changes(&detail.files);
+        if paths.is_empty() && hunks.is_empty() {
             return;
         }
-        // the message is cleared once the commit is made, kept if it fails
-        self.commit_pending = true;
+        let id = detail.header.id.clone();
+        let label = format!("Split off {}", included.summary(&detail.files));
+        // the message and what is included go once the split is made
+        self.next_commit.pending = true;
         self.run_mutation(
-            if staged {
-                "Commit staged changes"
-            } else {
-                "Commit all changes"
-            },
+            label,
+            Box::new(SplitRevision {
+                id,
+                paths,
+                hunks,
+                description: message,
+            }),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Commits the working copy with the message typed: the changes
+    /// included, or every one when none is (see `CommitChanges`).
+    pub(super) fn commit_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let message = self.next_commit.message.text(cx);
+        if message.is_empty() || !self.commit_mode() {
+            return;
+        }
+        let Some(detail) = self.inspected.detail.as_ref() else {
+            return;
+        };
+        if detail.files.is_empty() || self.blocked_by_pick(window, cx) {
+            return;
+        }
+        let id = detail.header.id.clone();
+        let included = &self.next_commit.included;
+        let (paths, hunks) = included.changes(&detail.files);
+        let label = if included.is_empty() {
+            "Commit all changes".to_owned()
+        } else if paths.is_empty() && hunks.is_empty() {
+            // never every change for some, whatever made them nothing
+            window.push_notification(
+                Notification::error(super::included::NOTHING_LEFT).title("Commit"),
+                cx,
+            );
+            return;
+        } else {
+            format!("Commit {}", included.summary(&detail.files))
+        };
+        // the message is cleared once the commit is made, kept if it fails
+        self.next_commit.pending = true;
+        self.run_mutation(
+            label,
             Box::new(gg_lib::messages::mutations::CommitChanges {
                 id,
                 description: message,
+                paths,
+                hunks,
             }),
             None,
             window,
@@ -939,7 +982,7 @@ impl RepoView {
             changed_lines(std::slice::from_ref(&hunk)),
             path.repo_path
         );
-        self.clear_line_selection();
+        self.clear_line_selection(cx);
         self.run_mutation(
             label,
             Box::new(MoveHunk {
@@ -976,10 +1019,11 @@ impl RepoView {
         self.prompt_text(
             format!("Split {what} into a new commit"),
             "Description",
-            String::new(),
+            // as `jj split` offers it: the revision's own description
+            self.description_of(&id),
             "Split",
             move |view, description, window, cx| {
-                view.clear_line_selection();
+                view.clear_line_selection(cx);
                 view.run_mutation(
                     format!("Split {what}"),
                     Box::new(SplitRevision {
@@ -1544,8 +1588,6 @@ pub(super) struct ShownFile<'a> {
     /// The file's path in the diff, which its line positions carry.
     pub(super) diff_path: SharedString,
     pub(super) hunks: &'a [ChangeHunk],
-    /// A file of the staging revision, shown as staged.
-    pub(super) staged: bool,
 }
 
 impl ShownFile<'_> {
@@ -1570,23 +1612,28 @@ impl ShownFile<'_> {
         })
     }
 
-    /// The changes between `start` and `end` read backwards (see
-    /// [`reverse_partial_hunk`]), to unstage them, and whether they are all
-    /// of the file's.
-    pub(super) fn reversed_lines(
+    /// The changed lines between `start` and `end`, as the diff highlights
+    /// them: each by its side and number (see `included::LineKey`).
+    pub(super) fn changed_lines_between(
         &self,
         start: (Side, usize),
         end: (Side, usize),
-    ) -> Option<(Vec<ChangeHunk>, bool)> {
-        let picked = selected_hunk_lines(self.hunks, start, end);
-        let every = selects_every_change(self.hunks, &picked);
-        let hunks: Vec<ChangeHunk> = self
-            .hunks
-            .iter()
-            .zip(&picked)
-            .filter_map(|(hunk, picked)| reverse_partial_hunk(hunk, picked))
-            .collect();
-        (!hunks.is_empty()).then_some((hunks, every))
+    ) -> Vec<(Side, usize)> {
+        let flags = selected_hunk_lines(self.hunks, start, end);
+        // the flags of the changed lines, in the order their positions come
+        let changed = self.hunks.iter().zip(&flags).flat_map(|(hunk, flags)| {
+            hunk.lines
+                .lines
+                .iter()
+                .zip(flags)
+                .filter(|(line, _)| matches!(line.as_bytes().first(), Some(b'-' | b'+')))
+                .map(|(_, &on)| on)
+        });
+        changed_line_positions(self.hunks)
+            .into_iter()
+            .zip(changed)
+            .filter_map(|(position, on)| on.then_some(position))
+            .collect()
     }
 }
 

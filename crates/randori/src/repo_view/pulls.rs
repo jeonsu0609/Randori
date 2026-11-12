@@ -173,7 +173,7 @@ impl RepoView {
             return;
         };
         let mut commits: Vec<(String, String)> = Vec::new();
-        for row in &self.rows {
+        for row in &self.log.rows {
             let email = row.revision.author.email.to_ascii_lowercase();
             if email.is_empty()
                 || self.avatars.contains_key(email.as_str())
@@ -283,6 +283,7 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         if let Some(row) = self
+            .log
             .rows
             .iter()
             .position(|row| row.revision.id.commit.hex == oid)
@@ -309,7 +310,7 @@ impl RepoView {
         let pulls = self.pulls.as_ref()?;
         let selected_commit = self
             .selected
-            .and_then(|ix| self.rows.get(ix))
+            .and_then(|ix| self.log.rows.get(ix))
             .map(|row| row.revision.id.commit.hex.clone());
         let filtering = !needle.is_empty();
         let shown = |pr: &&PullRequest| {

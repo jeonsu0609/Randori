@@ -189,6 +189,7 @@ impl RepoView {
             LoadState::Ready => (theme.success, "Ready"),
         };
         let working_copy = self
+            .log
             .rows
             .iter()
             .find(|row| is_this_working_copy(&row.revision))
@@ -251,31 +252,33 @@ impl RepoView {
                     })
                     .child(format!(
                         "{} revisions{}",
-                        self.rows.len(),
-                        if self.has_more { "+" } else { "" }
+                        self.log.rows.len(),
+                        if self.paging.has_more { "+" } else { "" }
                     ))
-                    .when(self.has_more, |this| match self.more_error.clone() {
-                        // the next page failed: the log loads again, its pages too
-                        Some(error) => this.child(
-                            Button::new("load-more")
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::TriangleAlert)
-                                .label("Retry")
-                                .tooltip(format!("The next revisions did not load: {error}"))
-                                .on_click(cx.listener(|view, _, _, cx| view.reload(cx))),
-                        ),
-                        None => this.child(
-                            Button::new("load-more")
-                                .ghost()
-                                .xsmall()
-                                .label(if self.loading_more {
-                                    "Loading…"
-                                } else {
-                                    "Load more"
-                                })
-                                .on_click(cx.listener(|view, _, _, cx| view.load_more(cx))),
-                        ),
+                    .when(self.paging.has_more, |this| {
+                        match self.paging.error.clone() {
+                            // the next page failed: the log loads again, its pages too
+                            Some(error) => this.child(
+                                Button::new("load-more")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::TriangleAlert)
+                                    .label("Retry")
+                                    .tooltip(format!("The next revisions did not load: {error}"))
+                                    .on_click(cx.listener(|view, _, _, cx| view.reload(cx))),
+                            ),
+                            None => this.child(
+                                Button::new("load-more")
+                                    .ghost()
+                                    .xsmall()
+                                    .label(if self.paging.loading {
+                                        "Loading…"
+                                    } else {
+                                        "Load more"
+                                    })
+                                    .on_click(cx.listener(|view, _, _, cx| view.load_more(cx))),
+                            ),
+                        }
                     }),
             )
     }

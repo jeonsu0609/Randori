@@ -117,21 +117,6 @@ pub(super) fn is_this_working_copy(rev: &RevHeader) -> bool {
     rev.is_working_copy && rev.working_copy_of.is_none()
 }
 
-/// Whether `detail` is a staging revision: undescribed, mutable and no
-/// workspace's working copy (see
-/// `StageChanges`; the worker checks it again when it stages).
-pub(super) fn is_staging_revision(detail: &Detail) -> bool {
-    // GG marks every workspace's working copy: none is staged into
-    !detail.header.is_immutable
-        && !detail.header.is_working_copy
-        && detail
-            .header
-            .description
-            .lines
-            .iter()
-            .all(|line| line.trim().is_empty())
-}
-
 /// The side panel's refs and workspaces from `headers` (the revisions with
 /// any), in the panel's order, not placed in the log yet (see
 /// [`place_panel_items`]). Unlike the log's chips, a remote bookmark in sync
@@ -546,7 +531,7 @@ pub(super) fn mark_current_ref(data: &mut [RowData], current: Option<(usize, &st
 }
 
 /// A side of a diff, for one end of a line selection.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(super) enum Side {
     Original,
     Modified,
@@ -630,27 +615,35 @@ pub(super) fn selected_hunk_lines(
 /// Where each changed line of `hunks` is in the diff: an added line by its
 /// number on the modified side, a removed one on the original side.
 pub(super) fn changed_line_positions(hunks: &[ChangeHunk]) -> Vec<(Side, usize)> {
-    let mut positions = Vec::new();
-    for hunk in hunks {
+    changed_lines(hunks).map(|(position, _)| position).collect()
+}
+
+/// Each changed line of `hunks` in patch order: where it is (see
+/// [`changed_line_positions`]) and its patch line (`+text\n`).
+pub(super) fn changed_lines(
+    hunks: &[ChangeHunk],
+) -> impl Iterator<Item = ((Side, usize), &String)> {
+    hunks.iter().flat_map(|hunk| {
         let (mut old, mut new) = (hunk.location.from_file.start, hunk.location.to_file.start);
-        for line in &hunk.lines.lines {
-            match line.as_bytes().first() {
+        hunk.lines
+            .lines
+            .iter()
+            .filter_map(move |line| match line.as_bytes().first() {
                 Some(b'-') => {
-                    positions.push((Side::Original, old));
                     old += 1;
+                    Some(((Side::Original, old - 1), line))
                 }
                 Some(b'+') => {
-                    positions.push((Side::Modified, new));
                     new += 1;
+                    Some(((Side::Modified, new - 1), line))
                 }
                 _ => {
                     old += 1;
                     new += 1;
+                    None
                 }
-            }
-        }
-    }
-    positions
+            })
+    })
 }
 
 /// `hunk` with only its `selected` changes, as `git add -p` edits a hunk: a
@@ -680,54 +673,6 @@ pub(super) fn partial_hunk(hunk: &ChangeHunk, selected: &[bool]) -> Option<Chang
             to_file: ChangeRange {
                 start: hunk.location.to_file.start,
                 len: to_len,
-            },
-        },
-        lines: MultilineString { lines },
-    })
-}
-
-/// `hunk` read backwards with only its `selected` changes: applied to the
-/// revision's lines (its new side), it undoes those changes and keeps the
-/// rest, as unstaging lines needs. A selected addition is removed, a
-/// selected removal restored; an addition left alone is context, and a
-/// removal left alone is not in the revision. `None` when no selected line
-/// changes anything.
-pub(super) fn reverse_partial_hunk(hunk: &ChangeHunk, selected: &[bool]) -> Option<ChangeHunk> {
-    let mut lines = Vec::with_capacity(hunk.lines.lines.len());
-    let mut changes = false;
-    for (line, &picked) in hunk.lines.lines.iter().zip(selected) {
-        match line.as_bytes().first() {
-            Some(b'+') if picked => {
-                changes = true;
-                lines.push(format!("-{}", &line[1..]));
-            }
-            Some(b'-') if picked => {
-                changes = true;
-                lines.push(format!("+{}", &line[1..]));
-            }
-            Some(b'+') => lines.push(format!(" {}", &line[1..])),
-            Some(b'-') => {}
-            _ => lines.push(line.clone()),
-        }
-    }
-    if !changes {
-        return None;
-    }
-    let count = |side: u8| {
-        lines
-            .iter()
-            .filter(|line| line.as_bytes().first() != Some(&side))
-            .count()
-    };
-    Some(ChangeHunk {
-        location: ChangeLocation {
-            from_file: ChangeRange {
-                start: hunk.location.to_file.start,
-                len: count(b'+'),
-            },
-            to_file: ChangeRange {
-                start: hunk.location.to_file.start,
-                len: count(b'-'),
             },
         },
         lines: MultilineString { lines },
@@ -868,8 +813,8 @@ pub(super) fn mark_bucket_starts(rows: &mut [RowData]) {
 pub(super) mod tests {
     use super::{
         RefsHover, RevHeader, Side, StoreRef, changed_line_positions, is_this_working_copy,
-        nearest_in, panel_items, partial_hunk, ref_chips, reverse_partial_hunk,
-        selected_hunk_lines, selects_every_change, time_bucket, unified_start,
+        nearest_in, panel_items, partial_hunk, ref_chips, selected_hunk_lines,
+        selects_every_change, time_bucket, unified_start,
     };
     use gg_lib::messages::ChangeHunk;
     use gg_lib::messages::{ChangeLocation, ChangeRange, MultilineString};
@@ -915,22 +860,6 @@ pub(super) mod tests {
             flags((Side::Modified, 10), (Side::Original, 11)),
             [false, true, true, false, false]
         );
-    }
-
-    #[test]
-    fn a_reversed_hunk_undoes_the_selected_changes() {
-        // the revision has `A`, `B` and `c` where its parent had `a`, `b`, `c`
-        let full = hunk((10, 3), (10, 3), &["-a", "-b", "+A", "+B", " c"]);
-        // `-b` and `+A` undone: `b` back, `A` gone; `B` stays, `a` was never there
-        let back =
-            reverse_partial_hunk(&full, &[false, true, true, false, false]).expect("changes");
-        assert_eq!(back.lines.lines, ["+b\n", "-A\n", " B\n", " c\n"]);
-        assert_eq!(
-            (back.location.from_file.start, back.location.from_file.len),
-            (10, 3)
-        );
-        assert_eq!(back.location.to_file.len, 3);
-        assert!(reverse_partial_hunk(&full, &[false, false, false, false, true]).is_none());
     }
 
     #[test]

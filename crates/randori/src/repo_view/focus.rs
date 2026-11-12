@@ -76,10 +76,10 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(detail) = self.detail.as_ref() else {
+        let Some(detail) = self.inspected.detail.as_ref() else {
             return;
         };
-        let Some(file) = self.selected_file.and_then(|ix| detail.files.get(ix)) else {
+        let Some(file) = self.inspected.file.and_then(|ix| detail.files.get(ix)) else {
             return;
         };
         let rev = detail.header.clone();
@@ -92,12 +92,7 @@ impl RepoView {
             };
             match event {
                 DiffEvent::SelectionEnded(range) => focus.selection = Some(range.clone()),
-                // kept for the line buttons, as the inspector's diff does
-                DiffEvent::SelectionChanged(None) => {
-                    if !std::mem::take(&mut view.keep_line_selection) {
-                        focus.selection = None;
-                    }
-                }
+                DiffEvent::SelectionChanged(None) => focus.selection = None,
                 _ => return,
             }
             cx.notify();
@@ -146,10 +141,11 @@ impl RepoView {
     /// Shows the file selected in the inspector, in the selected revision,
     /// keeping the tab and whether the history is open.
     pub(super) fn retarget_focus(&mut self, cx: &mut Context<Self>) {
-        let (Some(focus), Some(detail)) = (self.center.file_mut(), self.detail.as_ref()) else {
+        let (Some(focus), Some(detail)) = (self.center.file_mut(), self.inspected.detail.as_ref())
+        else {
             return;
         };
-        let Some(file) = self.selected_file.and_then(|ix| detail.files.get(ix)) else {
+        let Some(file) = self.inspected.file.and_then(|ix| detail.files.get(ix)) else {
             return;
         };
         if focus.path.repo_path == file.tree_path.repo_path
@@ -225,6 +221,7 @@ impl RepoView {
         let change = focus.rev.id.change.hex.clone();
         let commit = focus.rev.id.commit.hex.clone();
         let Some(row) = self
+            .log
             .rows
             .iter()
             .find(|row| row.revision.id.change.hex == change)
@@ -426,25 +423,22 @@ impl RepoView {
         );
     }
 
-    /// Stages hunk `ix` of the working copy's file shown.
-    fn stage_focus_hunk(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Includes hunk `ix` of the working copy's file shown in the next
+    /// commit, or leaves it out when every line of it is in.
+    fn toggle_focus_hunk(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(focus) = self.center.file() else {
             return;
         };
-        let Some(hunk) = focus.hunks.get(ix).cloned() else {
+        let Some(hunk) = focus.hunks.get(ix) else {
             return;
         };
-        let path = focus.path.clone();
-        self.stage(
-            format!("a hunk of {}", path.repo_path),
-            Vec::new(),
-            vec![gg_lib::messages::mutations::FileHunks {
-                path,
-                hunks: vec![hunk],
-            }],
-            window,
-            cx,
-        );
+        let keys = super::model::changed_line_positions(std::slice::from_ref(hunk));
+        let (path, hunks) = (focus.path.repo_path.clone(), focus.hunks.clone());
+        let included = &mut self.next_commit.included;
+        let every = keys.iter().all(|&key| included.line(&path, key));
+        included.set_lines(&path, &hunks, &keys, !every);
+        self.next_commit.lines_left_out = false;
+        cx.notify();
     }
 
     /// Moves hunk `ix` of the shown revision into its parent.
@@ -476,7 +470,6 @@ impl RepoView {
             path: focus.path.clone(),
             diff_path: focus.path.repo_path.clone().into(),
             hunks: &focus.hunks,
-            staged: false,
         })
     }
 
@@ -720,11 +713,15 @@ impl RepoView {
 
     /// The next or previous changed file of the selected revision.
     fn focus_file(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = self.detail.as_ref().map_or(0, |detail| detail.files.len());
+        let count = self
+            .inspected
+            .detail
+            .as_ref()
+            .map_or(0, |detail| detail.files.len());
         if count == 0 {
             return;
         }
-        let current = self.selected_file.unwrap_or(0) as isize;
+        let current = self.inspected.file.unwrap_or(0) as isize;
         let next = (current + delta).clamp(0, count as isize - 1) as usize;
         self.select_file(Some(next), cx);
         self.retarget_focus(cx);
@@ -774,10 +771,24 @@ impl RepoView {
         let mut styled = split::styled_diff(&focus.diff, cx)
             .line_number(true)
             .header_visible(false);
-        // in the working copy a hunk is staged, as its lines are
-        let mut stage = false;
+        // in the working copy a hunk is included in the next commit, as
+        // its lines are: each hunk's whether it is all in
+        let mut hunk_in: Option<Vec<bool>> = None;
         if let Some(file) = self.focus_shown_file() {
-            stage = self.line_command(&file) == Some(super::inspector::LineCommand::Stage);
+            if self.includes_lines(&file) {
+                let included = &self.next_commit.included;
+                hunk_in = Some(
+                    focus
+                        .hunks
+                        .iter()
+                        .map(|hunk| {
+                            super::model::changed_line_positions(std::slice::from_ref(hunk))
+                                .iter()
+                                .all(|&key| included.line(&focus.path.repo_path, key))
+                        })
+                        .collect(),
+                );
+            }
             styled = self.with_line_buttons(styled, &file, cx);
         }
         let diff = styled
@@ -796,15 +807,25 @@ impl RepoView {
                     .gap_1()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(if stage {
-                        Button::new(("hunk-stage", ix))
+                    .child(if let Some(hunk_in) = &hunk_in {
+                        let all_in = hunk_in.get(ix).copied().unwrap_or(false);
+                        Button::new(("hunk-include", ix))
                             .ghost()
                             .xsmall()
-                            .icon(IconName::Plus)
-                            .label("Stage hunk")
-                            .on_click(move |_, window, cx| {
-                                let _ = squash
-                                    .update(cx, |view, cx| view.stage_focus_hunk(ix, window, cx));
+                            .icon(if all_in {
+                                IconName::Minus
+                            } else {
+                                IconName::Plus
+                            })
+                            .label(if all_in {
+                                "Leave hunk out"
+                            } else {
+                                "Include hunk"
+                            })
+                            .tooltip("In the next commit, or out of it")
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    squash.update(cx, |view, cx| view.toggle_focus_hunk(ix, cx));
                             })
                     } else {
                         Button::new(("hunk-squash", ix))

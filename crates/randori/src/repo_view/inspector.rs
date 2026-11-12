@@ -1,17 +1,19 @@
 //! The inspector (selected revision, description editor, changed files) and the
 //! changes panel (diff of the selected file).
 
+use gpui_kit::component::ElementExt as _;
+
+use super::included::Inclusion;
 use super::*;
 
 impl RepoView {
     pub(super) fn render_inspector(&self, cx: &mut Context<Self>) -> AnyElement {
-        // the working copy as GitKraken's work in progress: a commit message,
-        // and its changes unstaged and staged
-        let staging_mode = self.staging_mode();
-        let commit_box = staging_mode.then(|| self.render_commit_box(cx));
-        let staged_section = staging_mode.then(|| self.render_staged_section(cx));
+        // the working copy as the next commit: a message, and its changes
+        // with a box each for whether the commit includes it
+        let commit_mode = self.commit_mode();
+        let commit_box = commit_mode.then(|| self.render_commit_box(cx));
         let theme = cx.theme();
-        let Some(detail) = &self.detail else {
+        let Some(detail) = &self.inspected.detail else {
             return v_flex()
                 .size_full()
                 .bg(theme.sidebar)
@@ -19,7 +21,7 @@ impl RepoView {
                 .justify_center()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child(if self.detail_loading {
+                .child(if self.inspected.loading {
                     Spinner::new().into_any_element()
                 } else {
                     "Select a revision".into_any_element()
@@ -35,24 +37,13 @@ impl RepoView {
         });
         let refs = ref_chips(&header.refs);
         // what is being written, for an editable revision; what is saved otherwise
-        let typed = (!header.is_immutable).then(|| self.description_input.read(cx).value());
-        let description_text: String = match &typed {
-            Some(typed) => typed.to_string(),
-            None => header.description.lines.join("\n"),
+        let description_text = if header.is_immutable {
+            header.description.lines.join("\n")
+        } else {
+            self.description.editor.text(cx)
         };
         let issues = crate::issue_links::find(&description_text, cx);
-        let subject_len = description_text
-            .lines()
-            .next()
-            .map_or(0, |line| line.chars().count());
-        let (long, too_long) = settings::get(cx).display.subject_limits;
-        let subject_color = if subject_len > too_long as usize {
-            theme.danger
-        } else if subject_len > long as usize {
-            theme.warning
-        } else {
-            theme.muted_foreground
-        };
+        let subject_limits = settings::get(cx).display.subject_limits;
 
         let fact = |label: &'static str, value: AnyElement| {
             v_flex()
@@ -120,8 +111,7 @@ impl RepoView {
                                     div()
                                         .id("immutable")
                                         .child(
-                                            gpui_kit::component::Icon::new(IconName::Lock)
-                                                .xsmall(),
+                                            gpui_kit::component::Icon::new(IconName::Lock).xsmall(),
                                         )
                                         .tooltip(|window, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new("Immutable")
@@ -153,9 +143,9 @@ impl RepoView {
                     })
                     // the working copy's description is the next commit's message
                     .children(commit_box)
-                    .when(!header.is_immutable && !staging_mode, |this| {
+                    .when(!header.is_immutable && !commit_mode, |this| {
                         let dirty = self.description_dirty(cx);
-                        this.child(Textarea::new(&self.description_input).small())
+                        this.child(self.description.editor.render(subject_limits, cx))
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -170,25 +160,6 @@ impl RepoView {
                                                 "Press D to edit"
                                             }),
                                     )
-                                    // the subject's length against Settings' limits
-                                    .when(subject_len > 0, |this| {
-                                        this.child(
-                                            div()
-                                                .id("subject-length")
-                                                .text_xs()
-                                                .text_color(subject_color)
-                                                .child(format!("{subject_len} / {long}"))
-                                                .tooltip(move |window, cx| {
-                                                    gpui_kit::component::tooltip::Tooltip::new(
-                                                        format!(
-                                                            "First line: {subject_len} characters \
-                                                             (long past {long}, too long past {too_long})"
-                                                        ),
-                                                    )
-                                                    .build(window, cx)
-                                                }),
-                                        )
-                                    })
                                     .child(
                                         Button::new("save-description")
                                             .small()
@@ -277,38 +248,41 @@ impl RepoView {
                     .h_10()
                     .px_4()
                     .gap_2()
-                    .child(div().text_sm().font_medium().child(if staging_mode {
-                        "Unstaged files"
-                    } else {
-                        "Changed files"
-                    }))
+                    // every file in the commit, or none
+                    .when(commit_mode && !detail.files.is_empty(), |this| {
+                        let all = self.next_commit.included.all_files(&detail.files);
+                        this.child(
+                            inclusion_box(
+                                "include-all",
+                                all,
+                                if all == Inclusion::All {
+                                    "Leave every change out of the commit"
+                                } else {
+                                    "Include every change in the commit"
+                                },
+                                theme,
+                            )
+                            .on_click(cx.listener(
+                                move |view, _, _, cx| view.include_all(all != Inclusion::All, cx),
+                            )),
+                        )
+                    })
+                    .child(div().text_sm().font_medium().child("Changed files"))
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(detail.files.len().to_string()),
                     )
-                    .when(self.marked_files.len() > 1, |this| {
+                    .when(self.inspected.marked.len() > 1, |this| {
                         this.child(
                             div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child(format!("· {} picked", self.marked_files.len())),
+                                .child(format!("· {} picked", self.inspected.marked.len())),
                         )
                     })
                     .child(div().flex_1())
-                    .when(staging_mode && !detail.files.is_empty(), |this| {
-                        this.child(
-                            Button::new("stage-all")
-                                .ghost()
-                                .xsmall()
-                                .label("Stage all")
-                                .tooltip("Stage every change of the working copy")
-                                .on_click(
-                                    cx.listener(|view, _, window, cx| view.stage_all(window, cx)),
-                                ),
-                        )
-                    })
                     .when(detail.conflicts > 0, |this| {
                         this.child(
                             Tag::danger()
@@ -340,32 +314,44 @@ impl RepoView {
                     ),
             )
             .children(detail.files.iter().enumerate().map(|(ix, file)| {
-                let marked = self.marked_files.contains(&file.path);
+                let marked = self.inspected.marked.contains(&file.path);
                 ListItem::new(("file", ix))
                     .px_4()
                     .py_1()
-                    .selected(self.selected_file == Some(ix) || marked)
-                    .group("file-row")
-                    .child(file_summary(file, theme).when(staging_mode, |row| {
-                        // GitKraken's stage button, there while the pointer is on the row
-                        row.child(
-                            div()
-                                .flex_none()
-                                .invisible()
-                                .group_hover("file-row", |style| style.visible())
-                                .child(
-                                    Button::new(("stage-file", ix))
-                                        .success()
-                                        .xsmall()
-                                        .icon(IconName::Plus)
-                                        .tooltip("Stage this file")
-                                        .on_click(cx.listener(move |view, _, window, cx| {
+                    .selected(self.inspected.file == Some(ix) || marked)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            // whether the commit includes the file, as GitHub
+                            // Desktop's box beside each
+                            .when(commit_mode, |row| {
+                                let state = self
+                                    .next_commit
+                                    .included
+                                    .file(&file.tree_path.repo_path, &file.hunks);
+                                row.child(
+                                    inclusion_box(
+                                        ("include-file", ix),
+                                        state,
+                                        match state {
+                                            Inclusion::Nothing => "Include in the commit",
+                                            Inclusion::Some => "Include every change in the commit",
+                                            Inclusion::All => "Leave out of the commit",
+                                        },
+                                        theme,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |view, _, _, cx| {
                                             cx.stop_propagation();
-                                            view.stage_file(ix, window, cx)
-                                        })),
-                                ),
-                        )
-                    }))
+                                            view.include_file(ix, state != Inclusion::All, cx)
+                                        },
+                                    )),
+                                )
+                            })
+                            .child(file_summary(file, theme)),
+                    )
                     // a double click opens the file's full view, as in GitKraken;
                     // ⌘ and ⇧ pick files for Split
                     .on_click(
@@ -411,29 +397,50 @@ impl RepoView {
                         let focus = self.command_focus();
                         let has_conflict = file.has_conflict;
                         let immutable = header.is_immutable;
-                        let picked = if marked { self.marked_files.len() } else { 1 };
+                        // the working copy picks no files for Split (its
+                        // boxes are for Split off): the file clicked
+                        let picked = Some(if marked {
+                            self.inspected.marked.len()
+                        } else {
+                            1
+                        });
                         move |menu, _, _| {
                             file_menu(menu, has_conflict, immutable, picked, focus.clone())
                         }
                     })
             }))
-            .children(staged_section)
             .into_any_element()
     }
 
     /// The commit message box of the working copy's inspector, with Commit:
-    /// what is staged, or everything when nothing is.
+    /// the changes included, or every one when none is.
     fn render_commit_box(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let staged = self.staged.as_ref().map_or(0, |staged| staged.files.len());
-        let changed = self
+        let files = self
+            .inspected
             .detail
             .as_ref()
-            .is_some_and(|detail| !detail.files.is_empty());
-        let typed = !self.commit_input.read(cx).value().trim().is_empty();
+            .map_or(&[][..], |detail| &detail.files[..]);
+        let included = &self.next_commit.included;
+        let typed = !self.next_commit.message.text(cx).is_empty();
+        let hint = if files.is_empty() {
+            "No changes to commit".to_owned()
+        } else if self.next_commit.lines_left_out {
+            "Included lines changed and were left out · ⌘↩".to_owned()
+        } else if included.is_empty() {
+            "Nothing included: commits every change · ⌘↩".to_owned()
+        } else if included.all_files(files) == Inclusion::All {
+            "Commits every change · ⌘↩".to_owned()
+        } else {
+            "The rest stays in the working copy · ⌘↩".to_owned()
+        };
         v_flex()
             .gap_2()
-            .child(Textarea::new(&self.commit_input).small())
+            .child(
+                self.next_commit
+                    .message
+                    .render(settings::get(cx).display.subject_limits, cx),
+            )
             .child(
                 h_flex()
                     .gap_2()
@@ -443,23 +450,46 @@ impl RepoView {
                             .min_w_0()
                             .truncate()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(match (staged, changed) {
-                                (0, false) => "No changes to commit",
-                                (0, true) => "Nothing staged: commits every change · ⌘↩",
-                                _ => "Commits the staged changes · ⌘↩",
-                            }),
+                            .text_color(if self.next_commit.lines_left_out {
+                                theme.warning
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(hint),
                     )
+                    // `jj split`: what is included goes, with this message;
+                    // the working copy keeps the rest, its description and
+                    // its bookmarks
+                    .when(!included.is_empty(), |this| {
+                        this.child(
+                            Button::new("split-included")
+                                .small()
+                                .outline()
+                                .label("Split off")
+                                .tooltip(
+                                    "Split what is included off with this message: the working \
+                                     copy keeps the rest, its description and bookmarks (jj split)",
+                                )
+                                .disabled(!typed || !self.busy.is_empty())
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.split_included(window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         Button::new("commit")
                             .small()
                             .primary()
-                            .label(match staged {
-                                0 => "Commit all".to_owned(),
-                                1 => "Commit 1 file".to_owned(),
-                                n => format!("Commit {n} files"),
+                            .label(if included.is_empty() {
+                                "Commit all".to_owned()
+                            } else {
+                                format!("Commit {}", included.summary(files))
                             })
-                            .disabled(!typed || (staged == 0 && !changed) || !self.busy.is_empty())
+                            .tooltip(
+                                "Commit with this message: the new working copy has what is \
+                                 not included (jj commit)",
+                            )
+                            .disabled(!typed || files.is_empty() || !self.busy.is_empty())
                             .on_click(
                                 cx.listener(|view, _, window, cx| view.commit_changes(window, cx)),
                             ),
@@ -468,86 +498,9 @@ impl RepoView {
             .into_any_element()
     }
 
-    /// The staging revision's files, as GitKraken lists staged files: a
-    /// click shows one's diff, its − (on hover) unstages it.
-    fn render_staged_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let files = self
-            .staged
-            .as_ref()
-            .map_or(&[][..], |staged| &staged.files[..]);
-        v_flex()
-            .border_t_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .h_10()
-                    .px_4()
-                    .gap_2()
-                    .child(div().text_sm().font_medium().child("Staged files"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(files.len().to_string()),
-                    )
-                    .child(div().flex_1())
-                    .when(!files.is_empty(), |this| {
-                        this.child(
-                            Button::new("unstage-all")
-                                .ghost()
-                                .xsmall()
-                                .label("Unstage all")
-                                .tooltip("Put every staged change back in the working copy")
-                                .on_click(
-                                    cx.listener(|view, _, window, cx| view.unstage_all(window, cx)),
-                                ),
-                        )
-                    }),
-            )
-            .when(files.is_empty(), |this| {
-                this.child(
-                    div()
-                        .px_4()
-                        .pb_3()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("Stage files or lines with their +"),
-                )
-            })
-            .children(files.iter().enumerate().map(|(ix, file)| {
-                ListItem::new(("staged-file", ix))
-                    .px_4()
-                    .py_1()
-                    .group("staged-row")
-                    .selected(self.staged_file == Some(ix))
-                    .child(
-                        file_summary(file, theme).child(
-                            div()
-                                .flex_none()
-                                .invisible()
-                                .group_hover("staged-row", |style| style.visible())
-                                .child(
-                                    Button::new(("unstage-file", ix))
-                                        .danger()
-                                        .xsmall()
-                                        .icon(IconName::Minus)
-                                        .tooltip("Unstage this file")
-                                        .on_click(cx.listener(move |view, _, window, cx| {
-                                            cx.stop_propagation();
-                                            view.unstage_file(ix, window, cx)
-                                        })),
-                                ),
-                        ),
-                    )
-                    .on_click(cx.listener(move |view, _, _, cx| view.select_staged_file(ix, cx)))
-                    .into_any_element()
-            }))
-            .into_any_element()
-    }
-    /// The selected lines' buttons for a diff's header (Stage or Unstage
-    /// in the working copy's, else Squash into parent; and Split off…), or
-    /// how to get them.
+    /// The selected lines' buttons for a diff's header (in the working
+    /// copy's, include them in the commit or leave them out, else Squash
+    /// into parent; and Split off…), or how to get them.
     pub(super) fn render_line_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let command = self
             .shown_diff_file()
@@ -559,28 +512,37 @@ impl RepoView {
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(match command {
-                    Some(LineCommand::Stage) => "Drag over line numbers to stage lines",
-                    Some(LineCommand::Unstage) => "Drag over line numbers to unstage lines",
+                    Some(LineCommand::Include) => {
+                        "Tick lines, or drag over their numbers, to include them in the commit"
+                    }
                     _ => "Drag over line numbers to squash or split lines off",
                 })
                 .into_any_element();
         };
         let one_hunk = selection.hunks.len() == 1;
         let main = match command {
-            Some(LineCommand::Stage) => Button::new("stage-lines")
-                .small()
-                .outline()
-                .icon(IconName::Plus)
-                .label("Stage lines")
-                .tooltip("Stage the selected lines")
-                .on_click(cx.listener(|view, _, window, cx| view.stage_selected_lines(window, cx))),
-            Some(LineCommand::Unstage) => Button::new("unstage-lines")
-                .small()
-                .outline()
-                .icon(IconName::Minus)
-                .label("Unstage lines")
-                .tooltip("Put the selected lines back in the working copy")
-                .on_click(cx.listener(|view, _, window, cx| view.stage_selected_lines(window, cx))),
+            Some(LineCommand::Include) => {
+                let all_in = self.selected_lines_included();
+                Button::new("include-lines")
+                    .small()
+                    .outline()
+                    .icon(if all_in {
+                        IconName::Minus
+                    } else {
+                        IconName::Plus
+                    })
+                    .label(if all_in {
+                        "Leave lines out"
+                    } else {
+                        "Include lines"
+                    })
+                    .tooltip(if all_in {
+                        "Leave the selected lines out of the commit"
+                    } else {
+                        "Include the selected lines in the commit"
+                    })
+                    .on_click(cx.listener(|view, _, _, cx| view.toggle_selected_lines(cx)))
+            }
             _ => Button::new("squash-lines")
                 .small()
                 .outline()
@@ -598,55 +560,42 @@ impl RepoView {
         };
         h_flex()
             .gap_2()
-            // the press clears the diff's selection before the click: kept
-            .on_mouse_down(
-                gpui_kit::MouseButton::Left,
-                cx.listener(|view, _, _, _| view.keep_line_selection = true),
-            )
+            // a press anywhere else clears the diff's line selection, which
+            // these buttons act on
+            .text_selection_control("line-actions")
             .child(main)
-            // a staged file's lines are the staging revision's: not split there
-            .when(command != Some(LineCommand::Unstage), |this| {
-                this.child(
-                    Button::new("split-lines")
-                        .small()
-                        .outline()
-                        .icon(IconName::GitCommitHorizontal)
-                        .label("Split off…")
-                        .tooltip("Split the selected lines into a new commit")
-                        .on_click(
-                            cx.listener(|view, _, window, cx| view.prompt_split_lines(window, cx)),
-                        ),
-                )
-            })
+            .child(
+                Button::new("split-lines")
+                    .small()
+                    .outline()
+                    .icon(IconName::GitCommitHorizontal)
+                    .label("Split off…")
+                    .tooltip("Split the selected lines into a new commit")
+                    .on_click(
+                        cx.listener(|view, _, window, cx| view.prompt_split_lines(window, cx)),
+                    ),
+            )
             .into_any_element()
     }
 
     /// What a changed line's button does in `file`'s diff: in the working
-    /// copy's, stage it, in a staged file's, unstage it, elsewhere squash it
+    /// copy's, include it in the commit or leave it out, elsewhere squash it
     /// into the parent. `None` where the revision cannot be rewritten.
     pub(super) fn line_command(&self, file: &super::ops::ShownFile) -> Option<LineCommand> {
         if file.immutable {
             return None;
         }
-        if file.staged {
-            return Some(LineCommand::Unstage);
-        }
-        let working_copy = self.staging_mode()
-            && self
-                .detail
-                .as_ref()
-                .is_some_and(|detail| detail.header.id.commit.hex == file.id.commit.hex);
-        match (working_copy, &file.parent) {
-            (true, _) => Some(LineCommand::Stage),
+        match (self.includes_lines(file), &file.parent) {
+            (true, _) => Some(LineCommand::Include),
             (false, Some(_)) => Some(LineCommand::Squash),
             (false, None) => None,
         }
     }
 
-    /// `diff` with a button beside each changed line of `file`, shown while
-    /// the pointer is on the line, as GitKraken's "Stage this line": + stages
-    /// it (or squashes it into the parent outside the working copy), − in a
-    /// staged file unstages it.
+    /// `diff` with a button beside each changed line of `file`. In the
+    /// working copy's it is the line's box in the commit, ticked while the
+    /// commit includes the line; elsewhere it shows while the pointer is on
+    /// the line, and squashes the line into the parent.
     pub(super) fn with_line_buttons(
         &self,
         diff: gpui_kit::component::diff::Diff,
@@ -657,15 +606,18 @@ impl RepoView {
         let Some(command) = self.line_command(file) else {
             return diff;
         };
-        let label = match command {
-            LineCommand::Stage => "Stage this line",
-            LineCommand::Unstage => "Unstage this line",
-            LineCommand::Squash => "Squash this line into the parent",
-        };
+        let included = &self.next_commit.included;
         let markers = changed_line_positions(file.hunks)
             .into_iter()
             .enumerate()
             .map(|(ix, (side, line))| {
+                let label = match command {
+                    LineCommand::Include if included.line(&file.path.repo_path, (side, line)) => {
+                        "Leave this line out of the commit"
+                    }
+                    LineCommand::Include => "Include this line in the commit",
+                    LineCommand::Squash => "Squash this line into the parent",
+                };
                 let side = match side {
                     Side::Original => DiffSide::Original,
                     Side::Modified => DiffSide::Modified,
@@ -677,31 +629,56 @@ impl RepoView {
                 .with_label(label)
             });
         let owner = cx.entity().downgrade();
+        let path = file.path.repo_path.clone();
+        let picked: std::collections::HashSet<(Side, usize)> = match command {
+            LineCommand::Include => changed_line_positions(file.hunks)
+                .into_iter()
+                .filter(|&key| included.line(&path, key))
+                .collect(),
+            LineCommand::Squash => Default::default(),
+        };
         diff.gutter_markers(markers)
-            .render_gutter_marker(move |marker, _, _| {
+            .render_gutter_marker(move |marker, _, cx| {
                 let side = super::ops::side_of(marker.position().side());
                 let line = marker.position().line();
                 let owner = owner.clone();
-                let button = Button::new(marker.id().clone())
-                    .xsmall()
-                    .tooltip(marker.label().clone());
-                let button = match command {
-                    LineCommand::Unstage => button.danger().icon(IconName::Minus),
-                    LineCommand::Stage | LineCommand::Squash => {
-                        button.success().icon(IconName::Plus)
+                match command {
+                    LineCommand::Include => {
+                        let state = if picked.contains(&(side, line)) {
+                            Inclusion::All
+                        } else {
+                            Inclusion::Nothing
+                        };
+                        div().child(
+                            inclusion_box(
+                                marker.id().clone(),
+                                state,
+                                marker.label().clone(),
+                                cx.theme(),
+                            )
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |view, cx| {
+                                    view.toggle_lines((side, line), (side, line), cx)
+                                });
+                            }),
+                        )
                     }
-                };
-                div()
-                    .invisible()
-                    .group_hover("diff-line", |style| style.visible())
-                    .child(button.on_click(move |_, window, cx| {
-                        let _ = owner.update(cx, |view, cx| match command {
-                            LineCommand::Squash => view.squash_line(side, line, window, cx),
-                            LineCommand::Stage | LineCommand::Unstage => {
-                                view.stage_lines((side, line), (side, line), window, cx)
-                            }
-                        });
-                    }))
+                    LineCommand::Squash => div()
+                        .invisible()
+                        .group_hover("diff-line", |style| style.visible())
+                        .child(
+                            Button::new(marker.id().clone())
+                                .xsmall()
+                                .success()
+                                .icon(IconName::Plus)
+                                .tooltip(marker.label().clone())
+                                .on_click(move |_, window, cx| {
+                                    let _ = owner.update(cx, |view, cx| {
+                                        view.squash_line(side, line, window, cx)
+                                    });
+                                }),
+                        ),
+                }
             })
     }
 
@@ -712,15 +689,11 @@ impl RepoView {
         }
         let diff = self.split_diff("changes-split", styled, &self.diff, cx);
         let theme = cx.theme();
-        // the working copy's file shown, or a staged one
         let file = self
-            .selected_file
-            .and_then(|ix| self.detail.as_ref()?.files.get(ix))
-            .or_else(|| {
-                self.staged_file
-                    .and_then(|ix| self.staged.as_ref()?.files.get(ix))
-            });
-        let body = if self.detail_loading && self.detail.is_none() {
+            .inspected
+            .file
+            .and_then(|ix| self.inspected.detail.as_ref()?.files.get(ix));
+        let body = if self.inspected.loading && self.inspected.detail.is_none() {
             v_flex()
                 .flex_1()
                 .items_center()
@@ -894,7 +867,55 @@ fn file_summary(file: &FileItem, theme: &gpui_kit::component::Theme) -> gpui_kit
 /// [`RepoView::line_command`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum LineCommand {
-    Stage,
-    Unstage,
+    /// Include the line in the next commit, or leave it out.
+    Include,
     Squash,
+}
+
+/// A box for whether the commit includes a file or a line: empty, ticked,
+/// or (for a file some of whose lines are in) with a dash, as a checkbox
+/// shows a mixed state.
+fn inclusion_box(
+    id: impl Into<gpui_kit::ElementId>,
+    state: Inclusion,
+    tooltip: impl Into<SharedString>,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let on = state != Inclusion::Nothing;
+    let tooltip = tooltip.into();
+    div()
+        .id(id)
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+        })
+        // as a button's press: the keyboard stays where it was (D still
+        // goes to the message), and no text selection starts
+        .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            gpui_kit::component::GlobalState::suppress_text_selection(cx);
+        })
+        .flex_none()
+        .size_4()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(theme.radius / 2.)
+        .border_1()
+        .border_color(if on { theme.primary } else { theme.input })
+        .when(on, |this| this.bg(theme.primary))
+        .cursor_pointer()
+        .when(!on, |this| {
+            this.hover(|style| style.border_color(theme.ring))
+        })
+        .when(on, |this| {
+            this.child(
+                gpui_kit::component::Icon::new(if state == Inclusion::All {
+                    IconName::Check
+                } else {
+                    IconName::Minus
+                })
+                .xsmall()
+                .text_color(theme.primary_foreground),
+            )
+        })
 }

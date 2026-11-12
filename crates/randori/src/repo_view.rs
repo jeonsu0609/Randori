@@ -25,7 +25,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffEvent, DiffFile, DiffLineRange, DiffMode, DiffState},
     h_flex,
-    input::{InputEvent, InputState, Textarea, TextareaState},
+    input::{InputEvent, InputState},
     list::ListItem,
     menu::{ContextMenuExt as _, PopupMenu},
     resizable::{h_resizable, resizable_panel, v_resizable},
@@ -49,9 +49,11 @@ mod dnd;
 mod find;
 mod focus;
 mod github_access;
+mod included;
 mod inspector;
 mod log_list;
 mod menus;
+mod message;
 mod model;
 mod ops;
 mod pane;
@@ -181,6 +183,9 @@ pub mod actions {
             DiffInTool,
             SquashHunk,
             SplitLines,
+            // what the next commit includes, in the working copy's inspector
+            IncludeAllChanges,
+            ExcludeAllChanges,
             // find a commit in the loaded revisions
             FindCommit,
             CloseFind,
@@ -313,22 +318,17 @@ pub struct RepoView {
     workspace: Option<WorkspaceInfo>,
     /// The parts drawn as views of their own (see `pane`).
     panes: Panes,
-    rows: Vec<LogRow>,
-    /// Each row's number by its commit id, added to as pages load.
-    row_of_commit: HashMap<String, usize>,
-    row_data: Rc<Vec<RowData>>,
-    graph: Rc<Graph>,
-    /// The side panel's bookmarks, tags and workspaces: every one of the
-    /// repository, from a query of their own (see `refs_panel`).
-    panel_refs: Vec<RefItem>,
-    panel_workspaces: Vec<WorkspaceItem>,
-    panel_filter: Entity<InputState>,
-    panel_collapsed: std::collections::HashSet<PanelSection>,
-    /// Folders of the panel's trees folded or unfolded against their
-    /// default (see `refs_panel`).
-    panel_folders: HashMap<PanelSection, std::collections::HashSet<String>>,
-    /// Bumped per panel query, so a late answer is dropped.
-    panel_generation: u64,
+    /// The revisions loaded and what is drawn from them.
+    log: LogData,
+    /// The log loading a page at a time.
+    paging: Paging,
+    /// The side panel's items and how they show.
+    panel: PanelState,
+    /// The working copy's next commit (see `NextCommit`).
+    next_commit: NextCommit,
+    /// Lines selected in the diff, for Squash into parent and Split off
+    /// (the full view's diff keeps its own: see `FileFocus`).
+    line_selection: Option<DiffLineRange>,
     /// The log row whose bookmarks are spread out: the one whose chip, or
     /// whose spread-out list (it reaches over the rows below), is hovered.
     refs_hover: RefsHover,
@@ -346,37 +346,13 @@ pub struct RepoView {
     /// The bookmark standing in for a checked-out branch (see
     /// [`nearest_bookmark`]), found again whenever the rows change.
     current_bookmark: Option<SharedString>,
-    has_more: bool,
-    loading_more: bool,
-    /// Why the last next page failed: no page is asked for again until the
-    /// log reloads (the status bar's Retry), or scrolling to the end would
-    /// ask every frame.
-    more_error: Option<SharedString>,
-    /// Bumped whenever the rows are replaced, so a late "next page" is dropped.
-    log_generation: u64,
     /// Directory and revset the tab was opened with (for Try again / init).
     wd: Option<PathBuf>,
     initial_query: Option<String>,
     selected: Option<usize>,
     scroll: UniformListScrollHandle,
-    detail: Option<Detail>,
-    detail_loading: bool,
-    selected_file: Option<usize>,
-    /// The staging revision under this tab's working copy while the working
-    /// copy is the revision inspected (see `StageChanges`): what is staged.
-    staged: Option<Detail>,
-    /// The staged file shown in the diff, instead of a working copy one.
-    staged_file: Option<usize>,
-    /// The message of the next commit, in the working copy's inspector.
-    commit_input: Entity<TextareaState>,
-    /// A commit is on its way: its message is cleared when it is made.
-    commit_pending: bool,
-    /// The working copy (change id) whose description the message box was
-    /// filled with, once: a description it has is the commit's to keep.
-    commit_prefilled: Option<String>,
-    /// Files picked in the inspector with ⌘- or ⇧-click, by path, for Split.
-    /// They stay picked when the revision reloads, not when another is shown.
-    marked_files: Vec<SharedString>,
+    /// The revision inspected: its detail and the files picked in it.
+    inspected: Inspected,
     diff: Entity<DiffState>,
     diff_mode: DiffMode,
     revset: Entity<InputState>,
@@ -390,7 +366,6 @@ pub struct RepoView {
     /// The tab's terminal, started the first time it is shown.
     terminal: Option<Entity<crate::terminal::TerminalView>>,
     terminal_open: bool,
-    detail_task: Option<Task<()>>,
     /// Label of the mutation in flight, shown in the status bar.
     busy: Vec<SharedString>,
     /// A finished operation changed the repository; reload when none are left.
@@ -405,23 +380,13 @@ pub struct RepoView {
     pending_select: Option<String>,
     /// Bookmark or tag the last context menu was opened on.
     ref_target: Option<StoreRef>,
-    /// Inspector editor for the selected revision's description.
-    description_input: Entity<TextareaState>,
+    /// The description editor of the revision inspected.
+    description: DescriptionEdit,
     /// Keyboard alternative to drag and drop: the operation waiting for a
     /// target revision, chosen with the selection and confirmed with Enter.
     pick: Option<Pick>,
-    /// Lines selected in the diff, for Squash into parent and Split off.
-    diff_selection: Option<DiffLineRange>,
-    /// A press on the line buttons is under way: gpui-kit clears a diff's
-    /// line selection on any press, and the buttons' click acts on it after,
-    /// so the clear it reports (after the press) leaves it.
-    keep_line_selection: bool,
-    /// Unsaved descriptions of changes the user moved away from, by change id.
-    description_drafts: HashMap<String, String>,
     /// Keeps the open one-field dialog's Enter handler alive.
     dialog_subscription: Option<Subscription>,
-    /// Change id and text last loaded into the description editor.
-    description_for: Option<(String, String)>,
     /// Author avatars by email, shared with the list closure.
     avatars: Rc<HashMap<String, SharedString>>,
     /// Pull requests of the workspace's GitHub remote, if it has one.
@@ -434,10 +399,8 @@ pub struct RepoView {
     show_head_pending: bool,
     /// The revision list's column widths (shared through the settings).
     columns: settings::ColumnWidths,
-    /// Mutable revisions with conflicts, in the whole repository.
-    conflicts: Vec<RevHeader>,
-    conflicts_task: Option<Task<()>>,
-    conflicts_loading: bool,
+    /// The mutable revisions with conflicts, for the switcher's count.
+    conflicts: Conflicts,
     /// When rows, refs and age labels were last derived from `rows`.
     derived_at: std::time::Instant,
     /// A column being resized: which, where the drag started, its width then.
@@ -469,6 +432,106 @@ pub struct RepoView {
     column_press: Option<gpui_kit::Pixels>,
 }
 
+/// The revision inspected: its detail and the files picked in it.
+#[derive(Default)]
+struct Inspected {
+    /// The selected revision's header, files and patches, once loaded.
+    detail: Option<Detail>,
+    /// The detail is on its way.
+    loading: bool,
+    /// The query of the detail; a new selection drops the last one.
+    task: Option<Task<()>>,
+    /// The file whose diff shows.
+    file: Option<usize>,
+    /// Files picked in the inspector with ⌘- or ⇧-click, by path, for Split.
+    /// They stay picked when the revision reloads, not when another is shown.
+    marked: Vec<SharedString>,
+}
+
+/// The description editor of the revision inspected.
+struct DescriptionEdit {
+    /// Inspector editor for the selected revision's description.
+    editor: message::MessageEditor,
+    /// Change id and text last loaded into the description editor.
+    loaded: Option<(String, String)>,
+    /// Unsaved descriptions of changes the user moved away from, by change id.
+    drafts: HashMap<String, String>,
+}
+
+/// The mutable revisions with conflicts, for the switcher's count.
+#[derive(Default)]
+struct Conflicts {
+    /// Mutable revisions with conflicts, in the whole repository.
+    revisions: Vec<RevHeader>,
+    /// Their query; a newer one drops it.
+    task: Option<Task<()>>,
+    /// They are being looked for.
+    loading: bool,
+}
+
+/// The revisions the log has loaded, and what is drawn from them.
+#[derive(Default)]
+struct LogData {
+    /// The rows as the worker gave them, a page after another.
+    rows: Vec<LogRow>,
+    /// Each row's number by its commit id, added to as pages load.
+    row_of_commit: HashMap<String, usize>,
+    /// What each row draws, copied so the virtual list owns it.
+    row_data: Rc<Vec<RowData>>,
+    /// The rows' lanes and lines.
+    graph: Rc<Graph>,
+}
+
+/// The log loading a page at a time (see `RepoView::load_more`).
+#[derive(Default)]
+struct Paging {
+    /// The revset has rows after those loaded.
+    has_more: bool,
+    /// A next page is on its way.
+    loading: bool,
+    /// Why the last next page failed: no page is asked for again until the
+    /// log reloads (the status bar's Retry), or scrolling to the end would
+    /// ask every frame.
+    error: Option<SharedString>,
+    /// Bumped whenever the rows are replaced, so a late "next page" is dropped.
+    generation: u64,
+}
+
+/// The side panel's refs and workspaces, and how they show (see `refs_panel`).
+struct PanelState {
+    /// The side panel's bookmarks, tags and workspaces: every one of the
+    /// repository, from a query of their own (see `refs_panel`).
+    refs: Vec<RefItem>,
+    workspaces: Vec<WorkspaceItem>,
+    /// The filter over every section.
+    filter: Entity<InputState>,
+    /// The sections folded.
+    collapsed: std::collections::HashSet<PanelSection>,
+    /// Folders of the panel's trees folded or unfolded against their
+    /// default (see `refs_panel`).
+    folders: HashMap<PanelSection, std::collections::HashSet<String>>,
+    /// Bumped per panel query, so a late answer is dropped.
+    generation: u64,
+}
+
+/// The working copy's next commit: its message, and what it takes.
+struct NextCommit {
+    /// The message, in the working copy's inspector.
+    message: message::MessageEditor,
+    /// The files and lines included in it; with nothing included, it takes
+    /// every change, as `jj commit` does.
+    included: included::Included,
+    /// Included lines were left out when the working copy was read again:
+    /// their file changed. Said in the commit box until the next change to
+    /// what is included.
+    lines_left_out: bool,
+    /// A commit is on its way: its message is cleared when it is made.
+    pending: bool,
+    /// The working copy (change id) whose description the message box was
+    /// filled with, once: a description it has is the commit's to keep.
+    prefilled: Option<String>,
+}
+
 impl RepoView {
     pub fn new(
         worker: Worker,
@@ -494,9 +557,9 @@ impl RepoView {
         });
         let panel_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter (⌘⌥F)"));
         let _subscriptions = vec![
-            cx.subscribe(&panel_filter, |_, _, event: &InputEvent, cx| {
+            cx.subscribe(&panel_filter, |view, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
-                    cx.notify();
+                    view.notify_pane(PaneId::Side, cx);
                 }
             }),
             cx.subscribe_in(
@@ -517,56 +580,34 @@ impl RepoView {
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(diff_mode));
         let diff_events = cx.subscribe(&diff, |view: &mut Self, _, event: &DiffEvent, cx| {
             match event {
-                DiffEvent::SelectionEnded(range) => view.diff_selection = Some(range.clone()),
-                // not when a press on the line buttons cleared it: they act on it
-                DiffEvent::SelectionChanged(None) => {
-                    if !std::mem::take(&mut view.keep_line_selection) {
-                        view.diff_selection = None;
-                    }
-                }
+                DiffEvent::SelectionEnded(range) => view.line_selection = Some(range.clone()),
+                DiffEvent::SelectionChanged(None) => view.line_selection = None,
                 _ => return,
             }
             cx.notify();
         });
 
-        let description_input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(3, 10)
-                .placeholder("Describe this change")
-        });
-        let commit_input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(2, 8)
-                .placeholder("Commit message")
-        });
         let mut _subscriptions = _subscriptions;
-        _subscriptions.push(cx.subscribe_in(
-            &commit_input,
+        // ⌘↩ saves a description, or commits in the working copy's box
+        let description_editor = message::MessageEditor::new(
+            "Summary",
+            "Description",
+            |view, window, cx| view.save_description(window, cx),
+            &mut _subscriptions,
             window,
-            |view: &mut Self, _, event: &InputEvent, window, cx| match event {
-                // ⌘↩ / Ctrl+↩ commits, as it saves a description
-                InputEvent::PressEnter {
-                    secondary: true, ..
-                } => view.commit_changes(window, cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
-            },
-        ));
+            cx,
+        );
+        let commit_message = message::MessageEditor::new(
+            "Commit summary",
+            "Description",
+            |view, window, cx| view.commit_changes(window, cx),
+            &mut _subscriptions,
+            window,
+            cx,
+        );
         _subscriptions
             .push(cx.observe_global::<Settings>(|view: &mut Self, cx| view.apply_settings(cx)));
         _subscriptions.push(diff_events);
-        _subscriptions.push(cx.subscribe_in(
-            &description_input,
-            window,
-            |view: &mut Self, _, event: &InputEvent, window, cx| match event {
-                // ⌘↩ / Ctrl+↩ saves; a plain Enter is a newline.
-                InputEvent::PressEnter {
-                    secondary: true, ..
-                } => view.save_description(window, cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
-            },
-        ));
 
         let panes = Panes::new(&cx.entity(), cx);
         let mut view = Self {
@@ -574,39 +615,35 @@ impl RepoView {
             worker,
             state: LoadState::Loading,
             workspace: None,
-            rows: Vec::new(),
-            row_of_commit: HashMap::new(),
-            row_data: Rc::default(),
-            graph: Rc::default(),
-            panel_refs: Vec::new(),
-            panel_workspaces: Vec::new(),
-            panel_filter,
-            panel_collapsed: refs_panel::default_collapsed(),
-            panel_folders: Default::default(),
-            panel_generation: 0,
+            log: LogData::default(),
+            paging: Paging::default(),
+            panel: PanelState {
+                refs: Vec::new(),
+                workspaces: Vec::new(),
+                filter: panel_filter,
+                collapsed: refs_panel::default_collapsed(),
+                folders: Default::default(),
+                generation: 0,
+            },
+            next_commit: NextCommit {
+                message: commit_message,
+                included: Default::default(),
+                lines_left_out: false,
+                pending: false,
+                prefilled: None,
+            },
+            line_selection: None,
             refs_hover: RefsHover::default(),
             find: None,
             author_filter: Rc::default(),
             query_error: None,
             switched_to: None,
             current_bookmark: None,
-            has_more: false,
-            loading_more: false,
-            more_error: None,
-            log_generation: 0,
             wd: None,
             initial_query: None,
             selected: None,
             scroll: UniformListScrollHandle::new(),
-            detail: None,
-            detail_loading: false,
-            selected_file: None,
-            staged: None,
-            staged_file: None,
-            commit_input,
-            commit_pending: false,
-            commit_prefilled: None,
-            marked_files: Vec::new(),
+            inspected: Inspected::default(),
             diff,
             diff_mode,
             revset,
@@ -617,18 +654,17 @@ impl RepoView {
             _subscriptions,
             terminal: None,
             terminal_open: false,
-            detail_task: None,
             busy: Vec::new(),
             reload_after_ops: false,
             refresh_after_ops: None,
             progress: None,
             pending_select: None,
             ref_target: None,
-            description_input,
-            description_for: None,
-            description_drafts: HashMap::new(),
-            diff_selection: None,
-            keep_line_selection: false,
+            description: DescriptionEdit {
+                editor: description_editor,
+                loaded: None,
+                drafts: HashMap::new(),
+            },
             pick: None,
             dialog_subscription: None,
             avatars: Rc::default(),
@@ -637,9 +673,7 @@ impl RepoView {
             center: Center::Revisions,
             show_head_pending: false,
             columns: settings::get(cx).display.columns,
-            conflicts: Vec::new(),
-            conflicts_task: None,
-            conflicts_loading: false,
+            conflicts: Conflicts::default(),
             derived_at: std::time::Instant::now(),
             column_drag: None,
             split_drag: None,
@@ -665,11 +699,11 @@ impl RepoView {
     /// True once the workspace, its log and the selected revision are all on screen.
     pub fn is_settled(&self) -> bool {
         matches!(self.state, LoadState::Ready | LoadState::Failed(_))
-            && !self.detail_loading
-            && !self.loading_more
+            && !self.inspected.loading
+            && !self.paging.loading
             && self.busy.is_empty()
             && !self.pulls_fetching()
-            && !self.conflicts_loading
+            && !self.conflicts.loading
             && !self.picked_up_pending()
     }
 
@@ -698,7 +732,7 @@ impl RepoView {
     /// Descriptions typed but not saved: drafts left on other changes plus the
     /// editor, when it differs from the selected revision.
     pub fn unsaved_descriptions(&self, cx: &App) -> usize {
-        self.description_drafts.len() + usize::from(self.description_dirty(cx))
+        self.description.drafts.len() + usize::from(self.description_dirty(cx))
     }
 
     /// Index of the selected log row (reported by `--keys`).
@@ -709,7 +743,7 @@ impl RepoView {
 
     /// Selects a log row by index (used by `--select-row`).
     pub fn select_row(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix < self.rows.len() {
+        if ix < self.log.rows.len() {
             self.select(ix, cx);
         }
     }
@@ -928,7 +962,7 @@ impl RepoView {
             return;
         };
         self.terminal_caught_up(cx);
-        let keep = self.rows.len();
+        let keep = self.log.rows.len();
         let by_date = settings::get(cx).display.log_by_date;
         self.log_by_date = by_date;
         let worker = self.worker.clone();
@@ -1033,37 +1067,37 @@ impl RepoView {
     }
 
     fn load_more(&mut self, cx: &mut Context<Self>) {
-        if !self.has_more || self.loading_more || self.more_error.is_some() {
+        if !self.paging.has_more || self.paging.loading || self.paging.error.is_some() {
             return;
         }
-        self.loading_more = true;
+        self.paging.loading = true;
         cx.notify();
 
-        let generation = self.log_generation;
+        let generation = self.paging.generation;
         let worker = self.worker.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { worker.query_log_next_page() })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                view.loading_more = false;
-                if view.log_generation != generation {
+                view.paging.loading = false;
+                if view.paging.generation != generation {
                     // The list was replaced meanwhile; this page continued the old one.
                     cx.notify();
                     return;
                 }
                 match result {
                     Ok(page) => {
-                        view.has_more = page.has_more;
-                        let from = view.rows.len();
-                        view.rows.extend(page.rows);
+                        view.paging.has_more = page.has_more;
+                        let from = view.log.rows.len();
+                        view.log.rows.extend(page.rows);
                         view.extend_derived();
                         view.update_find(false, from, cx);
                         view.request_missing_avatars(cx);
                     }
                     Err(err) => {
                         log::warn!("next log page failed: {err:#}");
-                        view.more_error = Some(one_line_error(&format!("{err:#}")).into());
+                        view.paging.error = Some(one_line_error(&format!("{err:#}")).into());
                     }
                 }
                 cx.notify();
@@ -1073,45 +1107,52 @@ impl RepoView {
     }
 
     fn replace_rows(&mut self, page: LogPage, scroll: bool, cx: &mut Context<Self>) {
-        self.log_generation += 1;
+        self.paging.generation += 1;
         // Keep the selection on the same change across reloads.
         let previous = self
             .selected
-            .and_then(|ix| self.rows.get(ix))
+            .and_then(|ix| self.log.rows.get(ix))
             .map(|row| row.revision.id.change.hex.clone());
-        self.has_more = page.has_more;
-        self.more_error = None;
-        self.rows = page.rows;
+        self.paging.has_more = page.has_more;
+        self.paging.error = None;
+        self.log.rows = page.rows;
         self.rebuild_derived();
 
         let pull_head = self.pending_commit_select.take().and_then(|hex| {
-            self.rows
+            self.log
+                .rows
                 .iter()
                 .position(|row| row.revision.id.commit.hex == hex)
         });
         let selected = pull_head
             .or_else(|| {
                 self.pending_select.take().or(previous).and_then(|hex| {
-                    self.rows
+                    self.log
+                        .rows
                         .iter()
                         .position(|row| row.revision.id.change.hex == hex)
                 })
             })
             .or_else(|| {
-                self.rows
+                self.log
+                    .rows
                     .iter()
                     .position(|row| is_this_working_copy(&row.revision))
             })
-            .or(if self.rows.is_empty() { None } else { Some(0) });
+            .or(if self.log.rows.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
         match selected {
             Some(ix) => self.set_selection(ix, scroll, cx),
             None => {
                 // Nothing to inspect: drop any detail still on its way.
                 self.selected = None;
-                self.detail = None;
-                self.marked_files.clear();
-                self.detail_task = None;
-                self.detail_loading = false;
+                self.inspected.detail = None;
+                self.inspected.marked.clear();
+                self.inspected.task = None;
+                self.inspected.loading = false;
                 self.select_file(None, cx);
             }
         }
@@ -1124,8 +1165,8 @@ impl RepoView {
 
     fn rebuild_derived(&mut self) {
         self.derived_at = std::time::Instant::now();
-        self.row_data = Rc::new(Vec::new());
-        self.row_of_commit.clear();
+        self.log.row_data = Rc::new(Vec::new());
+        self.log.row_of_commit.clear();
         // the rows may be others now; the pointer opens them again as it moves
         self.refs_hover = RefsHover::default();
         self.extend_derived();
@@ -1136,18 +1177,18 @@ impl RepoView {
     /// The graph is drawn again whole, as a new page can join its lines.
     fn extend_derived(&mut self) {
         let now = Local::now();
-        self.graph = Rc::new(Graph::new(&self.rows));
+        self.log.graph = Rc::new(Graph::new(&self.log.rows));
         // a copy only while a frame's list still holds the rows
-        let row_data = Rc::make_mut(&mut self.row_data);
+        let row_data = Rc::make_mut(&mut self.log.row_data);
         let by_date = self.log_by_date;
         let from = row_data.len();
-        self.row_of_commit.extend(
-            self.rows[from..]
+        self.log.row_of_commit.extend(
+            self.log.rows[from..]
                 .iter()
                 .enumerate()
                 .map(|(ix, row)| (row.revision.id.commit.hex.clone(), from + ix)),
         );
-        row_data.extend(self.rows[from..].iter().map(|row| {
+        row_data.extend(self.log.rows[from..].iter().map(|row| {
             let mut data = RowData::new(row, now);
             if by_date {
                 // the rows follow commit time there; grouping by author time
@@ -1159,8 +1200,11 @@ impl RepoView {
             data
         }));
         mark_bucket_starts(row_data);
-        let current =
-            nearest_bookmark(&self.rows, &self.row_of_commit, self.switched_to.as_deref());
+        let current = nearest_bookmark(
+            &self.log.rows,
+            &self.log.row_of_commit,
+            self.switched_to.as_deref(),
+        );
         mark_current_ref(
             row_data,
             current.as_ref().map(|(ix, name)| (*ix, name.as_str())),
@@ -1184,10 +1228,10 @@ impl RepoView {
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.rows.is_empty() {
+        if self.log.rows.is_empty() {
             return;
         }
-        let last = self.rows.len() - 1;
+        let last = self.log.rows.len() - 1;
         let ix = match self.selected {
             Some(ix) => ix.saturating_add_signed(delta).min(last),
             None => 0,
@@ -1202,114 +1246,67 @@ impl RepoView {
     }
 
     fn load_detail(&mut self, cx: &mut Context<Self>) {
-        let Some(row) = self.selected.and_then(|ix| self.rows.get(ix)) else {
+        let Some(row) = self.selected.and_then(|ix| self.log.rows.get(ix)) else {
             return;
         };
         let set = RevSet {
             from: row.revision.id.clone(),
             to: row.revision.id.clone(),
         };
-        // the staging revision is asked for only where there may be one: not
-        // under a parent the log shows described, immutable or a working copy
-        let may_stage = is_this_working_copy(&row.revision)
-            && match row.revision.parent_ids.as_slice() {
-                [parent] => self.row_of_commit.get(&parent.hex).is_none_or(|&ix| {
-                    let parent = &self.rows[ix].revision;
-                    !parent.is_immutable
-                        && !parent.is_working_copy
-                        && parent
-                            .description
-                            .lines
-                            .iter()
-                            .all(|line| line.trim().is_empty())
-                }),
-                _ => false,
-            };
-        self.detail_loading = true;
+        self.inspected.loading = true;
         let worker = self.worker.clone();
-        self.detail_task = Some(cx.spawn(async move |this, cx| {
+        self.inspected.task = Some(cx.spawn(async move |this, cx| {
             // Parsing every file's patch can take a while on a large commit;
             // keep it off the UI thread with the query itself.
             let result = cx
-                .background_spawn(async move {
-                    let detail = worker.query_revisions(set).map(build_detail)?;
-                    // this tab's working copy: what its staging revision holds
-                    let staging = detail
-                        .as_ref()
-                        .filter(|detail| may_stage && !detail.header.is_immutable)
-                        .and_then(|detail| match detail.parent_ids.as_slice() {
-                            [parent] => Some(parent.clone()),
-                            _ => None,
-                        });
-                    let staged = match staging {
-                        Some(parent) => worker
-                            .query_revisions(RevSet {
-                                from: parent.clone(),
-                                to: parent,
-                            })
-                            .map(build_detail)?
-                            .filter(is_staging_revision),
-                        None => None,
-                    };
-                    anyhow::Ok((detail, staged))
-                })
+                .background_spawn(async move { worker.query_revisions(set).map(build_detail) })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                view.detail_loading = false;
-                let (result, staged) = match result {
-                    Ok((detail, staged)) => (Ok(detail), staged),
-                    Err(err) => (Err(err), None),
-                };
-                // the staged file shown stays, by path, while it is staged
-                let staged_path = view
-                    .staged_file
-                    .and_then(|ix| view.staged.as_ref()?.files.get(ix))
-                    .map(|file| file.path.clone());
-                view.staged = staged;
-                view.staged_file = None;
-                let staged_keep = staged_path.and_then(|path| {
-                    view.staged
-                        .as_ref()?
-                        .files
-                        .iter()
-                        .position(|file| file.path == path)
-                });
+                view.inspected.loading = false;
                 match result {
                     Ok(Some(detail)) => {
                         // after a reload, stay on the file that was selected
                         let previous = view
-                            .selected_file
-                            .and_then(|ix| view.detail.as_ref()?.files.get(ix))
+                            .inspected
+                            .file
+                            .and_then(|ix| view.inspected.detail.as_ref()?.files.get(ix))
                             .map(|file| file.path.clone());
                         let keep = previous.and_then(|path| {
                             detail.files.iter().position(|file| file.path == path)
                         });
                         let first = (!detail.files.is_empty()).then_some(0);
-                        let same_revision = view.detail.as_ref().is_some_and(|old| {
+                        let same_revision = view.inspected.detail.as_ref().is_some_and(|old| {
                             old.header.id.change.hex == detail.header.id.change.hex
                         });
                         if same_revision {
-                            view.marked_files
+                            view.inspected
+                                .marked
                                 .retain(|path| detail.files.iter().any(|file| &file.path == path));
                         } else {
-                            view.marked_files.clear();
+                            view.inspected.marked.clear();
                         }
-                        view.detail = Some(detail);
-                        match staged_keep {
-                            Some(ix) if keep.is_none() => view.select_staged_file(ix, cx),
-                            _ => view.select_file(keep.or(first), cx),
+                        // this tab's working copy: what was included of it
+                        // stays while it is there as it was
+                        if is_this_working_copy(&detail.header) {
+                            let next = &mut view.next_commit;
+                            next.included.follow(&detail.header.id.change.hex);
+                            if next.included.keep_current(&detail.files) {
+                                next.lines_left_out = true;
+                            }
                         }
+                        view.inspected.detail = Some(detail);
+                        view.select_file(keep.or(first), cx);
                     }
                     Ok(None) => {
-                        view.detail = None;
-                        view.marked_files.clear();
+                        view.inspected.detail = None;
+                        view.inspected.marked.clear();
                         view.select_file(None, cx);
                     }
                     Err(err) => {
                         // Never leave the previous revision on screen for the new selection.
                         log::warn!("revision query failed: {err:#}");
-                        view.detail = None;
-                        view.marked_files.clear();
+                        view.inspected.detail = None;
+                        view.inspected.marked.clear();
                         view.select_file(None, cx);
                     }
                 }
@@ -1319,32 +1316,18 @@ impl RepoView {
     }
 
     fn select_file(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
-        self.selected_file = ix;
-        self.staged_file = None;
-        self.diff_selection = None;
-        let patch = ix.and_then(|ix| file_patch(self.detail.as_ref()?, ix));
+        self.inspected.file = ix;
+        self.line_selection = None;
+        let patch = ix.and_then(|ix| file_patch(self.inspected.detail.as_ref()?, ix));
         self.diff.update(cx, |state, cx| state.set_files(patch, cx));
         cx.notify();
     }
 
-    /// Shows staged file `ix` (of the staging revision) in the diff.
-    fn select_staged_file(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.selected_file = None;
-        self.staged_file = Some(ix);
-        self.diff_selection = None;
-        let patch = self
-            .staged
-            .as_ref()
-            .and_then(|staged| file_patch(staged, ix));
-        self.diff.update(cx, |state, cx| state.set_files(patch, cx));
-        cx.notify();
-    }
-
-    /// The working copy is inspected as GitKraken's work in progress: its
-    /// changes unstaged, its staging revision's staged, and a commit message.
-    /// This tab's, mutable, on one parent.
-    pub(super) fn staging_mode(&self) -> bool {
-        self.detail.as_ref().is_some_and(|detail| {
+    /// The working copy is inspected as the next commit: a message, and its
+    /// changes with those to commit included (see `included`). This tab's,
+    /// mutable, on one parent.
+    pub(super) fn commit_mode(&self) -> bool {
+        self.inspected.detail.as_ref().is_some_and(|detail| {
             is_this_working_copy(&detail.header)
                 && !detail.header.is_immutable
                 && detail.parent_ids.len() == 1
@@ -1592,12 +1575,12 @@ impl Render for RepoView {
                         return;
                     }
                     // the working copy is described by committing it
-                    let input = if view.staging_mode() {
-                        &view.commit_input
+                    let editor = if view.commit_mode() {
+                        &view.next_commit.message
                     } else {
-                        &view.description_input
+                        &view.description.editor
                     };
-                    input.update(cx, |state, cx| state.focus(window, cx));
+                    editor.focus(window, cx);
                 }),
             )
             .on_action(
@@ -1676,12 +1659,21 @@ impl Render for RepoView {
                 view.prompt_split_lines(window, cx)
             }))
             .on_action(
+                cx.listener(|view, _: &actions::IncludeAllChanges, _, cx| {
+                    view.include_all(true, cx)
+                }),
+            )
+            .on_action(cx.listener(|view, _: &actions::ExcludeAllChanges, _, cx| {
+                view.include_all(false, cx)
+            }))
+            .on_action(
                 cx.listener(|view, _: &actions::FindCommit, window, cx| view.open_find(window, cx)),
             )
             .on_action(
                 cx.listener(|view, _: &actions::FocusPanelFilter, window, cx| {
                     view.sidebar_visible = true;
-                    view.panel_filter
+                    view.panel
+                        .filter
                         .update(cx, |state, cx| state.focus(window, cx));
                     cx.notify();
                 }),
@@ -1708,20 +1700,19 @@ impl RepoView {
     /// per working copy: committing everything describes it with the box's
     /// message, which would drop a description typed before (`jj describe`).
     fn prefill_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.staging_mode() {
+        if !self.commit_mode() {
             return;
         }
-        let Some(header) = self.detail.as_ref().map(|detail| &detail.header) else {
+        let Some(header) = self.inspected.detail.as_ref().map(|detail| &detail.header) else {
             return;
         };
-        if self.commit_prefilled.as_deref() == Some(header.id.change.hex.as_str()) {
+        if self.next_commit.prefilled.as_deref() == Some(header.id.change.hex.as_str()) {
             return;
         }
-        self.commit_prefilled = Some(header.id.change.hex.clone());
-        let description = header.description.lines.join("\n").trim().to_owned();
-        if !description.is_empty() && self.commit_input.read(cx).value().trim().is_empty() {
-            self.commit_input
-                .update(cx, |state, cx| state.set_value(description, window, cx));
+        self.next_commit.prefilled = Some(header.id.change.hex.clone());
+        let description = header.description.lines.join("\n");
+        if !description.trim().is_empty() && self.next_commit.message.text(cx).is_empty() {
+            self.next_commit.message.set(&description, window, cx);
         }
     }
 
@@ -1729,23 +1720,19 @@ impl RepoView {
     /// selection changes. For the same change it follows jj's text (e.g. after
     /// a save or a snapshot) only while the user has no unsaved edits.
     fn sync_description(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(header) = self.detail.as_ref().map(|detail| &detail.header) else {
+        let Some(header) = self.inspected.detail.as_ref().map(|detail| &detail.header) else {
             return;
         };
         let change = header.id.change.hex.clone();
-        let text = header.description.lines.join("\n").trim_end().to_owned();
-        let current = self
-            .description_input
-            .read(cx)
-            .value()
-            .trim_end()
-            .to_owned();
+        // both as the fields read them back (see `message::normal_message`)
+        let text = message::normal_message(&header.description.lines.join("\n"));
+        let current = self.description.editor.text(cx);
 
-        if let Some((loaded_change, loaded_text)) = &self.description_for {
+        if let Some((loaded_change, loaded_text)) = &self.description.loaded {
             if *loaded_change == change {
                 if current == text {
                     // Saved (or changed to the same text elsewhere): track the new text.
-                    self.description_for = Some((change, text));
+                    self.description.loaded = Some((change, text));
                     return;
                 }
                 if current != *loaded_text {
@@ -1755,33 +1742,59 @@ impl RepoView {
                 // Not editing and jj's text changed (undo, the jj CLI): load it below.
             } else if current != *loaded_text {
                 // Leaving a change with unsaved edits: keep them as a draft.
-                self.description_drafts
+                self.description
+                    .drafts
                     .insert(loaded_change.clone(), current.clone());
             }
         }
 
         // A draft left on this change earlier comes back; otherwise jj's text.
         let value = self
-            .description_drafts
+            .description
+            .drafts
             .remove(&change)
             .unwrap_or_else(|| text.clone());
-        self.description_input
-            .update(cx, |state, cx| state.set_value(value, window, cx));
-        self.description_for = Some((change, text));
+        self.description.editor.set(&value, window, cx);
+        self.description.loaded = Some((change, text));
     }
 
     fn detail_is_immutable(&self) -> bool {
-        self.detail
+        self.inspected
+            .detail
             .as_ref()
             .is_some_and(|detail| detail.header.is_immutable)
     }
 
     /// True when the editor differs from the selected revision's description.
     fn description_dirty(&self, cx: &App) -> bool {
-        self.detail.as_ref().is_some_and(|detail| {
-            let saved = detail.header.description.lines.join("\n");
-            self.description_input.read(cx).value().trim_end() != saved.trim_end()
+        self.inspected.detail.as_ref().is_some_and(|detail| {
+            let saved = message::normal_message(&detail.header.description.lines.join("\n"));
+            self.description.editor.text(cx) != saved
         })
+    }
+}
+
+/// One of the tab's panes, for state only it shows (see
+/// [`RepoView::notify_pane`]).
+#[derive(Clone, Copy)]
+enum PaneId {
+    Log,
+    Side,
+    Inspector,
+}
+
+impl RepoView {
+    /// Draws `pane` again, and the tab around it as GPUI marks it, but not
+    /// the other panes: for state that pane alone shows, changed often (a
+    /// hover, a key typed in its field). Anything else notifies the tab,
+    /// and every pane draws again.
+    fn notify_pane(&self, pane: PaneId, cx: &mut Context<Self>) {
+        let pane = match pane {
+            PaneId::Log => &self.panes.log,
+            PaneId::Side => &self.panes.side,
+            PaneId::Inspector => &self.panes.inspector,
+        };
+        pane.update(cx, |_, cx| cx.notify());
     }
 }
 

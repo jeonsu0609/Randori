@@ -534,6 +534,16 @@ impl RandoriApp {
                     Box::new(repo::SplitLines),
                 ),
                 (
+                    "Include every change in the next commit",
+                    IconName::Plus,
+                    Box::new(repo::IncludeAllChanges),
+                ),
+                (
+                    "Leave every change out of the next commit",
+                    IconName::Minus,
+                    Box::new(repo::ExcludeAllChanges),
+                ),
+                (
                     "Discard file changes",
                     IconName::FileX,
                     Box::new(repo::RestoreFile),

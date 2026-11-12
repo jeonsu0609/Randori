@@ -124,8 +124,8 @@ impl RepoView {
         let Some(this_workspace) = self.workspace.as_ref().map(|ws| ws.name.clone()) else {
             return;
         };
-        self.panel_generation += 1;
-        let generation = self.panel_generation;
+        self.panel.generation += 1;
+        let generation = self.panel.generation;
         let worker = self.worker.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -134,12 +134,12 @@ impl RepoView {
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                if view.panel_generation != generation {
+                if view.panel.generation != generation {
                     return;
                 }
                 match result {
                     Ok(headers) => {
-                        (view.panel_refs, view.panel_workspaces) =
+                        (view.panel.refs, view.panel.workspaces) =
                             panel_items(&headers, &this_workspace);
                     }
                     // the items of the last answer stay, placed in the new rows
@@ -156,9 +156,9 @@ impl RepoView {
     /// numbers) or a new current bookmark. Their names stay as they are.
     pub(super) fn place_panel_items(&mut self) {
         place_panel_items(
-            &mut self.panel_refs,
-            &mut self.panel_workspaces,
-            &self.row_of_commit,
+            &mut self.panel.refs,
+            &mut self.panel.workspaces,
+            &self.log.row_of_commit,
             self.current_bookmark.as_deref(),
         );
     }
@@ -184,17 +184,17 @@ impl RepoView {
     }
 
     fn toggle_section(&mut self, section: PanelSection, cx: &mut Context<Self>) {
-        if !self.panel_collapsed.remove(&section) {
-            self.panel_collapsed.insert(section);
+        if !self.panel.collapsed.remove(&section) {
+            self.panel.collapsed.insert(section);
         }
-        cx.notify();
+        self.notify_pane(PaneId::Side, cx);
     }
 
     pub(super) fn render_refs_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let needle = self.panel_filter.read(cx).value().trim().to_lowercase();
+        let needle = self.panel.filter.read(cx).value().trim().to_lowercase();
         let filtering = !needle.is_empty();
         let (mut local, mut remote, mut tags) = (Vec::new(), Vec::new(), Vec::new());
-        for (key, item) in self.panel_refs.iter().enumerate() {
+        for (key, item) in self.panel.refs.iter().enumerate() {
             if filtering && !item.search.contains(&needle) {
                 continue;
             }
@@ -205,7 +205,8 @@ impl RepoView {
             }
         }
         let workspaces: Vec<(usize, &WorkspaceItem)> = self
-            .panel_workspaces
+            .panel
+            .workspaces
             .iter()
             .enumerate()
             .filter(|(_, item)| !filtering || item.name.to_lowercase().contains(&needle))
@@ -213,7 +214,7 @@ impl RepoView {
         let pulls = self.render_pulls(&needle, cx);
         let viewing = local.len() + remote.len() + tags.len() + workspaces.len();
         // a filter opens every section, so what matches is in view
-        let open = |section| filtering || !self.panel_collapsed.contains(&section);
+        let open = |section| filtering || !self.panel.collapsed.contains(&section);
 
         let mut body = v_flex().pb_2();
         body = body.child(self.section_header(
@@ -288,7 +289,7 @@ impl RepoView {
             )
             .child(
                 div().px_3().pb_2().flex_none().child(
-                    Input::new(&self.panel_filter)
+                    Input::new(&self.panel.filter)
                         .small()
                         .suffix(gpui_kit::component::Icon::new(IconName::Search).xsmall())
                         .cleanable(true),
@@ -378,18 +379,19 @@ impl RepoView {
     fn folder_open(&self, section: PanelSection, key: &str, depth: usize, current: bool) -> bool {
         let by_default = current || (section == PanelSection::Remote && depth == 0);
         let flipped = self
-            .panel_folders
+            .panel
+            .folders
             .get(&section)
             .is_some_and(|folders| folders.contains(key));
         by_default != flipped
     }
 
     fn toggle_folder(&mut self, section: PanelSection, key: &str, cx: &mut Context<Self>) {
-        let folders = self.panel_folders.entry(section).or_default();
+        let folders = self.panel.folders.entry(section).or_default();
         if !folders.remove(key) {
             folders.insert(key.to_owned());
         }
-        cx.notify();
+        self.notify_pane(PaneId::Side, cx);
     }
 
     /// A folder of the tree: a click folds or unfolds it.

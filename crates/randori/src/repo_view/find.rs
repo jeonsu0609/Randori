@@ -121,7 +121,8 @@ impl RepoView {
             .take_while(|&ix| ix < from)
             .collect();
         matches.extend(
-            self.rows
+            self.log
+                .rows
                 .iter()
                 .enumerate()
                 .skip(from)
@@ -166,7 +167,7 @@ impl RepoView {
     /// Selects the next (`delta` 1) or previous (-1) match, wrapping around,
     /// or past the last one loads more rows when there are some.
     pub(super) fn step_find(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let has_more = self.has_more;
+        let has_more = self.paging.has_more;
         let Some(find) = &mut self.find else {
             return;
         };
@@ -198,12 +199,12 @@ impl RepoView {
         let has_text = !find.input.read(cx).value().trim().is_empty();
         let count = match (find.matches.len(), find.current) {
             _ if !has_text => String::new(),
-            (0, _) if self.has_more => "None loaded".to_owned(),
+            (0, _) if self.paging.has_more => "None loaded".to_owned(),
             (0, _) => "No results".to_owned(),
             (n, current) => format!(
                 "{} of {n}{}",
                 current.map_or("–".to_owned(), |at| (at + 1).to_string()),
-                if self.has_more { "+" } else { "" }
+                if self.paging.has_more { "+" } else { "" }
             ),
         };
         h_flex()
@@ -254,7 +255,7 @@ impl RepoView {
                     .xsmall()
                     .icon(IconName::ArrowDown)
                     .tooltip("Next match (Enter)")
-                    .disabled(find.matches.is_empty() && !self.has_more)
+                    .disabled(find.matches.is_empty() && !self.paging.has_more)
                     .on_click(cx.listener(|view, _, _, cx| view.step_find(1, cx))),
             )
             .child(

@@ -146,7 +146,7 @@ impl RepoView {
     /// `jj new` on it would make again.
     fn is_new_change_on(&self, id: &RevId) -> bool {
         !self.working_copy_changed
-            && self.rows.iter().any(|row| {
+            && self.log.rows.iter().any(|row| {
                 let rev = &row.revision;
                 is_this_working_copy(rev)
                     && rev
@@ -162,17 +162,17 @@ impl RepoView {
     /// loaded or not, after the log changed.
     pub(super) fn refresh_conflicts(&mut self, cx: &mut Context<Self>) {
         let worker = self.worker.clone();
-        self.conflicts_loading = true;
-        self.conflicts_task = Some(cx.spawn(async move |this, cx| {
+        self.conflicts.loading = true;
+        self.conflicts.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     worker.query_headers(CONFLICT_REVSET.to_owned(), CONFLICT_LIMIT)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                view.conflicts_loading = false;
+                view.conflicts.loading = false;
                 match result {
-                    Ok(headers) => view.conflicts = headers,
+                    Ok(headers) => view.conflicts.revisions = headers,
                     Err(err) => log::warn!("conflict query failed: {err:#}"),
                 }
                 cx.notify();
@@ -183,18 +183,20 @@ impl RepoView {
     /// Selects the next conflicted revision below the selection, wrapping. One
     /// that is not loaded is shown with "All branches".
     pub(super) fn select_next_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.conflicts.is_empty() {
+        if self.conflicts.revisions.is_empty() {
             return;
         }
         self.close_focus(window, cx);
         let row_of = |hex: &str| {
-            self.rows
+            self.log
+                .rows
                 .iter()
                 .position(|row| row.revision.id.commit.hex == hex)
         };
         let after = self.selected.unwrap_or(0);
         let loaded: Vec<usize> = self
             .conflicts
+            .revisions
             .iter()
             .filter_map(|header| row_of(&header.id.commit.hex))
             .collect();
@@ -208,6 +210,7 @@ impl RepoView {
         // the selection is already past the last loaded one
         let unloaded = self
             .conflicts
+            .revisions
             .iter()
             .find(|header| row_of(&header.id.commit.hex).is_none());
         match (next_loaded, unloaded) {
@@ -426,7 +429,7 @@ impl RepoView {
             .unwrap_or_default();
         let ready = matches!(self.state, LoadState::Ready);
         let bookmark = self.current_bookmark();
-        let conflicts = self.conflicts.len();
+        let conflicts = self.conflicts.revisions.len();
         h_flex()
             .min_w_0()
             .gap_1()

@@ -80,9 +80,10 @@ impl RepoView {
             return;
         }
         let Some((detail, file)) = self
+            .inspected
             .detail
             .as_ref()
-            .and_then(|detail| Some((detail, detail.files.get(self.selected_file?)?)))
+            .and_then(|detail| Some((detail, detail.files.get(self.inspected.file?)?)))
         else {
             return;
         };

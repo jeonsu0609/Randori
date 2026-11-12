@@ -25,12 +25,13 @@ pub(super) fn revision_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
 }
 
 /// Commands for a changed file in the inspector.
-/// `picked` is how many files the menu acts on, for Split.
+/// `picked` is how many files the menu acts on, for Split; `None` in the
+/// working copy, which is split by committing what is ticked.
 pub(super) fn file_menu(
     menu: PopupMenu,
     has_conflict: bool,
     immutable: bool,
-    picked: usize,
+    picked: Option<usize>,
     focus: FocusHandle,
 ) -> PopupMenu {
     use actions::*;
@@ -50,14 +51,16 @@ pub(super) fn file_menu(
     if immutable {
         menu
     } else {
-        let split = if picked > 1 {
-            format!("Split {picked} files into a new commit…")
-        } else {
-            "Split into a new commit…".to_owned()
+        let menu = menu.separator();
+        let menu = match picked {
+            Some(picked) if picked > 1 => menu.menu(
+                format!("Split {picked} files into a new commit…"),
+                Box::new(SplitFiles),
+            ),
+            Some(_) => menu.menu("Split into a new commit…", Box::new(SplitFiles)),
+            None => menu,
         };
-        menu.separator()
-            .menu(split, Box::new(SplitFiles))
-            .menu("Move to revision…", Box::new(PickMoveFile))
+        menu.menu("Move to revision…", Box::new(PickMoveFile))
             .menu("Squash into parent", Box::new(SquashFile))
             .menu("Discard changes…", Box::new(RestoreFile))
     }
