@@ -50,7 +50,8 @@ pub fn forget(cx: &mut gpui_kit::App) {
 
 /// `key` with each `@name` among its points (`click:@summary`,
 /// `drag:@a;@b`) turned into the middle of the element drawn under that
-/// name; `None` when one has not been drawn.
+/// name, moved by an offset when the name ends in one (`@line:new:2-40+0`,
+/// 40 points left of it); `None` when one has not been drawn.
 #[cfg(feature = "screenshot")]
 pub fn resolve(key: &str, cx: &gpui_kit::App) -> Option<String> {
     let (kind, points) = key.split_once(':')?;
@@ -58,13 +59,57 @@ pub fn resolve(key: &str, cx: &gpui_kit::App) -> Option<String> {
     let points = points
         .split(';')
         .map(|point| match point.strip_prefix('@') {
-            Some(name) => {
+            Some(named) => {
+                let (name, (dx, dy)) = split_offset(named);
                 let bounds = marks?.0.get(name)?;
                 let middle = bounds.center();
-                Some(format!("{};{}", f32::from(middle.x), f32::from(middle.y)))
+                Some(format!(
+                    "{};{}",
+                    f32::from(middle.x) + dx,
+                    f32::from(middle.y) + dy
+                ))
             }
             None => Some(point.to_owned()),
         })
         .collect::<Option<Vec<_>>>()?;
     Some(format!("{kind}:{}", points.join(";")))
+}
+
+/// A mark's name and the offset after it: `name+DX+DY` (either sign), or
+/// the name alone and no offset.
+#[cfg(any(feature = "screenshot", test))]
+fn split_offset(named: &str) -> (&str, (f32, f32)) {
+    // the two signed numbers at the end, the last first
+    fn signed_tail(s: &str) -> Option<(&str, f32)> {
+        let at = s.rfind(['+', '-'])?;
+        let number = s[at + 1..].parse::<f32>().ok()?;
+        let number = if s[at..].starts_with('-') {
+            -number
+        } else {
+            number
+        };
+        Some((&s[..at], number))
+    }
+    signed_tail(named)
+        .and_then(|(rest, dy)| {
+            let (name, dx) = signed_tail(rest)?;
+            (!name.is_empty()).then_some((name, (dx, dy)))
+        })
+        .unwrap_or((named, (0., 0.)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_offset;
+
+    #[test]
+    fn a_name_may_end_in_an_offset() {
+        assert_eq!(split_offset("summary"), ("summary", (0., 0.)));
+        assert_eq!(split_offset("line:new:2-40+0"), ("line:new:2", (-40., 0.)));
+        assert_eq!(
+            split_offset("include:a-b.txt"),
+            ("include:a-b.txt", (0., 0.))
+        );
+        assert_eq!(split_offset("x+1.5-2"), ("x", (1.5, -2.)));
+    }
 }
