@@ -984,7 +984,7 @@ impl RepoView {
                 .threads_total
                 .saturating_sub(detail.threads.len() as u64)
         });
-        let diff = split::styled_diff(&pull.diff, cx)
+        let diff = split_diff::styled_diff(&pull.diff, cx)
             .line_number(true)
             .annotations(pull.threads.annotations.iter().cloned())
             .render_annotation({

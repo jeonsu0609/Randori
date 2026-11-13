@@ -380,7 +380,7 @@ here** (colocated with git when the folder already is one) and **Try again**
 | `--select-row <n>` | Select the n-th log row once loaded |
 | `--size <WxH>` | Open the window this size in points, e.g. `1000x700` |
 | `--screenshot <png>` | Render the first screen offscreen and exit; needs `--features screenshot` |
-| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points, `move:X;Y` hovers, `scroll:X;Y;DY` turns the wheel, and `bench:X;Y;DY;N` turns it N times and prints how long each frame took to draw (median and slowest) |
+| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `cmdclick:X;Y` (with ⌘), `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points, or at `@name`, the middle of an element the app marks (e.g. `click:@summary`, `click:@include:a.txt`), `move:X;Y` hovers, `scroll:X;Y;DY` turns the wheel, and `bench:X;Y;DY;N` turns it N times and prints how long each frame took to draw (median and slowest) |
 
 The screenshots above were produced with:
 
@@ -396,10 +396,10 @@ a small notes repository, made under a placeholder identity
 
 `script/ui-flow-test.sh` drives the commit flow through the app the same way
 (a summary typed and `⌘↩` with nothing included; a summary, Enter, a
-description; every change included and left out, which writes nothing; a
-file's box ticked; a file `⌘`-clicked; a file split off a described,
-bookmarked working copy; two line numbers dragged over and Include lines
-clicked;
+description, saved as jj saves it; every change included and left out,
+which writes nothing; a file's box ticked; a file `⌘`-clicked; two of four
+files ticked; a file split off a described, bookmarked working copy; two
+line numbers dragged over and Include lines clicked;
 an unchanged description not saved again) on a throwaway repository and
 checks what jj recorded. CI runs it on macOS, and builds
 Randori for Windows.
@@ -408,7 +408,8 @@ Randori for Windows.
 
 ```text
 crates/randori   app_view       tabs, rail, palette, settings, saved session
-                 repo_view      one workspace: state, loading, selection, actions, keys
+                 repo_view      one workspace: state, loading, selection, keys
+                   actions_bound  each of the tab's actions bound to what it does
                    model        rows, refs, files and diffs built from worker data
                    log_list     graph log rows and header
                    panels       toolbar, status bar, layout
@@ -418,12 +419,15 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                    inspector    revision details, changed files, diff
                    message      the summary and description fields of a message
                    included     what the next commit includes of the working copy
-                   ops          jj mutations (new, describe, abandon, push, rebase, …)
+                   next_commit  including changes, Commit (jj commit -i), Split off (jj split)
+                   lines        a diff's lines: selections, hunks of some lines, line commands
+                   ops          jj mutations (new, describe, abandon, rebase, files, bookmarks, …)
+                   remote       push, fetch (also automatic) and git credentials
                    pick         choosing a target revision from the keyboard
                    pulls        the pull requests section
                    focus        a file's full view: diff, file, blame, history
                    switcher     workspace and bookmark switchers, conflict count
-                   split        the movable divider of split diffs
+                   split_diff   the movable divider of split diffs
                    terminal_panel  the terminal at the bottom of a tab
                    dnd, menus   drag payloads, context menus
                  graph          graph lanes, branch colours and avatars per virtual-list row
@@ -431,6 +435,7 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                  terminal       a shell in a PTY (alacritty_terminal) drawn with GPUI
                  worker         one jj worker thread per tab
                  harness        the screenshot harness (--screenshot, --keys)
+                 harness_mark   elements named for the harness's click:@name
                  assets         embedded icons
                  theme          Randori's colours over gpui-kit's (theme.json)
       │  SessionEvent requests over a channel per tab, push events back through EventSink

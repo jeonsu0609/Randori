@@ -45,11 +45,14 @@ run_app() {
     "$bin" "$work/repo" --size 1440x900 --select-row "${2:-0}" --keys "$1" \
         --screenshot "$work/shot.png" >/dev/null &
     local app=$!
-    (sleep 120 && kill "$app" 2>/dev/null) &
+    # (its own notice that the sleep was stopped goes nowhere)
+    (sleep 120 && kill "$app") 2>/dev/null &
     local watchdog=$!
     # not a job of this shell: stopping it prints nothing
     disown "$watchdog"
-    wait "$app" || fail "the app did not finish '$1' (is the screen locked?)"
+    wait "$app" || fail "the app did not finish '$1' (a step it could not take, or a locked screen)"
+    # the watchdog and the sleep it waits on
+    pkill -P "$watchdog" 2>/dev/null || true
     kill "$watchdog" 2>/dev/null || true
 }
 
@@ -82,8 +85,9 @@ echo "ui-flow-test: commit every change: ok"
 # blank line between them.
 fresh_repo
 run_app 'd,f,i,x,enter,w,h,y,cmd-enter'
-[ "$(jj_in log -r @- --no-graph -T 'description')" = "$(printf 'fix\n\nwhy')" ] ||
-    fail "the commit is described '$(jj_in log -r @- --no-graph -T 'description')'"
+# as `jj commit -m fix -m why` writes it, ending with a newline
+[ "$(jj_in log -r @- --no-graph -T 'description.escape_json()')" = '"fix\n\nwhy\n"' ] ||
+    fail "the commit is described $(jj_in log -r @- --no-graph -T 'description.escape_json()')"
 echo "ui-flow-test: summary and description: ok"
 
 # Including is the tab's own: jj records nothing until the commit. (The
@@ -96,27 +100,37 @@ run_app 'action:randori::IncludeAllChanges,action:randori::ExcludeAllChanges'
 echo "ui-flow-test: including writes nothing: ok"
 
 # c.txt's box ticked: the commit has c.txt, the new working copy a.txt.
-# The points are for a 1440x900 window (see `run_app`).
+# `@name` is an element the app marks (see harness_mark.rs).
 fresh_repo
-run_app 'click:1111;466,d,c,cmd-enter'
+run_app 'click:@include:c.txt,d,c,cmd-enter'
 [ "$(changed @-)" = "c.txt " ] || fail "the commit has '$(changed @-)'"
 [ "$(changed @)" = "a.txt " ] || fail "the working copy has '$(changed @)'"
 echo "ui-flow-test: commit an included file: ok"
 
 # ⌘-click on c.txt's name ticks its box, as Split's pick does elsewhere.
 fresh_repo
-run_app 'cmdclick:1165;466,click:1179;146,c,cmd-enter'
+run_app 'cmdclick:@file:c.txt,click:@summary,c,cmd-enter'
 [ "$(changed @-)" = "c.txt " ] || fail "the commit has '$(changed @-)'"
 [ "$(changed @)" = "a.txt " ] || fail "the working copy has '$(changed @)'"
 echo "ui-flow-test: ⌘-click includes a file: ok"
 
+# Two of four files ticked (c.txt and e.txt, with d.txt between them left
+# out): the commit has those two, the new working copy the other two.
+fresh_repo
+(cd "$work/repo" && printf 'd\n' >d.txt && printf 'e\n' >e.txt)
+run_app 'click:@include:c.txt,click:@include:e.txt,click:@summary,t,w,o,cmd-enter'
+[ "$(changed @-)" = "c.txt e.txt " ] || fail "the commit has '$(changed @-)'"
+[ "$(jj_in log -r @- --no-graph -T 'description.first_line()')" = two ] ||
+    fail "the commit is not described 'two'"
+[ "$(changed @)" = "a.txt d.txt " ] || fail "the working copy has '$(changed @)'"
+echo "ui-flow-test: commit two of four files: ok"
+
 # Split off, as `jj split c.txt`: c.txt goes with the message typed and the
 # change id; the working copy keeps a.txt, its description and its bookmark.
-# (The bookmark's chip moves the files down a row: other points.)
 fresh_repo
 (cd "$work/repo" && jj describe -m wip >/dev/null 2>&1 && jj bookmark create -r @ topic >/dev/null 2>&1)
 change="$(jj_in log -r @ --no-graph -T 'change_id')"
-run_app 'click:1111;493,click:1179;146,cmd-a,f,i,x,click:1282;231'
+run_app 'click:@include:c.txt,click:@summary,cmd-a,f,i,x,click:@split-off'
 [ "$(changed @-)" = "c.txt " ] || fail "the split-off revision has '$(changed @-)'"
 [ "$(jj_in log -r @- --no-graph -T 'description.first_line()')" = fix ] ||
     fail "the split-off revision is not described 'fix'"
@@ -130,8 +144,9 @@ run_app 'click:1111;493,click:1179;146,cmd-a,f,i,x,click:1282;231'
 echo "ui-flow-test: split off what is included: ok"
 
 # Drag over two line numbers, Include lines, commit: the commit has those
-# lines, the new working copy the rest of the file. The click on Include
-# lines is the one gpui-kit used to clear the selection for (see
+# lines, the new working copy the rest of the file. The line numbers are
+# points in a 1440x900 window (see `run_app`); the click on Include lines is
+# the one gpui-kit used to clear the selection for (see
 # doc/randori/gpui-kit-patch.md).
 rm -rf "$work/repo"
 mkdir -p "$work/repo"
@@ -144,7 +159,7 @@ mkdir -p "$work/repo"
     printf 'one\nONE-A\nONE-B\ntwo\nthree\nTHREE-A\n' >a.txt
 )
 # (D is the log's key: after the drag the summary is clicked instead.)
-run_app 'drag:382;626;382;647,click:759;517,click:1179;146,l,cmd-enter'
+run_app 'drag:382;626;382;647,click:@include-lines,click:@summary,l,cmd-enter'
 added() {
     jj_in diff -r "$1" --git | grep '^+[^+]' | tr '\n' ' '
 }

@@ -7,6 +7,8 @@ use std::{cell::Cell, rc::Rc};
 
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 
+use crate::harness_mark::HarnessMark as _;
+
 use super::*;
 
 /// The summary and description fields of a message.
@@ -109,6 +111,8 @@ impl MessageEditor {
         } else {
             theme.muted_foreground
         };
+        let tip: SharedString =
+            format!("Summary: {len} characters · aim for {long}, at most {too_long}").into();
         v_flex()
             .py_1()
             .rounded(theme.radius)
@@ -120,24 +124,25 @@ impl MessageEditor {
             })
             .bg(theme.background)
             .child(
-                Input::new(&self.summary)
-                    .appearance(false)
-                    .text_base()
-                    .font_medium()
-                    .suffix(
-                        div()
-                            .id("summary-length")
-                            .text_xs()
-                            .font_normal()
-                            .text_color(color)
-                            .child(format!("{len} / {too_long}"))
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(format!(
-                                    "Summary: {len} characters · aim for {long}, at most {too_long}"
-                                ))
-                                .build(window, cx)
-                            }),
-                    ),
+                // a mark takes children, which an Input does not
+                div().harness_mark(|| "summary").child(
+                    Input::new(&self.summary)
+                        .appearance(false)
+                        .text_base()
+                        .font_medium()
+                        .suffix(
+                            div()
+                                .id("summary-length")
+                                .text_xs()
+                                .font_normal()
+                                .text_color(color)
+                                .child(format!("{len} / {too_long}"))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                }),
+                        ),
+                ),
             )
             .child(Textarea::new(&self.body).appearance(false).small())
             .into_any_element()

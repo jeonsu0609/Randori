@@ -5,6 +5,7 @@ use gpui_kit::component::ElementExt as _;
 
 use super::included::Inclusion;
 use super::*;
+use crate::harness_mark::HarnessMark as _;
 
 impl RepoView {
     pub(super) fn render_inspector(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -316,6 +317,7 @@ impl RepoView {
             .children(detail.files.iter().enumerate().map(|(ix, file)| {
                 let marked = self.inspected.marked.contains(&file.path);
                 ListItem::new(("file", ix))
+                    .harness_mark(|| format!("file:{}", file.tree_path.repo_path))
                     .px_4()
                     .py_1()
                     .selected(self.inspected.file == Some(ix) || marked)
@@ -342,6 +344,9 @@ impl RepoView {
                                         },
                                         theme,
                                     )
+                                    .harness_mark(|| {
+                                        format!("include:{}", file.tree_path.repo_path)
+                                    })
                                     .on_click(cx.listener(
                                         move |view, _, _, cx| {
                                             cx.stop_propagation();
@@ -463,6 +468,7 @@ impl RepoView {
                     .when(!included.is_empty(), |this| {
                         this.child(
                             Button::new("split-included")
+                                .harness_mark(|| "split-off")
                                 .small()
                                 .outline()
                                 .label("Split off")
@@ -524,6 +530,7 @@ impl RepoView {
             Some(LineCommand::Include) => {
                 let all_in = self.selected_lines_included();
                 Button::new("include-lines")
+                    .harness_mark(|| "include-lines")
                     .small()
                     .outline()
                     .icon(if all_in {
@@ -581,7 +588,7 @@ impl RepoView {
     /// What a changed line's button does in `file`'s diff: in the working
     /// copy's, include it in the commit or leave it out, elsewhere squash it
     /// into the parent. `None` where the revision cannot be rewritten.
-    pub(super) fn line_command(&self, file: &super::ops::ShownFile) -> Option<LineCommand> {
+    pub(super) fn line_command(&self, file: &super::lines::ShownFile) -> Option<LineCommand> {
         if file.immutable {
             return None;
         }
@@ -599,7 +606,7 @@ impl RepoView {
     pub(super) fn with_line_buttons(
         &self,
         diff: gpui_kit::component::diff::Diff,
-        file: &super::ops::ShownFile,
+        file: &super::lines::ShownFile,
         cx: &mut Context<Self>,
     ) -> gpui_kit::component::diff::Diff {
         use gpui_kit::component::diff::{DiffGutterMarker, DiffLinePosition, DiffSide};
@@ -639,7 +646,7 @@ impl RepoView {
         };
         diff.gutter_markers(markers)
             .render_gutter_marker(move |marker, _, cx| {
-                let side = super::ops::side_of(marker.position().side());
+                let side = super::lines::side_of(marker.position().side());
                 let line = marker.position().line();
                 let owner = owner.clone();
                 match command {
@@ -683,7 +690,7 @@ impl RepoView {
     }
 
     pub(super) fn render_changes(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut styled = split::styled_diff(&self.diff, cx).line_number(true);
+        let mut styled = split_diff::styled_diff(&self.diff, cx).line_number(true);
         if let Some(file) = self.shown_diff_file() {
             styled = self.with_line_buttons(styled, &file, cx);
         }

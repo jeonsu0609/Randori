@@ -115,7 +115,7 @@ mod tests {
             include_str!("repo_view/pull_view.rs"),
             include_str!("repo_view/pulls.rs"),
             include_str!("repo_view/refs_panel.rs"),
-            include_str!("repo_view/split.rs"),
+            include_str!("repo_view/split_diff.rs"),
             include_str!("repo_view/switcher.rs"),
             include_str!("repo_view/terminal_panel.rs"),
             include_str!("settings_window/mod.rs"),

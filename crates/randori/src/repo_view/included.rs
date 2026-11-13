@@ -8,11 +8,12 @@ use std::collections::BTreeMap;
 
 use gg_lib::messages::mutations::FileHunks;
 
-use super::model::changed_lines;
+use super::lines::changed_lines;
 
 use super::*;
 
-/// What a commit says when the lines included in it are no longer there.
+/// What a commit or Split off says when the lines included in it are no
+/// longer there.
 pub(super) const NOTHING_LEFT: &str =
     "The changes included are no longer in the working copy. Include them again.";
 

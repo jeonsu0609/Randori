@@ -5,7 +5,7 @@
 use gg_lib::messages::queries::{FileAnnotation, FileContent};
 use gpui_kit::component::diff::{DiffAnnotation, DiffLinePosition, DiffSide};
 
-use super::ops::ShownFile;
+use super::lines::ShownFile;
 use super::*;
 
 /// Revisions the history lists at most.
@@ -432,7 +432,7 @@ impl RepoView {
         let Some(hunk) = focus.hunks.get(ix) else {
             return;
         };
-        let keys = super::model::changed_line_positions(std::slice::from_ref(hunk));
+        let keys = super::lines::changed_line_positions(std::slice::from_ref(hunk));
         let (path, hunks) = (focus.path.repo_path.clone(), focus.hunks.clone());
         let included = &mut self.next_commit.included;
         let every = keys.iter().all(|&key| included.line(&path, key));
@@ -653,7 +653,7 @@ impl RepoView {
         let content = match focus.tab {
             FocusTab::Diff => self.render_focus_diff(focus, cx),
             FocusTab::File => match &focus.file_load {
-                Some(Load::Ready(())) => split::styled_diff(&focus.file, cx)
+                Some(Load::Ready(())) => split_diff::styled_diff(&focus.file, cx)
                     .line_number(true)
                     .header_visible(false)
                     .size_full()
@@ -768,7 +768,7 @@ impl RepoView {
             Vec::new()
         };
         let view = cx.entity().downgrade();
-        let mut styled = split::styled_diff(&focus.diff, cx)
+        let mut styled = split_diff::styled_diff(&focus.diff, cx)
             .line_number(true)
             .header_visible(false);
         // in the working copy a hunk is included in the next commit, as
@@ -782,7 +782,7 @@ impl RepoView {
                         .hunks
                         .iter()
                         .map(|hunk| {
-                            super::model::changed_line_positions(std::slice::from_ref(hunk))
+                            super::lines::changed_line_positions(std::slice::from_ref(hunk))
                                 .iter()
                                 .all(|&key| included.line(&focus.path.repo_path, key))
                         })
