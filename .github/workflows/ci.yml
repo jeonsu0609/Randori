@@ -56,12 +56,22 @@ jobs:
         # (Homebrew has a newer one): the CLI makes the test's repositories
         env:
           JJ_VERSION: 0.46.0
+          UI_FLOW_ARTIFACTS: ${{ runner.temp }}/ui-flow
         run: |
           curl -sSfL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-aarch64-apple-darwin.tar.gz" \
             | tar xz -C "$RUNNER_TEMP" ./jj
           export PATH="$RUNNER_TEMP:$PATH"
           jj --version
           script/ui-flow-test.sh
+
+      # the screen and the app's lines of a flow that failed
+      - name: Keep a failed flow's screen
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-flow
+          path: ${{ runner.temp }}/ui-flow
+          if-no-files-found: ignore
 
   windows:
     if: ${{ !github.event.pull_request.draft }}

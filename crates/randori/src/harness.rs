@@ -40,6 +40,14 @@ pub async fn run(
     keys: Vec<String>,
     path: PathBuf,
 ) {
+    // for a run that went wrong elsewhere (CI): the window it had
+    let _ = window.update(cx, |_, window, _| {
+        eprintln!(
+            "keys: window {:?}, scale {}",
+            window.viewport_size(),
+            window.scale_factor()
+        );
+    });
     // Drive the real key bindings, as a user would, before capturing.
     for key in keys {
         if let Some(spec) = key.strip_prefix("bench:") {
@@ -64,7 +72,10 @@ pub async fn run(
             // a step that cannot be taken fails the run, rather than going
             // on to fail somewhere it does not explain
             match resolved {
-                Ok(Some(key)) => key,
+                Ok(Some(resolved)) => {
+                    eprintln!("keys: {key} is {resolved}");
+                    resolved
+                }
                 Ok(None) => {
                     eprintln!("keys: nothing drawn is named in {key}");
                     std::process::exit(2);
