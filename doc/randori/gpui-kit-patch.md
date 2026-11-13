@@ -27,11 +27,11 @@ next to the crates.io one.
 | --- | --- | --- |
 | `split_ratio` | longbridge/gpui-kit#3883 | merged 2026-11-10 |
 | header in view | longbridge/gpui-kit#3884 | merged 2026-11-10 |
-| keep selection | longbridge/gpui-kit#3951 | open (2026-11-12; renamed from `text_selection_control` in review, 2026-11-13) |
+| keep selection | longbridge/gpui-kit#3951 | merged 2026-11-13 (renamed from `text_selection_control` in review) |
 
-The latest release, v0.9.1 (2026-11-09), has none of them. The fork is needed
-until a release has all three; then step 2 below drops it. Should #3951 change
-in review, the fork's commit and Randori's use of it change with it.
+All three are on gpui-kit's `main`, but the latest release, v0.9.1
+(2026-11-09), has none of them. The fork is needed until a release has all
+three; then step 2 below drops it.
 
 ## Updating
 
