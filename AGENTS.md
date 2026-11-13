@@ -60,16 +60,20 @@ A release is made when it is asked for, not on a schedule:
    `crates/randori/Cargo.toml`, which the app reports; merge it.
 2. Tag that commit of `main` `randori-v<version>` and push the tag. The prefix
    keeps Randori's tags apart from GG's (`v0.46.0` and before).
-3. `.github/workflows/release.yml` builds `Randori-<version>.dmg` with
-   `script/bundle-macos.sh --dmg` and drafts a GitHub release with it and
-   notes from the merged pull requests. It refuses a tag that is not the
-   crate's version.
-4. Check the disk image, then publish the draft.
+3. `.github/workflows/release.yml` builds three packages and drafts a GitHub
+   release with them and notes from the merged pull requests:
+   `Randori-<version>-macos-arm64.dmg` (`script/bundle-macos.sh --dmg`),
+   `-windows-x64.zip` (`randori.exe`) and `-linux-x64.tar.gz` (`randori`). It
+   refuses a tag that is not the crate's version.
+4. Check the packages, then publish the draft.
 
-The image is for Apple silicon (the runner's) and signed ad hoc, so macOS
-opens it on another Mac only through Open in the context menu; giving it out
-widely needs a Developer ID and notarization. Run by hand
-(`workflow_dispatch`), the workflow builds any branch's image as an artifact
+Each package is built on its runner's platform, untested there beyond CI's
+build. The macOS image is for Apple silicon and signed ad hoc, so macOS opens
+it on another Mac only through Open in the context menu; giving it out widely
+needs a Developer ID and notarization. The Windows executable is unsigned
+(SmartScreen warns), and a release build opens no console window. The Linux
+one needs GPUI's libraries (Vulkan, X11 or Wayland). Run by hand
+(`workflow_dispatch`), the workflow builds any branch's packages as artifacts
 and drafts nothing.
 
 ## Architecture

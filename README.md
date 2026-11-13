@@ -372,6 +372,11 @@ instead of the whole Lucide set:
 A release build takes about three minutes on an M-series Mac; `cargo run`
 stays fast because the debug profile is unchanged.
 
+Released builds for macOS (Apple silicon), Windows and Linux are on the
+[Releases](https://github.com/jeonsu0609/Randori/releases) page, signed ad hoc
+(macOS) or not at all (Windows): open the app with Open in its context menu
+the first time.
+
 Opening a folder that is not a jj repository offers **Create a jj repository
 here** (colocated with git when the folder already is one) and **Try again**
 (`⌘R`).
@@ -384,7 +389,7 @@ here** (colocated with git when the folder already is one) and **Try again**
 | `--select-row <n>` | Select the n-th log row once loaded |
 | `--size <WxH>` | Open the window this size in points, e.g. `1000x700` |
 | `--screenshot <png>` | Render the first screen offscreen and exit; needs `--features screenshot` |
-| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `cmdclick:X;Y` (with ⌘), `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points, or at `@name`, the middle of an element the app marks (e.g. `click:@summary`, `click:@include:a.txt`), `move:X;Y` hovers, `scroll:X;Y;DY` turns the wheel, and `bench:X;Y;DY;N` turns it N times and prints how long each frame took to draw (median and slowest) |
+| `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `cmdclick:X;Y` (with ⌘), `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points, or at `@name`, the middle of an element the app marks (e.g. `click:@summary`, `click:@include:a.txt`; `@line:new:2-25+0` is 25 points left of it), `move:X;Y` hovers, `scroll:X;Y;DY` turns the wheel, and `bench:X;Y;DY;N` turns it N times and prints how long each frame took to draw (median and slowest) |
 
 The screenshots above were produced with, for example:
 
