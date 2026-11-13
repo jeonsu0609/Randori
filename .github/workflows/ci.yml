@@ -1,12 +1,26 @@
 name: CI
 
+# When it runs (see AGENTS.md, "Branches and CI"): on main, on a pull request
+# that is ready for review, and by hand. Not on a draft, and not for a change
+# to documentation alone.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**/*.md", "doc/**"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore: ["**/*.md", "doc/**"]
+  workflow_dispatch:
+
+# A new push to a pull request stops the run on the one before; runs on main
+# all finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
+    if: ${{ !github.event.pull_request.draft }}
     # gpui renders through Metal on macOS; that is the platform Randori is built and tested on.
     runs-on: macos-latest
     steps:
@@ -50,6 +64,7 @@ jobs:
           script/ui-flow-test.sh
 
   windows:
+    if: ${{ !github.event.pull_request.draft }}
     # Randori is tested on macOS; this keeps it building where users run it too.
     runs-on: windows-latest
     steps:
