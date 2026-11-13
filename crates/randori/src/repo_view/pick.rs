@@ -126,35 +126,59 @@ impl RepoView {
             .border_b_1()
             .border_color(theme.primary.opacity(0.4))
             .child(
-                gpui_kit::component::Icon::new(IconName::MousePointerClick)
-                    .small()
-                    .text_color(theme.primary),
+                div().flex_none().child(
+                    gpui_kit::component::Icon::new(IconName::MousePointerClick)
+                        .small()
+                        .text_color(theme.primary),
+                ),
             )
-            .child(div().text_sm().font_medium().child(pick.prompt()))
+            // narrowed, the texts give way (the keys' hint first) and the
+            // buttons keep their size
             .child(
                 div()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_medium()
+                    .child(pick.prompt()),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .map(|mut hint| {
+                        hint.style().flex_shrink = Some(8.);
+                        hint
+                    })
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child("↑↓ to choose · Enter to apply · Esc to cancel"),
             )
             .child(div().flex_1())
             .child(
-                Button::new("pick-cancel")
-                    .ghost()
-                    .small()
-                    .label("Cancel")
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.pick = None;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("pick-apply")
-                    .primary()
-                    .small()
-                    .label(pick.verb())
-                    .disabled(self.selected.is_none())
-                    .on_click(cx.listener(|view, _, window, cx| view.confirm_pick(window, cx))),
+                h_flex()
+                    .flex_none()
+                    .gap_3()
+                    .child(
+                        Button::new("pick-cancel")
+                            .ghost()
+                            .small()
+                            .label("Cancel")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.pick = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("pick-apply")
+                            .primary()
+                            .small()
+                            .label(pick.verb())
+                            .disabled(self.selected.is_none())
+                            .on_click(
+                                cx.listener(|view, _, window, cx| view.confirm_pick(window, cx)),
+                            ),
+                    ),
             )
     }
 }
