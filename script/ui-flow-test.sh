@@ -144,10 +144,11 @@ run_app 'click:@include:c.txt,click:@summary,cmd-a,f,i,x,click:@split-off'
 echo "ui-flow-test: split off what is included: ok"
 
 # Drag over two line numbers, Include lines, commit: the commit has those
-# lines, the new working copy the rest of the file. The line numbers are
-# points in a 1440x900 window (see `run_app`); the click on Include lines is
-# the one gpui-kit used to clear the selection for (see
-# doc/randori/gpui-kit-patch.md).
+# lines, the new working copy the rest of the file. The drag is over the
+# new line numbers of lines 2 and 3, 25 points left of their boxes
+# (`@line:new:2-25+0`), so it follows the diff wherever it is drawn; the
+# click on Include lines is the one gpui-kit used to clear the selection for
+# (see doc/randori/gpui-kit-patch.md).
 rm -rf "$work/repo"
 mkdir -p "$work/repo"
 (
@@ -159,7 +160,7 @@ mkdir -p "$work/repo"
     printf 'one\nONE-A\nONE-B\ntwo\nthree\nTHREE-A\n' >a.txt
 )
 # (D is the log's key: after the drag the summary is clicked instead.)
-run_app 'drag:382;626;382;647,click:@include-lines,click:@summary,l,cmd-enter'
+run_app 'drag:@line:new:2-25+0;@line:new:3-25+0,click:@include-lines,click:@summary,l,cmd-enter'
 added() {
     jj_in diff -r "$1" --git | grep '^+[^+]' | tr '\n' ' '
 }

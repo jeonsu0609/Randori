@@ -656,19 +656,27 @@ impl RepoView {
                         } else {
                             Inclusion::Nothing
                         };
-                        div().child(
-                            inclusion_box(
-                                marker.id().clone(),
-                                state,
-                                marker.label().clone(),
-                                cx.theme(),
+                        div()
+                            .harness_mark(move || {
+                                let side = match side {
+                                    Side::Original => "old",
+                                    Side::Modified => "new",
+                                };
+                                format!("line:{side}:{line}")
+                            })
+                            .child(
+                                inclusion_box(
+                                    marker.id().clone(),
+                                    state,
+                                    marker.label().clone(),
+                                    cx.theme(),
+                                )
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |view, cx| {
+                                        view.toggle_lines((side, line), (side, line), cx)
+                                    });
+                                }),
                             )
-                            .on_click(move |_, _, cx| {
-                                let _ = owner.update(cx, |view, cx| {
-                                    view.toggle_lines((side, line), (side, line), cx)
-                                });
-                            }),
-                        )
                     }
                     LineCommand::Squash => div()
                         .invisible()
