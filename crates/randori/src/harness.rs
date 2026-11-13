@@ -8,11 +8,12 @@
 //! - `action:<namespace::Name>`: an action run as a menu item runs it,
 //!   through the focused element
 //! - `click:X;Y`, `cmdclick:X;Y` (with ⌘), `rclick:X;Y`, `dblclick:X;Y` and
-//!   `drag:X1;Y1;X2;Y2`: the mouse pressed at window points. A point can be
-//!   `@name` instead, the middle of the element marked `name` (see
-//!   `harness_mark`), e.g. `click:@summary`
+//!   `drag:X1;Y1;X2;Y2`: the mouse pressed at window points
 //! - `move:X;Y`: the pointer moved there, no button, to hover
 //! - `scroll:X;Y;DY`: the wheel turned DY points there
+//! - in any of these pointer steps, a point can be `@name` instead: the
+//!   middle of the element marked `name` (see `harness_mark`), e.g.
+//!   `click:@summary`, `scroll:@name;-200`
 //! - `bench:X;Y;DY;N`: the wheel turned N times, each frame drawn after it
 //!   (render, layout and paint) timed; prints the median and the slowest
 
@@ -23,6 +24,12 @@ use gpui_kit::{AnyWindowHandle, AsyncApp, Entity};
 use crate::app_view::RandoriApp;
 use crate::settings_window;
 use crate::wait_until_settled;
+
+/// The steps whose points `pointer_events` reads, so whose points can be
+/// `@name`.
+const POINTER_STEPS: [&str; 7] = [
+    "click", "cmdclick", "rclick", "dblclick", "drag", "move", "scroll",
+];
 
 /// Runs `keys` on `window`, then saves the window (or Settings', with
 /// `RANDORI_SETTINGS_PAGE`) to `path` and quits.
@@ -43,19 +50,27 @@ pub async fn run(
         // points named by an element (`click:@summary`), where it is drawn
         // now: the marks are made again by a frame drawn whole (`refresh`
         // passes the views' caches), so one no longer drawn has none
-        let key = if key.contains('@') {
+        // (only a pointer step's: a keystroke can be `@` itself)
+        let named = key
+            .split_once(':')
+            .is_some_and(|(kind, points)| POINTER_STEPS.contains(&kind) && points.contains('@'));
+        let key = if named {
             let resolved = window.update(cx, |_, window, cx| {
                 crate::harness_mark::forget(cx);
                 window.refresh();
                 window.draw(cx).clear(cx);
                 crate::harness_mark::resolve(&key, cx)
             });
+            // a step that cannot be taken fails the run, rather than going
+            // on to fail somewhere it does not explain
             match resolved {
                 Ok(Some(key)) => key,
-                // a step that cannot be taken fails the run, rather than
-                // going on to fail somewhere it does not explain
-                _ => {
+                Ok(None) => {
                     eprintln!("keys: nothing drawn is named in {key}");
+                    std::process::exit(2);
+                }
+                Err(err) => {
+                    eprintln!("keys: the window could not be drawn for {key}: {err:#}");
                     std::process::exit(2);
                 }
             }
