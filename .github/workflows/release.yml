@@ -1,0 +1,58 @@
+name: Release
+
+# A release is made when asked for (see AGENTS.md, "Releases"): a tag
+# `randori-v<version>` on main builds Randori.app into a disk image and drafts
+# a GitHub release with it. The prefix keeps Randori's tags apart from GG's
+# (`v0.46.0` and before), which this repository keeps. Run by hand, it builds
+# the disk image of any branch as an artifact, to try a release before it is
+# made.
+on:
+  push:
+    tags: ["randori-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # the version the app reports (Info.plist) is the crate's
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/randori/Cargo.toml | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "randori-v$version" ]; then
+            echo "::error::the tag $GITHUB_REF_NAME is not randori-v$version, the version in crates/randori/Cargo.toml"
+            exit 1
+          fi
+
+      - name: Build Randori.app and Randori.dmg
+        run: |
+          script/bundle-macos.sh --dmg
+          cp target/release/Randori.dmg "Randori-${{ steps.version.outputs.version }}.dmg"
+
+      - name: Keep the disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Randori-${{ steps.version.outputs.version }}
+          path: Randori-${{ steps.version.outputs.version }}.dmg
+
+      # a draft, published by hand once the disk image is checked
+      - name: Draft the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "Randori-${{ steps.version.outputs.version }}.dmg" \
+            --draft --verify-tag --generate-notes \
+            --title "Randori ${{ steps.version.outputs.version }}"

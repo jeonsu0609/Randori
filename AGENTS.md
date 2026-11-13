@@ -32,7 +32,10 @@ script/bundle-macos.sh [--dmg]      # release Randori.app (and .dmg) under targe
 2. Push the bookmark and open a pull request to `main`, as a draft while the
    work goes on.
 3. Merge with **Rebase and merge**, so the commits stay as they were split.
-   Then delete the bookmark, here and on the remote.
+   GitHub deletes the branch on merge (**Automatically delete head
+   branches**), and the next `jj git fetch` deletes the bookmark here too.
+   Kept, it would hold on to the commits from before the rebase, which GitHub
+   rewrote, and the log would show them beside `main`'s.
 
 CI (`.github/workflows/ci.yml`) runs on a pull request that is ready for
 review (opened, pushed to, or marked ready) and on `main`, and by hand
@@ -48,6 +51,26 @@ The gpui-kit fork (`jeonsu0609/gpui-kit`, see
 `main`, rebased onto it and pushed with `--force-with-lease` to update, deleted
 once merged), and `randori/v<version>`: that release with the patches Randori
 needs, cherry-picked, whose commit `[patch.crates-io]` pins.
+
+## Releases
+
+A release is made when it is asked for, not on a schedule:
+
+1. A pull request (`chore/release-<version>`) sets the version in
+   `crates/randori/Cargo.toml`, which the app reports; merge it.
+2. Tag that commit of `main` `randori-v<version>` and push the tag. The prefix
+   keeps Randori's tags apart from GG's (`v0.46.0` and before).
+3. `.github/workflows/release.yml` builds `Randori-<version>.dmg` with
+   `script/bundle-macos.sh --dmg` and drafts a GitHub release with it and
+   notes from the merged pull requests. It refuses a tag that is not the
+   crate's version.
+4. Check the disk image, then publish the draft.
+
+The image is for Apple silicon (the runner's) and signed ad hoc, so macOS
+opens it on another Mac only through Open in the context menu; giving it out
+widely needs a Developer ID and notarization. Run by hand
+(`workflow_dispatch`), the workflow builds any branch's image as an artifact
+and drafts nothing.
 
 ## Architecture
 
