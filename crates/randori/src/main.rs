@@ -3,6 +3,10 @@
 //! The jj work is done by GG's worker (`gg_lib::worker`); this crate owns only
 //! the windows and views.
 
+// A Windows release opens no console window beside the app (`--check` and
+// `--help` then print nowhere; a debug build keeps its console for them).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app_view;
 mod assets;
 mod github;

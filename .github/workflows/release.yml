@@ -1,11 +1,11 @@
 name: Release
 
 # A release is made when asked for (see AGENTS.md, "Releases"): a tag
-# `randori-v<version>` on main builds Randori.app into a disk image and drafts
-# a GitHub release with it. The prefix keeps Randori's tags apart from GG's
-# (`v0.46.0` and before), which this repository keeps. Run by hand, it builds
-# the disk image of any branch as an artifact, to try a release before it is
-# made.
+# `randori-v<version>` on main builds Randori for macOS, Windows and Linux and
+# drafts a GitHub release with the three. The prefix keeps Randori's tags apart
+# from GG's (`v0.46.0` and before), which this repository keeps. Run by hand,
+# it builds any branch's packages as artifacts, to try a release before it is
+# made, and drafts nothing.
 on:
   push:
     tags: ["randori-v*"]
@@ -15,19 +15,14 @@ permissions:
   contents: write
 
 jobs:
-  macos:
-    runs-on: macos-latest
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install the pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-
-      # the version the app reports (Info.plist) is the crate's
-      - name: Read the version
-        id: version
+      # the version the app reports is the crate's; a tag must name it
+      - id: read
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/randori/Cargo.toml | head -n 1)
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -36,23 +31,79 @@ jobs:
             exit 1
           fi
 
-      - name: Build Randori.app and Randori.dmg
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            package: macos-arm64.dmg
+          - os: windows-latest
+            package: windows-x64.zip
+          - os: ubuntu-latest
+            package: linux-x64.tar.gz
+    runs-on: ${{ matrix.os }}
+    env:
+      PACKAGE: Randori-${{ needs.version.outputs.version }}-${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GPUI's libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
+            libasound2-dev libvulkan1
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Randori.app in a disk image, signed ad hoc
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
         run: |
           script/bundle-macos.sh --dmg
-          cp target/release/Randori.dmg "Randori-${{ steps.version.outputs.version }}.dmg"
+          cp target/release/Randori.dmg "$PACKAGE"
 
-      - name: Keep the disk image
-        uses: actions/upload-artifact@v4
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release -p randori
+          Compress-Archive -Path target/release/randori.exe, LICENSE -DestinationPath $env:PACKAGE
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release -p randori
+          tar -czf "$PACKAGE" -C target/release randori -C "$GITHUB_WORKSPACE" LICENSE
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: Randori-${{ steps.version.outputs.version }}
-          path: Randori-${{ steps.version.outputs.version }}.dmg
+          name: ${{ env.PACKAGE }}
+          path: ${{ env.PACKAGE }}
 
-      # a draft, published by hand once the disk image is checked
+  # a draft, published by hand once the packages are checked
+  draft:
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+
       - name: Draft the release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "Randori-${{ steps.version.outputs.version }}.dmg" \
+          gh release create "$GITHUB_REF_NAME" packages/* \
             --draft --verify-tag --generate-notes \
-            --title "Randori ${{ steps.version.outputs.version }}"
+            --title "Randori ${{ needs.version.outputs.version }}"

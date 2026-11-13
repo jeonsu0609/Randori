@@ -77,3 +77,28 @@ jobs:
 
       - name: Build
         run: cargo build -p randori
+
+  linux:
+    if: ${{ !github.event.pull_request.draft }}
+    # GPUI on Linux draws through Vulkan on X11 or Wayland; this keeps Randori
+    # building there, as for Windows.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # what GPUI links against (gpui-kit's script/install-linux.sh, less its
+      # webview)
+      - name: Install GPUI's libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
+            libasound2-dev libvulkan1
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build -p randori
