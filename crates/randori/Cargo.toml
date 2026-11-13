@@ -1,6 +1,6 @@
 [package]
 name = "randori"
-version = "0.1.0"
+version = "0.2.0"
 description = "Randori - a GPU-accelerated desktop client for Jujutsu, built on GG and gpui-kit"
 edition = "2024"
 license = "Apache-2.0"
