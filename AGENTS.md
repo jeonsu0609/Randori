@@ -21,6 +21,34 @@ script/bundle-macos.sh [--dmg]      # release Randori.app (and .dmg) under targe
 
 **Before committing:** run `cargo fmt --all`, both clippy commands and `cargo test --workspace`.
 
+## Branches and CI
+
+`main` is what was merged, green on CI; nothing is committed to it directly.
+
+1. Each piece of work gets a bookmark off `main`, named for its kind and topic:
+   `feat/…`, `fix/…`, `refactor/…`, `docs/…`, `test/…` or `chore/…` (the
+   commit types). `jj new main`, commit with `jj commit`, then
+   `jj bookmark set <name> -r @-` (or `move`) after each commit.
+2. Push the bookmark and open a pull request to `main`, as a draft while the
+   work goes on.
+3. Merge with **Rebase and merge**, so the commits stay as they were split.
+   Then delete the bookmark, here and on the remote.
+
+CI (`.github/workflows/ci.yml`) runs on a pull request that is ready for
+review (opened, pushed to, or marked ready) and on `main`, and by hand
+(**Run workflow**, `workflow_dispatch`). It does not run on a draft, and not
+for a change to Markdown or `doc/` alone. A new push to a pull request
+cancels the run for the push before it. `main` takes changes through pull
+requests only; CI is not a required check, since a documentation change runs
+none.
+
+The gpui-kit fork (`jeonsu0609/gpui-kit`, see
+[`doc/randori/gpui-kit-patch.md`](doc/randori/gpui-kit-patch.md)) keeps
+`main` as upstream's, one branch per upstream pull request (off upstream
+`main`, rebased onto it and pushed with `--force-with-lease` to update, deleted
+once merged), and `randori/v<version>`: that release with the patches Randori
+needs, cherry-picked, whose commit `[patch.crates-io]` pins.
+
 ## Architecture
 
 Each tab has a dedicated worker thread owning a `Session` (jj-lib is not
