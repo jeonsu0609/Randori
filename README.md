@@ -28,10 +28,10 @@ you move, split and recombine freely. That is how jj treats history.
 | Region | What it shows |
 | --- | --- |
 | Tabs | One tab per jj workspace, like Fork or GitKraken. `+` (or `⌘O`) opens more; the open tabs come back on the next launch |
-| Toolbar | Laid out as GitKraken's. At the left, the **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count; in the middle, **Undo**, **Redo**, **Fetch**, **Push**, **Bookmark**, **New** and **Terminal**, each icon over its name (jj has no stash: work in progress is a change already, so **New** stands where GitKraken has Stash and Pop); at the right, **Refresh** and **Search** (find a commit, below) |
+| Toolbar | Laid out as GitKraken's. At the left, the **workspace** and **bookmark** switchers (like GitKraken's repository and branch pickers) and a **conflicts** count; in the middle, **Undo**, **Redo**, **Fetch**, **Push**, **Bookmark**, **New** and **Terminal**, each icon over its name (jj has no stash: work in progress is a change already, so **New** stands where GitKraken has Stash and Pop); at the right, **Refresh** and **Search** (find a commit, below). In a narrow window a long bookmark name ends in an ellipsis rather than running under the commands; its tooltip has it whole |
 | Rail | Revisions, Open, the command palette (`⌘P`, as in GitKraken) and Settings (below) |
 | Side panel | As GitKraken's: a **filter** (`⌘⌥F`) over every section, then **Local**, **Remote** (by remote), **Workspaces** (jj's worktrees), **Pull requests** of the workspace's GitHub remote (below) and **Tags**, each folding under a header with its count. It lists every bookmark and tag of the repository, not only those the log has loaded, folded into folders at the `/` of their names (`release/2.0.0` under **release**; remote bookmarks under their remote), and a ✓ marks the bookmark you are on, whose folders open by themselves. Hover one for its full name and a **⋮** with its commands (the same as a right-click): check out, push, move, rename, track, copy its name, commit or change id, delete. Click one to select its revision (one the log does not show widens the revset to take it in), double-click to switch to it (`jj new` on it), drag it onto a revision to move it |
-| Revisions | Branch / tag, graph, description and author columns, GitKraken style (the change id column is off until you turn it on): drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. The ⚙ at the header's right end shows or hides the optional columns and resets the widths; the funnel beside it filters by author, dimming the other revisions as GitKraken's does. Instead of a time on every row, a hairline and a small label on it ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. Narrow, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
+| Revisions | Branch / tag, graph, description and author columns, GitKraken style (the change id column is off until you turn it on): drag a header's edge to resize a column (double-click it for the default width); the widths are remembered and the graph fits its lanes until you size it. The ⚙ at the header's right end shows or hides the optional columns and resets the widths; the funnel beside it filters by author, dimming the other revisions as GitKraken's does. Instead of a time on every row, a hairline and a small label on it ("3 hours ago", "2 weeks ago", "a month ago") mark where each age group starts; the inspector has the exact date. The working copy has none: its time is when it was last snapshotted, "just now" whenever the log is read. Narrow, the author column shows avatars only. Each branch keeps one colour from its tip down, and its rows are tinted in it. A revision is its author's round avatar (GitHub picture or initials); a dimmer ring marks immutable revisions, small dots are merges and the hollow ring is the working copy (`@`). Local bookmarks that are not pushed carry an upload mark. Right-click for revision commands; drag a revision onto another to rebase it there |
 | Changes | Diff of the selected file, unified or split, with line numbers and word-level highlights. Split puts the parent's version on the left and wraps long lines so both sides stay in view; drag the boundary between them to resize the sides, double-click it to even them. The palette and the View menu do the same from the keyboard; used on a unified diff, they switch it (and the layout diffs open in) to split. Double-click a file (or `⇧⌘D`) for its full view |
 | Inspector | The selected revision: change id, an editable description in one box of two fields, a one-line summary and the description under it, as GitKraken's (immutable history stays read-only; jj keeps them as one message, with a blank line between), author, date, commit, parents and the changed files. Right-click a file to squash it into the parent, discard it, or open it in your diff or merge tool; drag it onto a revision to move it there |
 | Terminal | Your shell at the bottom of the tab (below) |
@@ -79,7 +79,9 @@ revset you type selects neither.
 
 The revset field over the revisions (the funnel, `/` or `⌘L`) chooses which
 revisions the log shows; it is not a search. A revset jj cannot use leaves the
-log as it was and says why under the field.
+log as it was and says why under the field. Where the revisions are narrow,
+**Mine** / **All branches**, the order and **Presets** move to a second line
+under it.
 
 **Search** in the toolbar (`⌘F`) finds a commit the way GitKraken's does: a
 bar over the revisions that matches its text against the loaded revisions'
@@ -109,7 +111,7 @@ operation log, and git credentials are asked for when a remote needs them.
 | Abandon | `⌫` / `Delete`, confirmed in a dialog |
 | Duplicate, back out | Context menu |
 | Rebase | Drag a revision onto its new parent, or press `R`, choose the parent with `↑` `↓` and press Enter |
-| Move a bookmark | Drag it from the bookmarks panel onto a revision, or right-click → **Move to…** |
+| Move a bookmark | Drag it from the side panel onto a revision, or right-click it there → **Move to…**, choose the revision with `↑` `↓` and press Enter. Unlike `jj bookmark move`, a move backwards or sideways needs no `--allow-backwards`; Undo takes it back |
 | Squash a file into the parent | Right-click it in the inspector |
 | Move a file to any revision | Drag it from the inspector onto the revision, or right-click → **Move to revision…** |
 | Discard a file's changes | Right-click it in the inspector, confirmed in a dialog |
@@ -144,6 +146,8 @@ nothing to the repository, and the commit is one jj operation, which Undo
 takes back. The files on disk never change. A line edited after it was
 included is left out again (the commit box says so), so a commit never takes
 lines other than those you ticked.
+
+![Committing two of three files](doc/randori/commit-box.png)
 
 ### Full file view
 
@@ -382,17 +386,21 @@ here** (colocated with git when the folder already is one) and **Try again**
 | `--screenshot <png>` | Render the first screen offscreen and exit; needs `--features screenshot` |
 | `--keys <k1,k2,…>` | With `--screenshot`: press these keys first through the real key bindings, e.g. `down,j,end`; `action:randori::SquashFile` runs an action the way a menu item does; `click:X;Y`, `cmdclick:X;Y` (with ⌘), `rclick:X;Y`, `dblclick:X;Y` and `drag:X1;Y1;X2;Y2` use the mouse at window points, or at `@name`, the middle of an element the app marks (e.g. `click:@summary`, `click:@include:a.txt`), `move:X;Y` hovers, `scroll:X;Y;DY` turns the wheel, and `bench:X;Y;DY;N` turns it N times and prints how long each frame took to draw (median and slowest) |
 
-The screenshots above were produced with:
+The screenshots above were produced with, for example:
 
 ```sh
 cargo run -p randori --features screenshot -- \
-  --revset 'ancestors(@ | spike/dense-rows, 40)' --select-row 1 \
+  --size 1440x900 --select-row 2 --keys 'move:900;600' \
   --screenshot doc/randori/first-screen.png /path/to/workspace
 ```
 
-The sample workspaces are a clone of this repository with two extra changes and
-a small notes repository, made under a placeholder identity
-(`JJ_USER="Randori Demo"`). Screenshot runs never touch your saved tabs.
+The sample workspace is a clone of GG with three extra changes on two
+bookmarks and a working copy that changes three files, made under a
+placeholder identity (`JJ_USER="Randori Demo"`, also `user.name` in a jj
+config of its own through `XDG_CONFIG_HOME`). Its `origin` points away from
+GitHub, so the pull requests section stays empty. The `move:` step puts the
+pointer over empty space, where it hovers nothing, and gives the first frame a
+redraw. Screenshot runs never touch your saved tabs.
 
 `script/ui-flow-test.sh` drives the commit flow through the app the same way
 (a summary typed and `⌘↩` with nothing included; a summary, Enter, a
@@ -456,7 +464,9 @@ src/messages     request and response types shared with the UI
   Svelte frontend are not part of Randori; GG's documentation is kept in
   [`doc/gg/`](doc/gg/).
 - gpui-kit comes from Randori's fork, `jeonsu0609/gpui-kit`: the 0.9.0
-  release plus a ratio for the two sides of a split diff, through
+  release plus three changes (a ratio for the two sides of a split diff, the
+  file header kept in view when a diff switches modes, and
+  `keep_text_selection` for buttons that act on a text selection), through
   `[patch.crates-io]`. What changed and how to update it:
   [`doc/randori/gpui-kit-patch.md`](doc/randori/gpui-kit-patch.md).
 
