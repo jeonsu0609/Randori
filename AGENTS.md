@@ -30,7 +30,9 @@ script/bundle-macos.sh [--dmg]      # release Randori.app (and .dmg) under targe
    commit types). `jj new main`, commit with `jj commit`, then
    `jj bookmark set <name> -r @-` (or `move`) after each commit.
 2. Push the bookmark and open a pull request to `main`, as a draft while the
-   work goes on.
+   work goes on. A bookmark pushed with `git push` comes back from
+   `jj git fetch` untracked: `jj bookmark track <name>@origin`, or step 3's
+   fetch leaves it.
 3. Merge with **Rebase and merge**, so the commits stay as they were split.
    GitHub deletes the branch on merge (**Automatically delete head
    branches**), and the next `jj git fetch` deletes the bookmark here too.
