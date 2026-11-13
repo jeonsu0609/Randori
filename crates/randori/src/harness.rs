@@ -63,11 +63,25 @@ pub async fn run(
             .split_once(':')
             .is_some_and(|(kind, points)| POINTER_STEPS.contains(&kind) && points.contains('@'));
         let key = if named {
+            // Drawn until two frames agree: the first frame of a window can
+            // lay its panels out before their sizes settle (a window the
+            // screen shrank), and an element would be pressed where it was.
             let resolved = window.update(cx, |_, window, cx| {
-                crate::harness_mark::forget(cx);
-                window.refresh();
-                window.draw(cx).clear(cx);
-                crate::harness_mark::resolve(&key, cx)
+                let mut draw = || {
+                    crate::harness_mark::forget(cx);
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                    crate::harness_mark::resolve(&key, cx)
+                };
+                let mut last = draw();
+                for _ in 0..4 {
+                    let next = draw();
+                    if next == last {
+                        break;
+                    }
+                    last = next;
+                }
+                last
             });
             // a step that cannot be taken fails the run, rather than going
             // on to fail somewhere it does not explain

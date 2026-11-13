@@ -47,12 +47,12 @@ fresh_repo() {
 
 # Runs the app on the repository with row $2 selected (the working copy by
 # default), then the keys $1.
-# The window has the size the points below are for; a screen too small for it
-# would shrink it and move them.
+# The window is the size CI's runner gives it (a 1024x768 screen shrinks a
+# larger one to this), so a flow that passes here passes there.
 # A run that never settles (a window that is not drawn, as on a locked
 # screen) is stopped after two minutes instead of holding the test, or CI.
 run_app() {
-    "$bin" "$work/repo" --size 1440x900 --select-row "${2:-0}" --keys "$1" \
+    "$bin" "$work/repo" --size 1024x675 --select-row "${2:-0}" --keys "$1" \
         --screenshot "$work/shot.png" >/dev/null 2>"$work/app.err" &
     local app=$!
     # (its own notice that the sleep was stopped goes nowhere)
@@ -154,11 +154,12 @@ run_app 'click:@include:c.txt,click:@summary,cmd-a,f,i,x,click:@split-off'
 echo "ui-flow-test: split off what is included: ok"
 
 # Drag over two line numbers, Include lines, commit: the commit has those
-# lines, the new working copy the rest of the file. The drag is over the
-# new line numbers of lines 2 and 3, 25 points left of their boxes
-# (`@line:new:2-25+0`), so it follows the diff wherever it is drawn; the
-# click on Include lines is the one gpui-kit used to clear the selection for
-# (see doc/randori/gpui-kit-patch.md).
+# lines, the new working copy the rest of the file. The drag is in the file's
+# full view (⇧⌘D), whose diff has the height the changes panel lacks in a small
+# window, over the new line numbers of lines 2 and 3, 25 points left of their
+# boxes (`@line:new:2-25+0`); Esc goes back to commit. The click on Include
+# lines is the one gpui-kit used to clear the selection for (see
+# doc/randori/gpui-kit-patch.md).
 rm -rf "$work/repo"
 mkdir -p "$work/repo"
 (
@@ -170,7 +171,7 @@ mkdir -p "$work/repo"
     printf 'one\nONE-A\nONE-B\ntwo\nthree\nTHREE-A\n' >a.txt
 )
 # (D is the log's key: after the drag the summary is clicked instead.)
-run_app 'drag:@line:new:2-25+0;@line:new:3-25+0,click:@include-lines,click:@summary,l,cmd-enter'
+run_app 'shift-cmd-d,drag:@line:new:2-25+0;@line:new:3-25+0,click:@include-lines,escape,click:@summary,l,cmd-enter'
 added() {
     jj_in diff -r "$1" --git | grep '^+[^+]' | tr '\n' ' '
 }
