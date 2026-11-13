@@ -3575,7 +3575,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.0"
-source = "git+https://github.com/jeonsu0609/gpui-kit?rev=d5387024dc32ae69a369ab8976096affbe0d064c#d5387024dc32ae69a369ab8976096affbe0d064c"
+source = "git+https://github.com/jeonsu0609/gpui-kit?rev=cd5333e46d69ac2a3f86fa88dfde74ecc4708cec#cd5333e46d69ac2a3f86fa88dfde74ecc4708cec"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3615,7 +3615,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.0"
-source = "git+https://github.com/jeonsu0609/gpui-kit?rev=d5387024dc32ae69a369ab8976096affbe0d064c#d5387024dc32ae69a369ab8976096affbe0d064c"
+source = "git+https://github.com/jeonsu0609/gpui-kit?rev=cd5333e46d69ac2a3f86fa88dfde74ecc4708cec#cd5333e46d69ac2a3f86fa88dfde74ecc4708cec"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3661,7 +3661,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.0"
-source = "git+https://github.com/jeonsu0609/gpui-kit?rev=d5387024dc32ae69a369ab8976096affbe0d064c#d5387024dc32ae69a369ab8976096affbe0d064c"
+source = "git+https://github.com/jeonsu0609/gpui-kit?rev=cd5333e46d69ac2a3f86fa88dfde74ecc4708cec#cd5333e46d69ac2a3f86fa88dfde74ecc4708cec"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3672,7 +3672,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.0"
-source = "git+https://github.com/jeonsu0609/gpui-kit?rev=d5387024dc32ae69a369ab8976096affbe0d064c#d5387024dc32ae69a369ab8976096affbe0d064c"
+source = "git+https://github.com/jeonsu0609/gpui-kit?rev=cd5333e46d69ac2a3f86fa88dfde74ecc4708cec#cd5333e46d69ac2a3f86fa88dfde74ecc4708cec"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -3686,7 +3686,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.0"
-source = "git+https://github.com/jeonsu0609/gpui-kit?rev=d5387024dc32ae69a369ab8976096affbe0d064c#d5387024dc32ae69a369ab8976096affbe0d064c"
+source = "git+https://github.com/jeonsu0609/gpui-kit?rev=cd5333e46d69ac2a3f86fa88dfde74ecc4708cec#cd5333e46d69ac2a3f86fa88dfde74ecc4708cec"
 dependencies = [
  "anyhow",
  "gpui-pre",

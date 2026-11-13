@@ -19,7 +19,7 @@ next to the crates.io one.
 | --- | --- |
 | `split_ratio` | `Diff::split_ratio(f32)`: the original column's share of a Split diff (default 0.5, clamped to 0.1..=0.9). Without soft wrap neither column gets narrower than its longest line; Randori wraps split diffs, so the columns share the view's width. Part of the layout key, so wrapped rows are measured again when it changes |
 | header in view | `DiffState::set_mode` keeps a diff shown from its top at the top. Upstream reveals the first line's anchor, which scrolls the file header off when rows wrap. With a regression test |
-| selection control | `ElementExt::text_selection_control(id)`: a press on the element neither clears the window's text selection nor starts one. gpui-kit clears it on any press before elements see it, so the line buttons over a diff's selected lines (Include lines, Split off…) found no lines when their click ran. Works in a cached view (it tests the press against a hitbox). With a test |
+| keep selection | `ElementExt::keep_text_selection(id)`: a press on the element neither clears the window's text selection nor starts one. gpui-kit clears it on any press before elements see it, so the line buttons over a diff's selected lines (Include lines, Split off…) found no lines when their click ran. Works in a cached view (it tests the press against a hitbox). With a test |
 
 ## Status
 
@@ -27,7 +27,7 @@ next to the crates.io one.
 | --- | --- | --- |
 | `split_ratio` | longbridge/gpui-kit#3883 | merged 2026-11-10 |
 | header in view | longbridge/gpui-kit#3884 | merged 2026-11-10 |
-| selection control | longbridge/gpui-kit#3951 | open (2026-11-12) |
+| keep selection | longbridge/gpui-kit#3951 | open (2026-11-12; renamed from `text_selection_control` in review, 2026-11-13) |
 
 The latest release, v0.9.1 (2026-11-09), has none of them. The fork is needed
 until a release has all three; then step 2 below drops it. Should #3951 change

@@ -569,7 +569,7 @@ impl RepoView {
             .gap_2()
             // a press anywhere else clears the diff's line selection, which
             // these buttons act on
-            .text_selection_control("line-actions")
+            .keep_text_selection("line-actions")
             .child(main)
             .child(
                 Button::new("split-lines")
