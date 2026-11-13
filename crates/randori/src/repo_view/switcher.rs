@@ -430,37 +430,56 @@ impl RepoView {
         let ready = matches!(self.state, LoadState::Ready);
         let bookmark = self.current_bookmark();
         let conflicts = self.conflicts.revisions.len();
+        // A Button keeps its width: in a cell that narrows, held to the
+        // cell's, its label ends in an ellipsis instead of running under the
+        // toolbar's commands. The tooltips give the names whole.
+        let narrows = |button: Button| div().min_w_0().child(button.max_w_full());
+        let keeps = |button: Button| {
+            div()
+                .flex_none()
+                .max_w(gpui_kit::rems(10.))
+                .child(button.max_w_full())
+        };
+        let bookmark_tip: SharedString = match &bookmark {
+            Some(name) => format!("{name} · switch to another bookmark").into(),
+            None => "Switch to a bookmark".into(),
+        };
         h_flex()
             .min_w_0()
             .gap_1()
-            .child(
+            // the workspace's name keeps up to 10rem; the bookmark's takes
+            // what is left
+            .child(keeps(
                 Button::new("workspace-picker")
                     .ghost()
                     .small()
                     .icon(IconName::FolderGit2)
-                    .label(title)
-                    .tooltip(SharedString::from(format!("{path} · switch workspace")))
+                    .label(title.clone())
+                    .tooltip(SharedString::from(format!(
+                        "{title} ({path}) · switch workspace"
+                    )))
                     .on_click(
                         cx.listener(|view, _, window, cx| view.open_workspace_picker(window, cx)),
                     ),
-            )
+            ))
             .child(
                 div()
+                    .flex_none()
                     .text_color(theme.muted_foreground)
                     .child(gpui_kit::component::Icon::new(IconName::ChevronRight).xsmall()),
             )
-            .child(
+            .child(narrows(
                 Button::new("bookmark-picker")
                     .ghost()
                     .small()
                     .icon(IconName::GitBranch)
                     .label(bookmark.unwrap_or_else(|| "no bookmark".into()))
                     .disabled(!ready)
-                    .tooltip("Current bookmark · switch to another")
+                    .tooltip(bookmark_tip)
                     .on_click(
                         cx.listener(|view, _, window, cx| view.open_bookmark_picker(window, cx)),
                     ),
-            )
+            ))
             .when(conflicts > 0, |this| {
                 this.child(
                     Button::new("conflicts")

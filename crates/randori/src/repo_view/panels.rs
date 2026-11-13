@@ -357,12 +357,15 @@ impl RepoView {
                     this.child(
                         resizable_panel()
                             .size(rem * 18.)
-                            .size_range(rem * 14. ..rem * 28.)
+                            // the three panels' least widths (13 + 26 + 16 rem)
+                            // fit the window's least, 960 points with the
+                            // activity bar
+                            .size_range(rem * 13. ..rem * 28.)
                             .child(pane::cached(&self.panes.side)),
                     )
                 })
                 .child(
-                    resizable_panel().size_range(rem * 30. ..rem * 200.).child(
+                    resizable_panel().size_range(rem * 26. ..rem * 200.).child(
                         match &self.center {
                             // a pull request takes the revisions' place, as in GitKraken
                             Center::Pull(pull) => self.render_pull(pull, cx),
@@ -389,7 +392,7 @@ impl RepoView {
                     this.child(
                         resizable_panel()
                             .size(rem * 22.)
-                            .size_range(rem * 18. ..rem * 36.)
+                            .size_range(rem * 16. ..rem * 36.)
                             .child(pane::cached(&self.panes.inspector)),
                     )
                 })

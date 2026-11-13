@@ -230,13 +230,15 @@ pub(super) fn render_row(
                 // where an age group starts, a hairline across the row's top
                 // that stops short of the age, in small text on the line: on
                 // the line, it is clear of the row's text below and above
-                // (row 0 has no line above, so its age sits at its top)
+                // (row 0 has no line above, so its age sits at its top). By
+                // avatars only, the age stops short of them: it would cover one
                 .when(row.bucket_start, |this| {
                     this.child(
                         h_flex()
                             .absolute()
                             .left_0()
                             .right_0()
+                            .when(cols.compact_author, |line| line.pr(cols.author))
                             .top(px(if ix == 0 { 0. } else { -7. }))
                             .h(px(14.))
                             .gap_2()
@@ -492,9 +494,13 @@ impl RepoView {
             // a header over the rows, in the panels' shade, as GitKraken's
             .bg(theme.list_head)
             .child(
+                // narrowed, the scope, order and presets go to a second line
+                // rather than past the panel's edge
                 h_flex()
-                    .h_12()
+                    .flex_wrap()
+                    .min_h_12()
                     .px_4()
+                    .py_1p5()
                     .gap_2()
                     .child(
                         div()
@@ -506,7 +512,7 @@ impl RepoView {
                     // which revisions the log shows: a jj revset, not a search
                     // (Find is the toolbar's Search)
                     .child(
-                        div().w_80().min_w_24().child(
+                        div().flex_1().min_w_24().max_w_80().child(
                             Input::new(&self.revset)
                                 .small()
                                 .prefix(
@@ -517,59 +523,63 @@ impl RepoView {
                                 .cleanable(true),
                         ),
                     )
-                    .child(div().flex_1())
                     .child(
-                        TabBar::new("log-scope")
-                            .segmented()
-                            .xsmall()
-                            .when_some(scope, |tabs, ix| tabs.selected_index(ix))
-                            .on_click(cx.listener(|view, ix: &usize, window, cx| {
-                                view.set_log_scope(*ix == 1, window, cx)
-                            }))
-                            .child("Mine")
-                            .child("All branches"),
-                    )
-                    // the order, changed now and then: a menu, not a toggle in view
-                    .child({
-                        let by_date = settings::get(cx).display.log_by_date;
-                        Button::new("log-order")
-                            .ghost()
-                            .xsmall()
-                            .label(if by_date { "By date" } else { "Topological" })
-                            .icon(IconName::ChevronDown)
-                            .tooltip("Order of the revisions")
-                            .dropdown_menu_with_anchor(
-                                gpui_kit::Anchor::TopRight,
-                                move |menu, _, _| {
-                                    let item = |label: &'static str, date: bool| {
-                                        gpui_kit::component::menu::PopupMenuItem::new(label)
-                                            .checked(by_date == date)
-                                            .on_click(move |_, _, cx| {
-                                                settings::update_display(cx, |d| {
-                                                    d.log_by_date = date
-                                                })
-                                            })
-                                    };
-                                    menu.item(item("Topological", false))
-                                        .item(item("By date", true))
-                                },
+                        h_flex()
+                            .ml_auto()
+                            .flex_none()
+                            .gap_2()
+                            .child(
+                                TabBar::new("log-scope")
+                                    .segmented()
+                                    .xsmall()
+                                    .when_some(scope, |tabs, ix| tabs.selected_index(ix))
+                                    .on_click(cx.listener(|view, ix: &usize, window, cx| {
+                                        view.set_log_scope(*ix == 1, window, cx)
+                                    }))
+                                    .child("Mine")
+                                    .child("All branches"),
                             )
-                    })
-                    .when_some(presets, |bar, (presets, query)| {
-                        bar.child(
-                            Button::new("presets")
-                                .ghost()
-                                .xsmall()
-                                .label("Presets")
-                                .icon(IconName::ChevronDown)
-                                .tooltip("Revsets from gg.presets")
-                                .dropdown_menu_with_anchor(
-                                    gpui_kit::Anchor::TopRight,
-                                    move |mut menu, _, _| {
-                                        for (title, revset) in &presets {
-                                            let view = view.clone();
-                                            let revset = revset.clone();
-                                            menu = menu.item(
+                            // the order, changed now and then: a menu, not a toggle in view
+                            .child({
+                                let by_date = settings::get(cx).display.log_by_date;
+                                Button::new("log-order")
+                                    .ghost()
+                                    .xsmall()
+                                    .label(if by_date { "By date" } else { "Topological" })
+                                    .icon(IconName::ChevronDown)
+                                    .tooltip("Order of the revisions")
+                                    .dropdown_menu_with_anchor(
+                                        gpui_kit::Anchor::TopRight,
+                                        move |menu, _, _| {
+                                            let item = |label: &'static str, date: bool| {
+                                                gpui_kit::component::menu::PopupMenuItem::new(label)
+                                                    .checked(by_date == date)
+                                                    .on_click(move |_, _, cx| {
+                                                        settings::update_display(cx, |d| {
+                                                            d.log_by_date = date
+                                                        })
+                                                    })
+                                            };
+                                            menu.item(item("Topological", false))
+                                                .item(item("By date", true))
+                                        },
+                                    )
+                            })
+                            .when_some(presets, |bar, (presets, query)| {
+                                bar.child(
+                                    Button::new("presets")
+                                        .ghost()
+                                        .xsmall()
+                                        .label("Presets")
+                                        .icon(IconName::ChevronDown)
+                                        .tooltip("Revsets from gg.presets")
+                                        .dropdown_menu_with_anchor(
+                                            gpui_kit::Anchor::TopRight,
+                                            move |mut menu, _, _| {
+                                                for (title, revset) in &presets {
+                                                    let view = view.clone();
+                                                    let revset = revset.clone();
+                                                    menu = menu.item(
                                                 gpui_kit::component::menu::PopupMenuItem::new(
                                                     title.clone(),
                                                 )
@@ -581,12 +591,13 @@ impl RepoView {
                                                     });
                                                 }),
                                             );
-                                        }
-                                        menu
-                                    },
-                                ),
-                        )
-                    }),
+                                                }
+                                                menu
+                                            },
+                                        ),
+                                )
+                            }),
+                    ),
             )
             // a revset jj refused: the log still shows the one before
             .when_some(self.query_error.clone(), |this, error| {

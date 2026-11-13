@@ -640,11 +640,27 @@ pub(super) fn time_bucket(timestamp: DateTime<Local>, now: DateTime<Local>) -> (
 /// Marks the first row of every age group (and the first row), where the
 /// log draws a separator.
 pub(super) fn mark_bucket_starts(rows: &mut [RowData]) {
-    let mut previous = None;
-    for row in rows {
-        row.bucket_start = previous != Some(row.bucket);
-        previous = Some(row.bucket);
+    let starts = bucket_starts(rows.iter().map(|row| (row.bucket, row.is_working_copy)));
+    for (row, start) in rows.iter_mut().zip(starts) {
+        row.bucket_start = start;
     }
+}
+
+/// Which of `rows` (each an age group and whether it is a working copy)
+/// start an age group. A working copy starts none and is in none: its time
+/// is when it was last snapshotted, "just now" whenever the log is read, and
+/// at the top its label would cover its author.
+fn bucket_starts(rows: impl Iterator<Item = (u32, bool)>) -> Vec<bool> {
+    let mut previous = None;
+    rows.map(|(bucket, working_copy)| {
+        if working_copy {
+            return false;
+        }
+        let start = previous != Some(bucket);
+        previous = Some(bucket);
+        start
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -826,6 +842,17 @@ pub(super) mod tests {
         assert_eq!(listed, [("second", true), ("default", false)]);
         assert!(is_this_working_copy(&headers[0]));
         assert!(!is_this_working_copy(&headers[1]));
+    }
+
+    #[test]
+    fn a_working_copy_starts_no_age_group() {
+        // @ (just now), then two from 3 hours ago, one from a week ago
+        let starts =
+            super::bucket_starts([(0, true), (103, false), (103, false), (201, false)].into_iter());
+        assert_eq!(starts, [false, true, false, true]);
+        // a working copy between two of one group does not split it
+        let starts = super::bucket_starts([(103, false), (0, true), (103, false)].into_iter());
+        assert_eq!(starts, [true, false, false]);
     }
 
     #[test]
