@@ -15,8 +15,18 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 export JJ_USER="Randori Test" JJ_EMAIL="test@example.com" XDG_CONFIG_HOME="$work/config"
 
+# On a failure, the app's last screen and what it printed (the harness says
+# where each `@name` was) go to $UI_FLOW_ARTIFACTS when it is set (CI keeps
+# them), and the printed lines are shown.
 fail() {
     echo "ui-flow-test: $*" >&2
+    if [ -f "$work/app.err" ]; then
+        grep '^keys:' "$work/app.err" >&2 || true
+    fi
+    if [ -n "${UI_FLOW_ARTIFACTS:-}" ]; then
+        mkdir -p "$UI_FLOW_ARTIFACTS"
+        cp "$work/shot.png" "$work/app.err" "$UI_FLOW_ARTIFACTS/" 2>/dev/null || true
+    fi
     exit 1
 }
 
@@ -43,7 +53,7 @@ fresh_repo() {
 # screen) is stopped after two minutes instead of holding the test, or CI.
 run_app() {
     "$bin" "$work/repo" --size 1440x900 --select-row "${2:-0}" --keys "$1" \
-        --screenshot "$work/shot.png" >/dev/null &
+        --screenshot "$work/shot.png" >/dev/null 2>"$work/app.err" &
     local app=$!
     # (its own notice that the sleep was stopped goes nowhere)
     (sleep 120 && kill "$app") 2>/dev/null &
