@@ -119,7 +119,9 @@ impl RepoView {
             Pick::Rebase { id, .. } => self.rebase_onto(id, target, window, cx),
             Pick::MoveRef { store, .. } => self.move_ref_to(store, target, window, cx),
             Pick::RebaseBranch { bookmark_name } => {
-                self.rebase_branch(bookmark_name, target, window, cx)
+                if let Some(parent) = self.log.rows.get(target).map(|row| row.revision.id.clone()) {
+                    self.rebase_branch(bookmark_name, parent, window, cx)
+                }
             }
             Pick::MoveFile { path, from, .. } => self.move_file_to(path, from, target, window, cx),
         }

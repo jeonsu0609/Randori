@@ -669,9 +669,23 @@ impl Mutation for RebaseBranch {
             .stream()
             .try_collect()
             .await?;
+        let onto = parent.change_id().reverse_hex();
+        let onto = &onto[..onto.len().min(8)];
         if roots.is_empty() {
+            // the new parent is the branch itself, or has all of it
             precondition!(
-                "{} is already on that revision: nothing to rebase",
+                "{onto} already has all of {}: nothing to rebase",
+                self.bookmark_name
+            );
+        }
+        // jj-lib would skip each of them and record nothing; say so instead
+        let mut in_place = true;
+        for root in &roots {
+            in_place &= ws.get_commit(root)?.parent_ids() == [parent.id().clone()];
+        }
+        if in_place {
+            precondition!(
+                "{} is already on {onto}: nothing to rebase",
                 self.bookmark_name
             );
         }
@@ -2186,8 +2200,9 @@ mod tests {
         let mut session = WorkerSession::default();
         let mut ws = session.load_workspace(repo.path()).await?;
         bookmark(&mut ws, "here", revs::main_bookmark()).await?;
+        let before = ws.repo().operation().id().clone();
 
-        // main is already under itself, and under every descendant of it
+        // onto itself (or a descendant): the target has all of the branch
         let result = RebaseBranch {
             bookmark_name: "here".to_owned(),
             parent_id: revs::main_bookmark(),
@@ -2196,8 +2211,22 @@ mod tests {
         .await?;
         assert_matches!(
             result,
-            MutationResult::PreconditionError { message } if message.contains("nothing to rebase")
+            MutationResult::PreconditionError { message }
+                if message.contains("already has all of here")
         );
+
+        // onto the parent it is on: jj-lib would move nothing
+        let result = RebaseBranch {
+            bookmark_name: "here".to_owned(),
+            parent_id: revs::immutable_bookmark(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(
+            result,
+            MutationResult::PreconditionError { message } if message.contains("here is already on")
+        );
+        assert_eq!(ws.repo().operation().id(), &before);
         Ok(())
     }
 
