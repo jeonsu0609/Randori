@@ -9,6 +9,7 @@
 //!   through the focused element
 //! - `click:X;Y`, `cmdclick:X;Y` (with ⌘), `rclick:X;Y`, `dblclick:X;Y` and
 //!   `drag:X1;Y1;X2;Y2`: the mouse pressed at window points
+//! - `resize:WxH`: the window made W by H points, as by dragging its corner
 //! - `move:X;Y`: the pointer moved there, no button, to hover
 //! - `scroll:X;Y;DY`: the wheel turned DY points there
 //! - in any of these pointer steps, a point can be `@name` instead: the
@@ -50,6 +51,32 @@ pub async fn run(
     });
     // Drive the real key bindings, as a user would, before capturing.
     for key in keys {
+        // the window made this size (points), as a user dragging its corner
+        if let Some(spec) = key.strip_prefix("resize:") {
+            let Some((w, h)) = spec
+                .split_once('x')
+                .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))
+            else {
+                eprintln!("keys: resize needs WxH, e.g. resize:960x700");
+                std::process::exit(2);
+            };
+            let _ = window.update(cx, |_, window, _| {
+                window.resize(gpui_kit::size(gpui_kit::px(w), gpui_kit::px(h)))
+            });
+            // the platform answers with a resize event: a few frames for the
+            // layout to follow it
+            for _ in 0..4 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let _ = window.update(cx, |_, window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+            }
+            wait_until_settled(cx, app).await;
+            continue;
+        }
         if let Some(spec) = key.strip_prefix("bench:") {
             let _ = window.update(cx, |_, window, cx| bench_scroll(spec, window, cx));
             wait_until_settled(cx, app).await;

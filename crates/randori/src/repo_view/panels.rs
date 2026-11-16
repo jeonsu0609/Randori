@@ -1,5 +1,7 @@
 //! Toolbar, bookmarks panel, status bar and the resizable layout around them.
 
+use gpui_kit::{Pixels, px};
+
 use super::*;
 
 impl RepoView {
@@ -348,61 +350,62 @@ impl RepoView {
                 let rem = window.rem_size();
                 // its own layout with a pull request open, so dropping the
                 // inspector does not hand its room to the other panels
-                h_resizable(if self.center.pull().is_some() {
-                    "workspace-pull"
-                } else {
-                    "workspace"
-                })
-                .when(self.sidebar_visible, |this| {
-                    // the side panel and the inspector keep their widths:
-                    // a drag on the other one's edge (or the window) gives
-                    // and takes only the middle's, and stops where it is
-                    // at its least, instead of going on into this panel
-                    this.child(
-                        resizable_panel()
-                            .fixed()
-                            .size(rem * 18.)
-                            // the three panels' least widths (13 + 26 + 16 rem)
-                            // fit the window's least, 960 points with the
-                            // activity bar
-                            .size_range(rem * 13. ..rem * 28.)
-                            .child(pane::cached(&self.panes.side)),
+                let pull = self.center.pull().is_some();
+                if !pull {
+                    self.fit_fixed_panels(window, cx);
+                }
+                h_resizable(if pull { "workspace-pull" } else { "workspace" })
+                    .when(!pull, |group| group.with_state(&self.body_layout))
+                    .when(self.sidebar_visible, |this| {
+                        // the side panel and the inspector keep their widths:
+                        // a drag on the other one's edge (or the window) gives
+                        // and takes only the middle's, and stops where it is
+                        // at its least, instead of going on into this panel
+                        this.child(
+                            resizable_panel()
+                                .fixed()
+                                .size(rem * 18.)
+                                // the three panels' least widths (13 + 26 + 16 rem)
+                                // fit the window's least, 960 points with the
+                                // activity bar
+                                .size_range(rem * 13. ..rem * 28.)
+                                .child(pane::cached(&self.panes.side)),
+                        )
+                    })
+                    .child(
+                        resizable_panel().size_range(rem * 26. ..rem * 200.).child(
+                            match &self.center {
+                                // a pull request takes the revisions' place, as in GitKraken
+                                Center::Pull(pull) => self.render_pull(pull, cx),
+                                // the full view of one file takes the revisions' place
+                                Center::File(focus) => self.render_focus(focus, cx),
+                                Center::Revisions => v_resizable("center")
+                                    .child(
+                                        resizable_panel()
+                                            .size(rem * 26.)
+                                            .size_range(rem * 10. ..rem * 200.)
+                                            .child(pane::cached(&self.panes.log)),
+                                    )
+                                    .child(
+                                        resizable_panel()
+                                            .size_range(rem * 8. ..rem * 200.)
+                                            .child(pane::cached(&self.panes.changes)),
+                                    )
+                                    .into_any_element(),
+                            },
+                        ),
                     )
-                })
-                .child(
-                    resizable_panel().size_range(rem * 26. ..rem * 200.).child(
-                        match &self.center {
-                            // a pull request takes the revisions' place, as in GitKraken
-                            Center::Pull(pull) => self.render_pull(pull, cx),
-                            // the full view of one file takes the revisions' place
-                            Center::File(focus) => self.render_focus(focus, cx),
-                            Center::Revisions => v_resizable("center")
-                                .child(
-                                    resizable_panel()
-                                        .size(rem * 26.)
-                                        .size_range(rem * 10. ..rem * 200.)
-                                        .child(pane::cached(&self.panes.log)),
-                                )
-                                .child(
-                                    resizable_panel()
-                                        .size_range(rem * 8. ..rem * 200.)
-                                        .child(pane::cached(&self.panes.changes)),
-                                )
-                                .into_any_element(),
-                        },
-                    ),
-                )
-                // a pull request uses the inspector's room too, as in GitKraken
-                .when(self.center.pull().is_none(), |this| {
-                    this.child(
-                        resizable_panel()
-                            .fixed()
-                            .size(rem * 22.)
-                            .size_range(rem * 16. ..rem * 36.)
-                            .child(pane::cached(&self.panes.inspector)),
-                    )
-                })
-                .into_any_element()
+                    // a pull request uses the inspector's room too, as in GitKraken
+                    .when(self.center.pull().is_none(), |this| {
+                        this.child(
+                            resizable_panel()
+                                .fixed()
+                                .size(rem * 22.)
+                                .size_range(rem * 16. ..rem * 36.)
+                                .child(pane::cached(&self.panes.inspector)),
+                        )
+                    })
+                    .into_any_element()
             }
         }
     }
@@ -476,5 +479,48 @@ pub(super) fn operation_label(operation: &str) -> SharedString {
         "redo".into()
     } else {
         operation.to_owned().into()
+    }
+}
+
+impl RepoView {
+    /// A window made narrower than the side panel and the inspector, at the
+    /// widths they were given, leave room for: as they keep their widths
+    /// (`fixed`), the middle would go under its least and the inspector off
+    /// the window's edge. They give way instead, the inspector first, down to
+    /// their least, on the frame after the window was laid out.
+    fn fit_fixed_panels(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let rem = window.rem_size();
+        let state = self.body_layout.read(cx);
+        let sizes = state.sizes().clone();
+        let container = state.container_size();
+        let side = usize::from(self.sidebar_visible);
+        if container <= px(0.) || sizes.len() != side + 2 {
+            return;
+        }
+        let middle_least = rem * 26.;
+        let fixed: Pixels = sizes[..side].iter().copied().sum::<Pixels>() + sizes[side + 1];
+        let over = fixed + middle_least - container;
+        if over <= px(0.) {
+            return;
+        }
+        let inspector = side + 1;
+        let to_inspector = (sizes[inspector] - rem * 16.).max(px(0.)).min(over);
+        let to_side = if side == 1 {
+            (sizes[0] - rem * 13.).max(px(0.)).min(over - to_inspector)
+        } else {
+            px(0.)
+        };
+        let layout = self.body_layout.clone();
+        let (inspector_size, side_size) = (sizes[inspector] - to_inspector, sizes[0] - to_side);
+        window.defer(cx, move |window, cx| {
+            layout.update(cx, |state, cx| {
+                if to_inspector > px(0.) {
+                    state.resize_panel(inspector, inspector_size, window, cx);
+                }
+                if to_side > px(0.) {
+                    state.resize_panel(0, side_size, window, cx);
+                }
+            });
+        });
     }
 }
