@@ -1,5 +1,6 @@
 //! Toolbar, bookmarks panel, status bar and the resizable layout around them.
 
+use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::{Pixels, px};
 
 use super::*;
@@ -355,7 +356,7 @@ impl RepoView {
                     self.fit_fixed_panels(window, cx);
                 }
                 h_resizable(if pull { "workspace-pull" } else { "workspace" })
-                    .when(!pull, |group| group.with_state(&self.body_layout))
+                    .when(!pull, |group| group.with_state(self.body_state()))
                     .when(self.sidebar_visible, |this| {
                         // the side panel and the inspector keep their widths:
                         // a drag on the other one's edge (or the window) gives
@@ -488,9 +489,18 @@ impl RepoView {
     /// (`fixed`), the middle would go under its least and the inspector off
     /// the window's edge. They give way instead, the inspector first, down to
     /// their least, on the frame after the window was laid out.
+    /// The panel sizes of the layout shown: with the side panel or without.
+    fn body_state(&self) -> &Entity<ResizableState> {
+        if self.sidebar_visible {
+            &self.body_layout
+        } else {
+            &self.body_layout_bare
+        }
+    }
+
     fn fit_fixed_panels(&self, window: &mut Window, cx: &mut Context<Self>) {
         let rem = window.rem_size();
-        let state = self.body_layout.read(cx);
+        let state = self.body_state().read(cx);
         let sizes = state.sizes().clone();
         let container = state.container_size();
         let side = usize::from(self.sidebar_visible);
@@ -510,7 +520,7 @@ impl RepoView {
         } else {
             px(0.)
         };
-        let layout = self.body_layout.clone();
+        let layout = self.body_state().clone();
         let (inspector_size, side_size) = (sizes[inspector] - to_inspector, sizes[0] - to_side);
         window.defer(cx, move |window, cx| {
             layout.update(cx, |state, cx| {
