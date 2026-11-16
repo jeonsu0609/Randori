@@ -13,15 +13,20 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 use crate::repo_view::RepoView;
 use crate::worker::Worker;
 
-/// `jj` in `repo`, its output; jj's own config only, as the user's could
-/// change what it makes.
+/// `jj` in `repo`, its output; jj's own config only (an empty user config
+/// beside the repository, outside it), as the user's could change what it
+/// makes.
 fn jj(repo: &Path, args: &[&str]) -> String {
+    let no_config = repo.with_file_name("no-user-config.toml");
+    if !no_config.exists() {
+        std::fs::write(&no_config, "").unwrap();
+    }
     let out = Command::new("jj")
         .args(args)
         .current_dir(repo)
         .env("JJ_USER", "Randori Test")
         .env("JJ_EMAIL", "test@example.com")
-        .env("JJ_CONFIG", repo.join(".no-user-config.toml"))
+        .env("JJ_CONFIG", &no_config)
         .output()
         .expect("jj runs");
     assert!(
@@ -32,26 +37,26 @@ fn jj(repo: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Whether `jj` is on `PATH`. Without it a test is skipped, except on CI
+/// (`CI` set), where a skip would pass for a run.
 fn has_jj() -> bool {
-    Command::new("jj").arg("--version").output().is_ok()
+    let found = Command::new("jj").arg("--version").output().is_ok();
+    assert!(
+        found || std::env::var_os("CI").is_none(),
+        "no jj on PATH: CI installs it before the tests"
+    );
+    found
 }
 
-/// jj's repository config for a test repository: what the app reads from the
-/// user's config and the test leans on (the rows of the log, what is
-/// immutable) fixed, as the repository's config wins over the user's.
-const REPO_CONFIG: &[(&str, &str)] = &[
-    ("revsets.log", "all()"),
-    ("revset-aliases.\"immutable_heads()\"", "none()"),
-];
-
-/// `jj git init` in `dir`, with the user's config left out for the CLI and
-/// fixed over for the app (`REPO_CONFIG`).
-fn init(dir: &Path) {
-    std::fs::write(dir.join(".no-user-config.toml"), "").unwrap();
-    jj(dir, &["git", "init"]);
-    for (key, value) in REPO_CONFIG {
-        jj(dir, &["config", "set", "--repo", key, value]);
-    }
+/// A repository in a directory of its own, `repo` under `holder` (the empty
+/// user config sits beside it). No repository config is set: jj keeps it in
+/// the user's config directory (`~/.config/jj/repos`), which a test must not
+/// write to.
+fn init(holder: &Path) -> std::path::PathBuf {
+    let repo = holder.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    jj(&repo, &["git", "init"]);
+    repo
 }
 
 /// The tab on `repo` in a test window, loaded.
@@ -70,8 +75,11 @@ fn open<'a>(
     let (settings, _, _, _) =
         gg_lib::read_config(Some(&path)).expect("the repository's config is read");
     let (worker, events) = Worker::spawn(Some(path.clone()), settings).expect("a worker");
+    // every revision, as All branches: the rows do not lean on the user's
+    // `revsets.log`, which the app reads
+    let query = Some(crate::repo_view::ALL_BRANCHES_QUERY.to_owned());
     let (view, cx) = cx
-        .add_window_view(|window, cx| RepoView::new(worker, events, Some(path), None, window, cx));
+        .add_window_view(|window, cx| RepoView::new(worker, events, Some(path), query, window, cx));
     settle(&view, cx);
     // as the app does once a tab has loaded: the keys go to its list
     view.update_in(cx, |view, window, cx| view.focus_log(window, cx));
@@ -116,14 +124,15 @@ fn changed(repo: &Path, rev: &str) -> String {
 }
 
 /// A described base with a.txt, and a working copy changing it and adding c.txt.
-fn commit_repo(dir: &Path) {
-    init(dir);
+fn commit_repo(holder: &Path) -> std::path::PathBuf {
+    let dir = &init(holder);
     std::fs::write(dir.join("a.txt"), "a\n").unwrap();
     jj(dir, &["describe", "-m", "base"]);
     jj(dir, &["new"]);
     std::fs::write(dir.join("a.txt"), "a\nb\n").unwrap();
     std::fs::write(dir.join("c.txt"), "c\n").unwrap();
     jj(dir, &["status"]);
+    dir.clone()
 }
 
 /// D, a summary typed, ⌘↩ (Ctrl+Enter off macOS: `secondary`) with nothing
@@ -135,12 +144,12 @@ fn commit_every_change(cx: &mut TestAppContext) {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    commit_repo(dir.path());
-    let (view, cx) = open(dir.path(), cx);
+    let repo = commit_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
 
     keys(&view, "d f i x secondary-enter", cx);
 
-    let repo = dir.path();
+    let repo = repo.as_path();
     assert_eq!(
         jj(
             repo,
@@ -162,8 +171,8 @@ fn commit_every_change(cx: &mut TestAppContext) {
 
 /// base; qa1 (qa) on it; w1, w2 (topic) on base with the working copy on
 /// topic.
-fn branch_repo(dir: &Path) {
-    init(dir);
+fn branch_repo(holder: &Path) -> std::path::PathBuf {
+    let dir = &init(holder);
     for (file, message) in [("base.txt", "base"), ("qa.txt", "qa1")] {
         std::fs::write(dir.join(file), "x\n").unwrap();
         jj(dir, &["commit", "-m", message]);
@@ -175,6 +184,7 @@ fn branch_repo(dir: &Path) {
         jj(dir, &["commit", "-m", message]);
     }
     jj(dir, &["bookmark", "create", "-r", "@-", "topic"]);
+    dir.clone()
 }
 
 /// w1 selected, R, qa1 chosen with the keys and Enter: as `jj rebase -r w1
@@ -186,13 +196,13 @@ fn rebase_a_revision_from_the_keyboard(cx: &mut TestAppContext) {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    branch_repo(dir.path());
-    let (view, cx) = open(dir.path(), cx);
+    let repo = branch_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
 
     // the log from the working copy: @, w2, w1, qa1, base
     keys(&view, "down down r down enter", cx);
 
-    let repo = dir.path();
+    let repo = repo.as_path();
     let log = |rev: &str| {
         jj(
             repo,

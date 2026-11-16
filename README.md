@@ -415,7 +415,7 @@ redraw. Screenshot runs never touch your saved tabs.
 in GPUI's test window: its real key bindings and actions on a repository the
 jj CLI makes, jj's record read back with the CLI (a commit of every change, a
 revision rebased from the keyboard). They take a second or two, need `jj` on
-`PATH` (they are skipped without it) and run with `cargo test`, on macOS and
+`PATH` (they are skipped without it, and fail without it on CI) and run with `cargo test`, on macOS and
 on Linux in CI. Move a flow there unless it needs the screen.
 
 `script/ui-flow-test.sh` drives the commit flow through the app the same way
