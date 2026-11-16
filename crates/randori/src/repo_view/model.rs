@@ -207,6 +207,9 @@ pub(super) struct RowData {
     pub(super) bucket_start: bool,
     pub(super) refs: Vec<RefChip>,
     pub(super) is_working_copy: bool,
+    /// jj will not rewrite it (`immutable_heads()`): it is not dragged, and
+    /// its menu offers no rebase or abandon.
+    pub(super) is_immutable: bool,
     /// The description after its first line, on one line, shown dimmed after
     /// the summary as GitKraken does.
     pub(super) body: Option<SharedString>,
@@ -276,6 +279,7 @@ impl RowData {
             bucket_start: false,
             refs: ref_chips(&rev.refs),
             is_working_copy: rev.is_working_copy,
+            is_immutable: rev.is_immutable,
             body: body_preview(&rev.description.lines),
         }
     }

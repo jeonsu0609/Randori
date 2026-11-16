@@ -173,6 +173,11 @@ impl RepoView {
                 view.pick_move_bookmark(window, cx)
             }),
         )
+        .on_action(
+            cx.listener(|view, _: &actions::PickRebaseBranch, window, cx| {
+                view.pick_rebase_branch(window, cx)
+            }),
+        )
         .on_action(cx.listener(|view, _: &actions::PickMoveFile, window, cx| {
             view.pick_move_file(window, cx)
         }))
