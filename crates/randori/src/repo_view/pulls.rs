@@ -445,15 +445,17 @@ impl RepoView {
     }
 }
 
-/// One pull request: author avatar, number and title, then branches, review
-/// and checks, with a button that opens it on GitHub.
+/// One pull request: author avatar, number and title, then branches; the
+/// review and checks as icons, with a button that opens it on GitHub.
 fn render_pull(pr: &PullRequest, ix: usize, selected: bool, cx: &App) -> ListItem {
     let theme = cx.theme();
-    let (review, review_color) = match pr.review {
-        Review::Approved => (Some("Approved"), theme.success),
-        Review::ChangesRequested => (Some("Changes requested"), theme.danger),
-        Review::Required => (Some("Review required"), theme.muted_foreground),
-        Review::None => (None, theme.muted_foreground),
+    // an icon beside the checks' rather than words, which a narrowed panel
+    // cuts off first
+    let review = match pr.review {
+        Review::Approved => Some((IconName::UserCheck, theme.success, "Approved")),
+        Review::ChangesRequested => Some((IconName::UserX, theme.danger, "Changes requested")),
+        Review::Required => Some((IconName::Eye, theme.muted_foreground, "Review required")),
+        Review::None => None,
     };
     let checks = pr.checks.map(|checks| match checks {
         Checks::Passing => (IconName::CircleCheck, theme.success, "Checks passed"),
@@ -519,27 +521,21 @@ fn render_pull(pr: &PullRequest, ix: usize, selected: bool, cx: &App) -> ListIte
                                         .truncate()
                                         .font_family(theme.mono_font_family.clone())
                                         .child(format!("{} → {}", pr.head_ref, pr.base_ref)),
-                                )
-                                .when_some(review, |this, review| {
-                                    this.child(
-                                        div().flex_none().text_color(review_color).child(review),
-                                    )
-                                }),
+                                ),
                         ),
                 )
-                .when_some(checks, |this, (icon, color, label)| {
+                // the review and the checks, closer together than to the link
+                .when(review.is_some() || checks.is_some(), |this| {
                     this.child(
-                        div()
-                            .id(("pull-checks", ix))
+                        h_flex()
                             .flex_none()
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)
+                            .gap_1p5()
+                            .when_some(review, |this, (icon, color, label)| {
+                                this.child(status_icon(("pull-review", ix), icon, color, label))
                             })
-                            .child(
-                                gpui_kit::component::Icon::new(icon)
-                                    .small()
-                                    .text_color(color),
-                            ),
+                            .when_some(checks, |this, (icon, color, label)| {
+                                this.child(status_icon(("pull-checks", ix), icon, color, label))
+                            }),
                     )
                 })
                 .child(
@@ -553,5 +549,25 @@ fn render_pull(pr: &PullRequest, ix: usize, selected: bool, cx: &App) -> ListIte
                             cx.open_url(&url)
                         }),
                 ),
+        )
+}
+
+/// A pull request's review or checks, as an icon named by its tooltip.
+fn status_icon(
+    id: (&'static str, usize),
+    icon: IconName,
+    color: gpui_kit::Hsla,
+    label: &'static str,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_none()
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)
+        })
+        .child(
+            gpui_kit::component::Icon::new(icon)
+                .small()
+                .text_color(color),
         )
 }
