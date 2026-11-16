@@ -539,8 +539,17 @@ impl RepoView {
                             ),
                     ),
             )
-            .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(full_name.clone()).build(window, cx)
+            .tooltip({
+                let owner = owner.clone();
+                move |window, cx| {
+                    if owner
+                        .upgrade()
+                        .is_some_and(|view| view.read(cx).ref_menu_open)
+                    {
+                        return cx.new(|_| gpui_kit::EmptyView).into();
+                    }
+                    gpui_kit::component::tooltip::Tooltip::new(full_name.clone()).build(window, cx)
+                }
             })
             .on_click(
                 cx.listener(move |view, event: &gpui_kit::ClickEvent, window, cx| {
@@ -645,7 +654,17 @@ fn panel_ref_menu(
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     use actions::*;
-    let _ = owner.update(cx, |view, _| view.ref_target = Some(target.store.clone()));
+    let _ = owner.update(cx, |view, _| {
+        view.ref_target = Some(target.store.clone());
+        view.ref_menu_open = true;
+    });
+    // closed, the rows' tooltips come back. On its dismissal, not its
+    // release: gpui-kit keeps the closed menu until the next one opens
+    let closed = owner.clone();
+    cx.subscribe_self(move |_, _: &gpui_kit::DismissEvent, cx| {
+        let _ = closed.update(cx, |view, _| view.ref_menu_open = false);
+    })
+    .detach();
     let copy = |label: &str, text: String| {
         PopupMenuItem::new(label.to_owned()).on_click(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))

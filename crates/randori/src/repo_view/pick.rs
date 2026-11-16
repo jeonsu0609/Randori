@@ -90,6 +90,30 @@ impl RepoView {
         };
         self.start_pick(Pick::RebaseBranch { bookmark_name }, window, cx);
     }
+    /// The palette's "Rebase current branch onto…": the branch of the bookmark
+    /// the toolbar shows, onto the revision chosen next.
+    pub(super) fn pick_rebase_current_branch(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self.current_bookmark() else {
+            gpui_kit::component::WindowExt::push_notification(
+                window,
+                gpui_kit::component::notification::Notification::info("No bookmark is near the working copy: right-click one in the side panel → Rebase onto…")
+                    .title("Rebase current branch"),
+                cx,
+            );
+            return;
+        };
+        self.start_pick(
+            Pick::RebaseBranch {
+                bookmark_name: name.to_string(),
+            },
+            window,
+            cx,
+        );
+    }
     pub(super) fn pick_move_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.refuse_if_immutable("Move file", window, cx) {
             return;

@@ -16,6 +16,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     command::{Command, CommandItem, CommandState},
     h_flex,
+    kbd::Kbd,
     notification::Notification,
     tab::{Tab, TabBar},
     v_flex,
@@ -489,9 +490,14 @@ impl RandoriApp {
                     Box::new(repo::DescribeRevision),
                 ),
                 (
-                    "Rebase selection onto…",
+                    "Rebase revision onto…",
                     IconName::GitBranch,
                     Box::new(repo::PickRebase),
+                ),
+                (
+                    "Rebase current branch onto…",
+                    IconName::GitBranch,
+                    Box::new(repo::PickRebaseCurrentBranch),
                 ),
                 (
                     "Move selected file to revision…",
@@ -524,7 +530,7 @@ impl RandoriApp {
                     Box::new(repo::SquashFile),
                 ),
                 (
-                    "Split picked files into a new commit…",
+                    "Split selected files into a new commit…",
                     IconName::GitCommitHorizontal,
                     Box::new(repo::SplitFiles),
                 ),
@@ -698,7 +704,37 @@ impl RandoriApp {
 
         let items: Vec<CommandItem> = commands
             .iter()
-            .map(|(label, icon, _)| CommandItem::new().label(*label).icon(*icon))
+            .map(|(label, icon, action)| {
+                // the key a command has where it runs (the log, the tab, the
+                // window), as menus show it; looked up now, while the tab
+                // still has the focus. The row is drawn here: an item given
+                // its action would also run it from the palette, twice.
+                let kbd = [
+                    crate::repo_view::LOG_CONTEXT,
+                    crate::repo_view::REPO_CONTEXT,
+                    APP_CONTEXT,
+                ]
+                .iter()
+                .find_map(|context| {
+                    Kbd::binding_for_action(action.as_ref(), Some(context), window)
+                });
+                let (label, icon) = (*label, *icon);
+                CommandItem::new()
+                    .label(label)
+                    .icon(icon)
+                    .child(move |_, cx| {
+                        h_flex()
+                            .gap_2()
+                            .w_full()
+                            .child(
+                                Icon::new(icon)
+                                    .size_4()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(label)
+                            .when_some(kbd.clone(), |row, kbd| row.child(kbd.ml_auto()))
+                    })
+            })
             .collect();
         let actions: Rc<Vec<Box<dyn Action>>> =
             Rc::new(commands.into_iter().map(|(_, _, action)| action).collect());
