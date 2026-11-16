@@ -43,6 +43,11 @@ alacritty_terminal = "0.26.0"
 
 [dev-dependencies]
 tempfile = "3.27"
+# headless UI tests (`headless_tests.rs`): views in GPUI's test window, no
+# screen. GPUI's own harness (gpui-kit's `test-support` would pull in GPUI
+# Fast, whose exact pins clash with gpui-pre's). Named `gpui`, which the
+# `#[gpui::test]` macro's expansion names.
+gpui = { package = "gpui-pre", version = "0.3", features = ["test-support"] }
 
 [features]
 # `randori --screenshot out.png` renders the first screen offscreen (README images, visual checks).
