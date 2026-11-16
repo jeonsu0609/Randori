@@ -178,6 +178,7 @@ pub mod actions {
             PickRebase,
             PickMoveBookmark,
             PickRebaseBranch,
+            PickRebaseCurrentBranch,
             PickMoveFile,
             ConfirmPick,
             CancelPick,
@@ -232,9 +233,9 @@ pub const ALL_BRANCHES_QUERY: &str = "all()";
 const AGE_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Key context of the revision list; arrow and vi keys apply only there.
-const LOG_CONTEXT: &str = "RandoriLog";
+pub(crate) const LOG_CONTEXT: &str = "RandoriLog";
 /// Key context of one repository tab.
-const REPO_CONTEXT: &str = "RandoriRepo";
+pub(crate) const REPO_CONTEXT: &str = "RandoriRepo";
 
 /// `cmd-<key>` on macOS, `ctrl-<key>` elsewhere.
 macro_rules! platform_key {
@@ -386,6 +387,9 @@ pub struct RepoView {
     pending_select: Option<String>,
     /// Bookmark or tag the last context menu was opened on.
     ref_target: Option<StoreRef>,
+    /// A side panel ref's menu is open: the rows give no tooltip, which would
+    /// be drawn over the menu's first items.
+    ref_menu_open: bool,
     /// The description editor of the revision inspected.
     description: DescriptionEdit,
     /// Keyboard alternative to drag and drop: the operation waiting for a
@@ -564,9 +568,8 @@ impl RepoView {
             }
         });
 
-        let revset = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Filter with a revset, e.g. ancestors(@, 50)")
-        });
+        let revset =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Revset, e.g. ancestors(@, 50)"));
         let panel_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter (⌘⌥F)"));
         let _subscriptions = vec![
             cx.subscribe(&panel_filter, |view, _, event: &InputEvent, cx| {
@@ -581,6 +584,12 @@ impl RepoView {
                     if let InputEvent::PressEnter { .. } = event {
                         let query = state.read(cx).value().trim().to_owned();
                         if !query.is_empty() {
+                            view.run_query(query, cx);
+                        } else if let Some(ws) = &view.workspace
+                            && view.log_scope().is_none()
+                        {
+                            // emptied: back to jj's own log, as Mine
+                            let query = ws.default_query.clone();
                             view.run_query(query, cx);
                         }
                     }
@@ -672,6 +681,7 @@ impl RepoView {
             progress: None,
             pending_select: None,
             ref_target: None,
+            ref_menu_open: false,
             description: DescriptionEdit {
                 editor: description_editor,
                 loaded: None,
@@ -831,9 +841,9 @@ impl RepoView {
                 match result {
                     Ok((workspace, page, changed)) => {
                         view.set_working_copy_changed(changed, cx);
-                        let query = workspace.query.clone();
+                        let text = field_text(&workspace.query, &workspace.default_query);
                         view.revset
-                            .update(cx, |state, cx| state.set_value(query, window, cx));
+                            .update(cx, |state, cx| state.set_value(text, window, cx));
                         let remote_urls = workspace.remote_urls.clone();
                         view.workspace = Some(workspace);
                         view.replace_rows(page, true, cx);
@@ -944,8 +954,9 @@ impl RepoView {
         } else {
             ws.default_query.clone()
         };
+        // the tab above says which; jj's revset for it is not for reading
         self.revset
-            .update(cx, |state, cx| state.set_value(query.clone(), window, cx));
+            .update(cx, |state, cx| state.set_value("", window, cx));
         self.run_query(query, cx);
         cx.emit(RepoViewEvent::ScopeChanged { all });
         cx.notify();
@@ -1213,7 +1224,16 @@ impl RepoView {
             }
             data
         }));
-        mark_bucket_starts(row_data);
+        // the age separators follow time: by date the rows do, but in jj's
+        // order (one branch at a time) the ages jump back and forth, and a
+        // separator would mark almost every row
+        if by_date {
+            mark_bucket_starts(row_data);
+        } else {
+            for row in row_data.iter_mut() {
+                row.bucket_start = false;
+            }
+        }
         let current = nearest_bookmark(
             &self.log.rows,
             &self.log.row_of_commit,
@@ -1408,8 +1428,12 @@ impl RepoView {
 
     /// Runs `query` from the presets menu.
     pub(super) fn set_query(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        let text = match &self.workspace {
+            Some(ws) => field_text(&query, &ws.default_query),
+            None => query.clone(),
+        };
         self.revset
-            .update(cx, |state, cx| state.set_value(query.clone(), window, cx));
+            .update(cx, |state, cx| state.set_value(text, window, cx));
         self.run_query(query, cx);
         cx.notify();
     }
@@ -1680,6 +1704,17 @@ pub enum RepoViewEvent {
 }
 
 impl gpui_kit::EventEmitter<RepoViewEvent> for RepoView {}
+
+/// What the revset field shows for `query`: nothing for a scope's own revset
+/// (Mine is `default`, jj's log; All branches is `all()`), which the tab
+/// above names, and the revset otherwise.
+fn field_text(query: &str, default: &str) -> String {
+    if query == ALL_BRANCHES_QUERY || query == default {
+        String::new()
+    } else {
+        query.to_owned()
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -428,10 +428,18 @@ impl RepoView {
             .map_or(&[][..], |detail| &detail.files[..]);
         let included = &self.next_commit.included;
         let typed = !self.next_commit.message.text(cx).is_empty();
+        let everything = included.is_empty() || included.all_files(files) == Inclusion::All;
         let hint = if files.is_empty() {
             "No changes to commit".to_owned()
         } else if self.next_commit.lines_left_out {
             "Included lines changed and were left out · ⌘↩".to_owned()
+        } else if !typed {
+            // why Commit is off, and what it will take
+            if everything {
+                "Type a summary to commit every change".to_owned()
+            } else {
+                "Type a summary to commit what is included; the rest stays".to_owned()
+            }
         } else if included.is_empty() {
             "Nothing included: commits every change · ⌘↩".to_owned()
         } else if included.all_files(files) == Inclusion::All {
@@ -453,7 +461,8 @@ impl RepoView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            // up to two lines: cut short, it hid what Commit does
+                            .line_clamp(2)
                             .text_xs()
                             .text_color(if self.next_commit.lines_left_out {
                                 theme.warning
@@ -515,6 +524,10 @@ impl RepoView {
             return div()
                 .min_w_0()
                 .truncate()
+                .map(|mut hint| {
+                    hint.style().flex_shrink = Some(8.);
+                    hint
+                })
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(match command {
@@ -749,9 +762,12 @@ impl RepoView {
                     .border_color(theme.border)
                     .child(div().text_sm().font_medium().child("Changes"))
                     .when_some(file, |this, file| {
+                        // the file keeps up to 16rem; the hint after it
+                        // gives way first
                         this.child(
                             div()
-                                .min_w_0()
+                                .flex_shrink_0()
+                                .max_w(gpui_kit::rems(16.))
                                 .truncate()
                                 .text_xs()
                                 .font_family(theme.mono_font_family.clone())

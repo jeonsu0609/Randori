@@ -902,206 +902,197 @@ impl RepoView {
             .when_some(self.pick.as_ref(), |this, pick| {
                 this.child(self.render_pick_bar(pick, cx))
             })
-            // the find bar sits over the list but outside it: inside, its
-            // field would be in the list's key context, and letters typed
-            // there would run the list's shortcuts (d, e, r…)
+            // a row of its own, outside the list: inside, its field would be
+            // in the list's key context, and letters typed there would run
+            // the list's shortcuts (d, e, r…)
+            .children(find_bar)
             .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .id("log")
-                            .relative()
-                            .size_full()
-                            .track_focus(&self.log_focus)
-                            .key_context(LOG_CONTEXT)
-                            .role(gpui_kit::Role::List)
-                            .aria_label("Revisions")
-                            .on_mouse_down(
-                                gpui_kit::MouseButton::Left,
-                                cx.listener(|view, _, window, cx| view.log_focus.focus(window, cx)),
-                            )
-                            .on_action(cx.listener(|view, _: &actions::SelectPrevious, _, cx| {
-                                view.move_selection(-1, cx)
-                            }))
-                            .on_action(cx.listener(|view, _: &actions::SelectNext, _, cx| {
-                                view.move_selection(1, cx)
-                            }))
-                            .on_action(cx.listener(|view, _: &actions::ConfirmPick, window, cx| {
-                                view.confirm_pick(window, cx)
-                            }))
-                            .on_action(cx.listener(|view, _: &actions::CancelPick, _, cx| {
+                div().relative().flex_1().min_h_0().child(
+                    div()
+                        .id("log")
+                        .relative()
+                        .size_full()
+                        .track_focus(&self.log_focus)
+                        .key_context(LOG_CONTEXT)
+                        .role(gpui_kit::Role::List)
+                        .aria_label("Revisions")
+                        .on_mouse_down(
+                            gpui_kit::MouseButton::Left,
+                            cx.listener(|view, _, window, cx| view.log_focus.focus(window, cx)),
+                        )
+                        .on_action(cx.listener(|view, _: &actions::SelectPrevious, _, cx| {
+                            view.move_selection(-1, cx)
+                        }))
+                        .on_action(cx.listener(|view, _: &actions::SelectNext, _, cx| {
+                            view.move_selection(1, cx)
+                        }))
+                        .on_action(cx.listener(|view, _: &actions::ConfirmPick, window, cx| {
+                            view.confirm_pick(window, cx)
+                        }))
+                        .on_action(
+                            cx.listener(|view, _: &actions::CancelPick, _, cx| {
                                 view.cancel_pick(cx)
-                            }))
-                            .on_action(cx.listener(|view, _: &actions::SelectFirst, _, cx| {
-                                view.move_selection(isize::MIN, cx)
-                            }))
-                            .on_action(cx.listener(|view, _: &actions::SelectLast, _, cx| {
-                                view.move_selection(isize::MAX, cx)
-                            }))
-                            .child(
-                                uniform_list("revisions", rows.len(), move |range, window, cx| {
-                                    let rem = window.rem_size();
-                                    // infinite scroll: the next page is asked for
-                                    // while the rows drawn are still this far from the end
-                                    if wants_more && range.end + PRELOAD_ROWS >= rows.len() {
-                                        let owner = more_owner.clone();
-                                        cx.defer(move |cx| {
-                                            let _ = owner.update(cx, |view, cx| view.load_more(cx));
+                            }),
+                        )
+                        .on_action(cx.listener(|view, _: &actions::SelectFirst, _, cx| {
+                            view.move_selection(isize::MIN, cx)
+                        }))
+                        .on_action(cx.listener(|view, _: &actions::SelectLast, _, cx| {
+                            view.move_selection(isize::MAX, cx)
+                        }))
+                        .child(
+                            uniform_list("revisions", rows.len(), move |range, window, cx| {
+                                let rem = window.rem_size();
+                                // infinite scroll: the next page is asked for
+                                // while the rows drawn are still this far from the end
+                                if wants_more && range.end + PRELOAD_ROWS >= rows.len() {
+                                    let owner = more_owner.clone();
+                                    cx.defer(move |cx| {
+                                        let _ = owner.update(cx, |view, cx| view.load_more(cx));
+                                    });
+                                }
+                                range
+                                    .map(|ix| {
+                                        let owner = owner.clone();
+                                        let menu_owner = owner.clone();
+                                        let drop_owner = owner.clone();
+                                        let focus = focus.clone();
+                                        let immutable = rows[ix].is_immutable;
+                                        let email = rows[ix].author_email.as_ref();
+                                        let avatar = avatars.get(email).cloned().or_else(|| {
+                                            github
+                                                .then(|| crate::github::noreply_avatar(email))
+                                                .flatten()
+                                                .map(SharedString::from)
                                         });
-                                    }
-                                    range
-                                        .map(|ix| {
-                                            let owner = owner.clone();
-                                            let menu_owner = owner.clone();
-                                            let drop_owner = owner.clone();
-                                            let focus = focus.clone();
-                                            let immutable = rows[ix].is_immutable;
-                                            let email = rows[ix].author_email.as_ref();
-                                            let avatar =
-                                                avatars.get(email).cloned().or_else(|| {
-                                                    github
-                                                        .then(|| {
-                                                            crate::github::noreply_avatar(email)
-                                                        })
-                                                        .flatten()
-                                                        .map(SharedString::from)
+                                        render_row(
+                                            &rows[ix],
+                                            &graph,
+                                            ix,
+                                            selected == Some(ix),
+                                            avatar,
+                                            rem,
+                                            cols,
+                                            refs_open == Some(ix),
+                                            &owner,
+                                            find_matches
+                                                .as_ref()
+                                                .is_some_and(|m| m.binary_search(&ix).is_err())
+                                                || author_filter.as_ref().is_some_and(|f| {
+                                                    !f.contains(&rows[ix].author_email)
+                                                }),
+                                            cx,
+                                        )
+                                        .harness_mark(move || format!("row:{ix}"))
+                                        .on_click(move |_, _, cx| {
+                                            let _ =
+                                                owner.update(cx, |view, cx| view.select(ix, cx));
+                                        })
+                                        // Right-click selects the row first, so the menu acts on it.
+                                        .on_mouse_down(
+                                            gpui_kit::MouseButton::Right,
+                                            move |_, window, cx| {
+                                                let _ = menu_owner.update(cx, |view, cx| {
+                                                    view.select(ix, cx);
+                                                    view.log_focus.focus(window, cx);
                                                 });
-                                            render_row(
-                                                &rows[ix],
-                                                &graph,
-                                                ix,
-                                                selected == Some(ix),
-                                                avatar,
-                                                rem,
-                                                cols,
-                                                refs_open == Some(ix),
-                                                &owner,
-                                                find_matches
-                                                    .as_ref()
-                                                    .is_some_and(|m| m.binary_search(&ix).is_err())
-                                                    || author_filter.as_ref().is_some_and(|f| {
-                                                        !f.contains(&rows[ix].author_email)
-                                                    }),
-                                                cx,
-                                            )
-                                            .harness_mark(move || format!("row:{ix}"))
-                                            .on_click(move |_, _, cx| {
-                                                let _ = owner
-                                                    .update(cx, |view, cx| view.select(ix, cx));
-                                            })
-                                            // Right-click selects the row first, so the menu acts on it.
-                                            .on_mouse_down(
-                                                gpui_kit::MouseButton::Right,
-                                                move |_, window, cx| {
-                                                    let _ = menu_owner.update(cx, |view, cx| {
-                                                        view.select(ix, cx);
-                                                        view.log_focus.focus(window, cx);
-                                                    });
+                                            },
+                                        )
+                                        // an immutable revision is not dragged: jj
+                                        // would refuse to move it
+                                        .when(!immutable, |row| {
+                                            row.on_drag(
+                                                DraggedRevision {
+                                                    id: rows[ix].id.clone(),
+                                                    label: rows[ix].change_prefix.clone(),
+                                                },
+                                                |dragged, _, _, cx| {
+                                                    cx.new(|_| DragChip {
+                                                        label: format!("Rebase {}", dragged.label)
+                                                            .into(),
+                                                        icon: IconName::GitCommitHorizontal,
+                                                    })
                                                 },
                                             )
-                                            // an immutable revision is not dragged: jj
-                                            // would refuse to move it
-                                            .when(!immutable, |row| {
-                                                row.on_drag(
-                                                    DraggedRevision {
-                                                        id: rows[ix].id.clone(),
-                                                        label: rows[ix].change_prefix.clone(),
-                                                    },
-                                                    |dragged, _, _, cx| {
-                                                        cx.new(|_| DragChip {
-                                                            label: format!(
-                                                                "Rebase {}",
-                                                                dragged.label
-                                                            )
-                                                            .into(),
-                                                            icon: IconName::GitCommitHorizontal,
-                                                        })
-                                                    },
-                                                )
-                                            })
-                                            .drag_over::<DraggedRevision>(|style, _, _, cx| {
-                                                style.bg(cx.theme().drop_target)
-                                            })
-                                            .drag_over::<DraggedRef>(|style, _, _, cx| {
-                                                style.bg(cx.theme().drop_target)
-                                            })
-                                            .on_drop({
-                                                let owner = drop_owner.clone();
-                                                move |dragged: &DraggedRevision, window, cx| {
-                                                    let _ = owner.update(cx, |view, cx| {
-                                                        view.rebase_onto(
-                                                            dragged.id.clone(),
-                                                            ix,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    });
-                                                }
-                                            })
-                                            .on_drop({
-                                                let owner = drop_owner.clone();
-                                                move |dragged: &DraggedRef, window, cx| {
-                                                    let _ = owner.update(cx, |view, cx| {
-                                                        view.drop_ref(
-                                                            dragged.store.clone(),
-                                                            ix,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    });
-                                                }
-                                            })
-                                            .drag_over::<DraggedFile>(|style, _, _, cx| {
-                                                style.bg(cx.theme().drop_target)
-                                            })
-                                            .on_drop({
-                                                let owner = drop_owner.clone();
-                                                move |dragged: &DraggedFile, window, cx| {
-                                                    let _ = owner.update(cx, |view, cx| {
-                                                        view.move_file_to(
-                                                            dragged.path.clone(),
-                                                            dragged.from.clone(),
-                                                            ix,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    });
-                                                }
-                                            })
-                                            .context_menu(move |menu, _, _| {
-                                                revision_menu(menu, immutable, focus.clone())
-                                            })
-                                            .into_any_element()
                                         })
-                                        .collect()
-                                })
-                                .size_full()
-                                .track_scroll(&self.scroll),
+                                        .drag_over::<DraggedRevision>(|style, _, _, cx| {
+                                            style.bg(cx.theme().drop_target)
+                                        })
+                                        .drag_over::<DraggedRef>(|style, _, _, cx| {
+                                            style.bg(cx.theme().drop_target)
+                                        })
+                                        .on_drop({
+                                            let owner = drop_owner.clone();
+                                            move |dragged: &DraggedRevision, window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.rebase_onto(
+                                                        dragged.id.clone(),
+                                                        ix,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        })
+                                        .on_drop({
+                                            let owner = drop_owner.clone();
+                                            move |dragged: &DraggedRef, window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.drop_ref(
+                                                        dragged.store.clone(),
+                                                        ix,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        })
+                                        .drag_over::<DraggedFile>(|style, _, _, cx| {
+                                            style.bg(cx.theme().drop_target)
+                                        })
+                                        .on_drop({
+                                            let owner = drop_owner.clone();
+                                            move |dragged: &DraggedFile, window, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.move_file_to(
+                                                        dragged.path.clone(),
+                                                        dragged.from.clone(),
+                                                        ix,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        })
+                                        .context_menu(move |menu, _, _| {
+                                            revision_menu(menu, immutable, focus.clone())
+                                        })
+                                        .into_any_element()
+                                    })
+                                    .collect()
+                            })
+                            .size_full()
+                            .track_scroll(&self.scroll),
+                        )
+                        .child(Scrollbar::vertical(&self.scroll))
+                        // measures the list, so the columns can fit its width
+                        .child({
+                            let width = self.log_width.clone();
+                            canvas(
+                                move |bounds, window, _| {
+                                    let rems =
+                                        f32::from(bounds.size.width) / f32::from(window.rem_size());
+                                    if (width.get() - rems).abs() > 0.25 {
+                                        width.set(rems);
+                                        window.refresh();
+                                    }
+                                },
+                                |_, _, _, _| {},
                             )
-                            .child(Scrollbar::vertical(&self.scroll))
-                            // measures the list, so the columns can fit its width
-                            .child({
-                                let width = self.log_width.clone();
-                                canvas(
-                                    move |bounds, window, _| {
-                                        let rems = f32::from(bounds.size.width)
-                                            / f32::from(window.rem_size());
-                                        if (width.get() - rems).abs() > 0.25 {
-                                            width.set(rems);
-                                            window.refresh();
-                                        }
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .size_full()
-                            }),
-                    )
-                    // after the list, so it is drawn over it
-                    .children(find_bar),
+                            .absolute()
+                            .size_full()
+                        }),
+                ),
             )
             .into_any_element()
     }

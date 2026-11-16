@@ -207,26 +207,23 @@ impl RepoView {
                 if self.paging.has_more { "+" } else { "" }
             ),
         };
+        // a row under the header, as the pick bar: floating over the list,
+        // it hid the rows it found
         h_flex()
             .id("find-bar")
             .key_context("RandoriFind")
-            .occlude()
-            .absolute()
-            .top_2()
-            .right_4()
-            .w_96()
+            .h_10()
+            .flex_none()
+            .px_4()
             .gap_1()
-            .p_1()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.primary)
-            .bg(theme.popover)
-            .shadow_lg()
+            .bg(theme.primary.opacity(0.08))
+            .border_b_1()
+            .border_color(theme.border)
             .on_action(
                 cx.listener(|view, _: &actions::CloseFind, window, cx| view.close_find(window, cx)),
             )
             .child(
-                div().flex_1().min_w_0().child(
+                div().flex_1().min_w_0().max_w_96().child(
                     Input::new(&find.input)
                         .small()
                         .prefix(gpui_kit::component::Icon::new(IconName::Search).xsmall()),
@@ -234,7 +231,7 @@ impl RepoView {
             )
             .child(
                 div()
-                    .flex_none()
+                    .flex_1()
                     .min_w_20()
                     .text_xs()
                     .text_color(theme.muted_foreground)
