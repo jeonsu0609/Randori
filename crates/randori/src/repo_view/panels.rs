@@ -354,8 +354,13 @@ impl RepoView {
                     "workspace"
                 })
                 .when(self.sidebar_visible, |this| {
+                    // the side panel and the inspector keep their widths:
+                    // a drag on the other one's edge (or the window) gives
+                    // and takes only the middle's, and stops where it is
+                    // at its least, instead of going on into this panel
                     this.child(
                         resizable_panel()
+                            .fixed()
                             .size(rem * 18.)
                             // the three panels' least widths (13 + 26 + 16 rem)
                             // fit the window's least, 960 points with the
@@ -391,6 +396,7 @@ impl RepoView {
                 .when(self.center.pull().is_none(), |this| {
                     this.child(
                         resizable_panel()
+                            .fixed()
                             .size(rem * 22.)
                             .size_range(rem * 16. ..rem * 36.)
                             .child(pane::cached(&self.panes.inspector)),
