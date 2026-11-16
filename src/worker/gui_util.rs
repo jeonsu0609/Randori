@@ -825,7 +825,39 @@ impl WorkspaceSession<'_> {
             working_copy: self.format_commit_id(&self.operation.wc_id),
             can_redo: self.can_redo(),
             working_copy_changed: self.working_copy_changed(),
+            working_copy_changes: self.working_copy_changes(),
         }
+    }
+
+    /// The files the working-copy commit changes from its parents, by kind:
+    /// paths only, no file read. A failed read counts nothing, as
+    /// `working_copy_changed` does.
+    fn working_copy_changes(&self) -> messages::ChangeCounts {
+        use futures_util::StreamExt as _;
+        let repo = self.operation.repo.as_ref();
+        let count = async {
+            let commit = repo.store().get_commit(&self.operation.wc_id)?;
+            let parents = commit.parents().await?;
+            let parent_tree = rewrite::merge_commit_trees(repo, &parents).await?;
+            let mut diff =
+                parent_tree.diff_stream(&commit.tree(), &jj_lib::matchers::EverythingMatcher);
+            let mut counts = messages::ChangeCounts::default();
+            while let Some(entry) = diff.next().await {
+                let values = entry.values?;
+                if values.before.is_absent() {
+                    counts.added += 1;
+                } else if values.after.is_absent() {
+                    counts.deleted += 1;
+                } else {
+                    counts.modified += 1;
+                }
+                if !values.after.is_resolved() {
+                    counts.conflicted += 1;
+                }
+            }
+            anyhow::Ok(counts)
+        };
+        count.block_on().unwrap_or_default()
     }
 
     /// Whether the working-copy commit changes anything. A failed read

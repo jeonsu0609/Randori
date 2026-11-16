@@ -238,6 +238,19 @@ pub struct RepoStatus {
     /// The working-copy commit changes files (it is not empty), as `jj log`
     /// would not mark it `(empty)`.
     pub working_copy_changed: bool,
+    /// What the working-copy commit changes from its parents, by kind (the log
+    /// marks its row with them, as GitKraken its WIP row).
+    pub working_copy_changes: ChangeCounts,
+}
+
+/// Files a revision changes from its parents, by kind.
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChangeCounts {
+    pub modified: usize,
+    pub added: usize,
+    pub deleted: usize,
+    /// Files left with a conflict (counted in their kind too).
+    pub conflicted: usize,
 }
 
 /// Events requiring user interaction during clone/init flows.
