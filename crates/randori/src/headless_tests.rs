@@ -147,8 +147,17 @@ fn commit_every_change(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let repo = commit_repo(dir.path());
     let (view, cx) = open(&repo, cx);
+    // the working copy's row marks a.txt modified and c.txt added
+    let counts = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| view.wip_counts())
+            .map(|c| (c.modified, c.added, c.deleted))
+    };
+    assert_eq!(counts(&view, cx), Some((1, 1, 0)));
 
     keys(&view, "d f i x secondary-enter", cx);
+
+    // the new working copy changes nothing: its row has no marks
+    assert_eq!(counts(&view, cx), Some((0, 0, 0)));
 
     let repo = repo.as_path();
     assert_eq!(
