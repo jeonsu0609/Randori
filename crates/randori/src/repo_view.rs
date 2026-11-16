@@ -28,7 +28,7 @@ use gpui_kit::component::{
     input::{InputEvent, InputState},
     list::ListItem,
     menu::{ContextMenuExt as _, PopupMenu},
-    resizable::{h_resizable, resizable_panel, v_resizable},
+    resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     scroll::{ScrollableElement as _, Scrollbar},
     spinner::Spinner,
     status_bar::StatusBar,
@@ -401,6 +401,9 @@ pub struct RepoView {
     /// move (see `ops::when_moved_forward`); the tab is not settled until it
     /// is answered.
     direction_check: Option<Task<()>>,
+    /// The sizes of the side panel, the middle and the inspector (see
+    /// `panels::fit_fixed_panels`).
+    body_layout: Entity<ResizableState>,
     /// Author avatars by email, shared with the list closure.
     avatars: Rc<HashMap<String, SharedString>>,
     /// Pull requests of the workspace's GitHub remote, if it has one.
@@ -580,10 +583,34 @@ impl RepoView {
             cx.subscribe_in(
                 &revset,
                 window,
-                |view: &mut Self, state, event: &InputEvent, _, cx| {
+                |view: &mut Self, state, event: &InputEvent, window, cx| {
+                    // emptied (typed away, or the ×): back to Mine, as the
+                    // tab would
+                    if let InputEvent::Change = event
+                        && state.read(cx).value().trim().is_empty()
+                    {
+                        // a refused revset's reason goes with its text
+                        if view.query_error.take().is_some() {
+                            cx.notify();
+                        }
+                        if view.log_scope().is_none()
+                            && let Some(ws) = &view.workspace
+                        {
+                            let query = ws.default_query.clone();
+                            view.run_query(query, cx);
+                        }
+                        return;
+                    }
                     if let InputEvent::PressEnter { .. } = event {
                         let query = state.read(cx).value().trim().to_owned();
                         if !query.is_empty() {
+                            // a scope's own revset typed: the tab says it
+                            if let Some(ws) = &view.workspace
+                                && field_text(&query, &ws.default_query).is_empty()
+                            {
+                                view.revset
+                                    .update(cx, |state, cx| state.set_value("", window, cx));
+                            }
                             view.run_query(query, cx);
                         } else if let Some(ws) = &view.workspace
                             && view.log_scope().is_none()
@@ -690,6 +717,7 @@ impl RepoView {
             pick: None,
             dialog_subscription: None,
             direction_check: None,
+            body_layout: cx.new(|_| ResizableState::default()),
             avatars: Rc::default(),
             pulls: None,
             pending_commit_select: None,
@@ -1718,6 +1746,17 @@ fn field_text(query: &str, default: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_revset_field_leaves_a_scope_s_own_revset_to_its_tab() {
+        let mine = "present(@) | ancestors(immutable_heads().., 2)";
+        assert_eq!(super::field_text(super::ALL_BRANCHES_QUERY, mine), "");
+        assert_eq!(super::field_text(mine, mine), "");
+        assert_eq!(
+            super::field_text("ancestors(@, 50)", mine),
+            "ancestors(@, 50)"
+        );
+    }
+
     use super::one_line_error;
 
     #[test]
