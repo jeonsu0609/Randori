@@ -21,6 +21,13 @@ script/bundle-macos.sh [--dmg]      # release Randori.app (and .dmg) under targe
 
 **Before committing:** run `cargo fmt --all`, both clippy commands and `cargo test --workspace`.
 
+**UI tests:** a flow of the tab goes in `crates/randori/src/headless_tests.rs`
+first: `#[gpui::test]`, the tab in GPUI's test window (no screen), its real
+bindings (`simulate_keystrokes`, `dispatch_action`), `settle` between steps (the
+worker is a real thread), jj's record checked with the CLI. Launch the app
+(`script/ui-flow-test.sh`, `--screenshot`) only for what needs the screen: a
+pointer path through the real layout, a cut-off label, panels over each other.
+
 ## Branches and CI
 
 `main` is what was merged, green on CI; nothing is committed to it directly.

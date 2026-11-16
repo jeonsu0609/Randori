@@ -14,6 +14,8 @@ mod graph;
 #[cfg(feature = "screenshot")]
 mod harness;
 mod harness_mark;
+#[cfg(test)]
+mod headless_tests;
 mod issue_links;
 mod repo_view;
 mod settings;

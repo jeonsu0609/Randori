@@ -46,23 +46,27 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy -p randori --features screenshot -- -D warnings
 
-      - name: Test
-        run: cargo test --workspace
-
-      # the commit flow driven through the app's own key bindings; the
-      # script makes and checks its repository with the jj CLI
-      - name: UI flow
-        # jj 0.46, the version of jj-lib Randori reads the repositories with
-        # (Homebrew has a newer one): the CLI makes the test's repositories
+      # jj 0.46, the version of jj-lib Randori reads the repositories with
+      # (Homebrew has a newer one): the CLI makes the repositories of the
+      # headless tests (`cargo test`) and of the UI flow
+      - name: Install jj
         env:
           JJ_VERSION: 0.46.0
-          UI_FLOW_ARTIFACTS: ${{ runner.temp }}/ui-flow
         run: |
           curl -sSfL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-aarch64-apple-darwin.tar.gz" \
             | tar xz -C "$RUNNER_TEMP" ./jj
-          export PATH="$RUNNER_TEMP:$PATH"
-          jj --version
-          script/ui-flow-test.sh
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/jj" --version
+
+      - name: Test
+        run: cargo test --workspace
+
+      # the commit flow driven through the app's own key bindings, in a real
+      # window; the script makes and checks its repository with the jj CLI
+      - name: UI flow
+        env:
+          UI_FLOW_ARTIFACTS: ${{ runner.temp }}/ui-flow
+        run: script/ui-flow-test.sh
 
       # the screen and the app's lines of a flow that failed
       - name: Keep a failed flow's screen
@@ -112,3 +116,13 @@ jobs:
 
       - name: Build
         run: cargo build -p randori
+
+      # the headless UI tests need no screen: GPUI's test window
+      - name: Headless UI tests
+        env:
+          JJ_VERSION: 0.46.0
+        run: |
+          curl -sSfL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP" ./jj
+          export PATH="$RUNNER_TEMP:$PATH"
+          cargo test -p randori headless_tests

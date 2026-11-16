@@ -411,6 +411,13 @@ GitHub, so the pull requests section stays empty. The `move:` step puts the
 pointer over empty space, where it hovers nothing, and gives the first frame a
 redraw. Screenshot runs never touch your saved tabs.
 
+`crates/randori/src/headless_tests.rs` drives flows of the tab with no screen,
+in GPUI's test window: its real key bindings and actions on a repository the
+jj CLI makes, jj's record read back with the CLI (a commit of every change, a
+revision rebased from the keyboard). They take a second or two, need `jj` on
+`PATH` (they are skipped without it) and run with `cargo test`, on macOS and
+on Linux in CI. Move a flow there unless it needs the screen.
+
 `script/ui-flow-test.sh` drives the commit flow through the app the same way
 (a summary typed and `⌘↩` with nothing included; a summary, Enter, a
 description, saved as jj saves it; every change included and left out,
