@@ -228,3 +228,12 @@ run_app 'drag:@ref:topic;@row:3,click:@move-bookmark'
 [ "$(jj_in log -r 'all()' --no-graph -T 'commit_id ++ " "')" = "$before" ] ||
     fail "a revision changed"
 echo "ui-flow-test: move a bookmark only: ok"
+
+# topic dropped on the working copy on it: forward, as jj moves a bookmark
+# without being asked, so it moves with no dialog (no Enter is pressed).
+branch_repo
+wc="$(jj_in log -r @ --no-graph -T 'commit_id')"
+run_app 'drag:@ref:topic;@row:0'
+[ "$(jj_in log -r topic --no-graph -T 'commit_id')" = "$wc" ] ||
+    fail "topic did not move forward to the working copy"
+echo "ui-flow-test: move a bookmark forward without asking: ok"

@@ -393,6 +393,10 @@ pub struct RepoView {
     pick: Option<Pick>,
     /// Keeps the open one-field dialog's Enter handler alive.
     dialog_subscription: Option<Subscription>,
+    /// Whether a bookmark is moved forward, asked of the worker before the
+    /// move (see `ops::when_moved_forward`); the tab is not settled until it
+    /// is answered.
+    direction_check: Option<Task<()>>,
     /// Author avatars by email, shared with the list closure.
     avatars: Rc<HashMap<String, SharedString>>,
     /// Pull requests of the workspace's GitHub remote, if it has one.
@@ -675,6 +679,7 @@ impl RepoView {
             },
             pick: None,
             dialog_subscription: None,
+            direction_check: None,
             avatars: Rc::default(),
             pulls: None,
             pending_commit_select: None,
@@ -713,6 +718,7 @@ impl RepoView {
             && !self.pulls_fetching()
             && !self.conflicts.loading
             && !self.picked_up_pending()
+            && self.direction_check.is_none()
     }
 
     /// Moves keyboard focus to the revision list (e.g. when its tab is selected).
