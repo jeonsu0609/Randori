@@ -1,8 +1,9 @@
 //! Flows of the app driven in a test window, with no screen: the tab
 //! (`RepoView`) on a repository the jj CLI makes, its real key bindings and
-//! actions, and jj's record read back with the CLI. They need `jj` on `PATH`
-//! and are skipped without it. What only the screen shows (a cut-off label,
-//! panels over each other) is the screenshot harness's (`--screenshot`).
+//! actions, and jj's record read back with the CLI. They need `jj` on `PATH`:
+//! without it they are skipped, and on CI (`CI` set) they fail. What only the
+//! screen shows (a cut-off label, panels over each other) is the screenshot
+//! harness's (`--screenshot`).
 
 use std::path::Path;
 use std::process::Command;
