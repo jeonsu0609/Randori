@@ -1,5 +1,6 @@
 //! The revision list: column header, graph rows and the virtual list.
 
+use crate::harness_mark::HarnessMark as _;
 use gpui_kit::component::Icon;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::DropdownMenu as _;
@@ -957,6 +958,7 @@ impl RepoView {
                                             let menu_owner = owner.clone();
                                             let drop_owner = owner.clone();
                                             let focus = focus.clone();
+                                            let immutable = rows[ix].is_immutable;
                                             let email = rows[ix].author_email.as_ref();
                                             let avatar =
                                                 avatars.get(email).cloned().or_else(|| {
@@ -985,6 +987,7 @@ impl RepoView {
                                                     }),
                                                 cx,
                                             )
+                                            .harness_mark(move || format!("row:{ix}"))
                                             .on_click(move |_, _, cx| {
                                                 let _ = owner
                                                     .update(cx, |view, cx| view.select(ix, cx));
@@ -999,19 +1002,26 @@ impl RepoView {
                                                     });
                                                 },
                                             )
-                                            .on_drag(
-                                                DraggedRevision {
-                                                    id: rows[ix].id.clone(),
-                                                    label: rows[ix].change_prefix.clone(),
-                                                },
-                                                |dragged, _, _, cx| {
-                                                    cx.new(|_| DragChip {
-                                                        label: format!("Rebase {}", dragged.label)
+                                            // an immutable revision is not dragged: jj
+                                            // would refuse to move it
+                                            .when(!immutable, |row| {
+                                                row.on_drag(
+                                                    DraggedRevision {
+                                                        id: rows[ix].id.clone(),
+                                                        label: rows[ix].change_prefix.clone(),
+                                                    },
+                                                    |dragged, _, _, cx| {
+                                                        cx.new(|_| DragChip {
+                                                            label: format!(
+                                                                "Rebase {}",
+                                                                dragged.label
+                                                            )
                                                             .into(),
-                                                        icon: IconName::GitCommitHorizontal,
-                                                    })
-                                                },
-                                            )
+                                                            icon: IconName::GitCommitHorizontal,
+                                                        })
+                                                    },
+                                                )
+                                            })
                                             .drag_over::<DraggedRevision>(|style, _, _, cx| {
                                                 style.bg(cx.theme().drop_target)
                                             })
@@ -1035,7 +1045,7 @@ impl RepoView {
                                                 let owner = drop_owner.clone();
                                                 move |dragged: &DraggedRef, window, cx| {
                                                     let _ = owner.update(cx, |view, cx| {
-                                                        view.move_ref_to(
+                                                        view.drop_ref(
                                                             dragged.store.clone(),
                                                             ix,
                                                             window,
@@ -1062,7 +1072,7 @@ impl RepoView {
                                                 }
                                             })
                                             .context_menu(move |menu, _, _| {
-                                                revision_menu(menu, focus.clone())
+                                                revision_menu(menu, immutable, focus.clone())
                                             })
                                             .into_any_element()
                                         })

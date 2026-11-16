@@ -6,6 +6,7 @@
 //! of the revisions the log has loaded: they come from a query of their own.
 //! Clicking one the log does not show widens the log's revset to take it in.
 
+use crate::harness_mark::HarnessMark as _;
 use std::collections::HashSet;
 
 use gpui_kit::component::input::Input;
@@ -478,7 +479,9 @@ impl RepoView {
                 panel_ref_menu(menu, &target, &owner, focus.clone(), cx)
             }
         };
+        let mark = full_name.clone();
         ListItem::new(("panel-ref", key))
+            .harness_mark(move || format!("ref:{mark}"))
             .group("panel-ref")
             .py_0p5()
             .pl(indent(depth))
@@ -662,6 +665,7 @@ fn panel_ref_menu(
         StoreRef::LocalBookmark { .. } => menu
             .separator()
             .menu("Push", Box::new(PushBookmark))
+            .menu("Rebase onto…", Box::new(PickRebaseBranch))
             .menu("Move to…", Box::new(PickMoveBookmark))
             .menu("Rename…", Box::new(RenameBookmark)),
         StoreRef::RemoteBookmark { is_tracked, .. } => menu.separator().menu(

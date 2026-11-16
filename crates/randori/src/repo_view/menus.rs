@@ -6,22 +6,24 @@ use super::*;
 // ----- context menus ---------------------------------------------------------------------------
 
 /// Commands for the selected revision. Items dispatch actions to the repository
-/// tab, so the menu shows the same key bindings as the keyboard.
-pub(super) fn revision_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
+/// tab, so the menu shows the same key bindings as the keyboard. An immutable
+/// revision's rewrites are offered disabled: jj would refuse them, and
+/// "Rebase onto…" on, say, trunk moves trunk, not one's work onto it.
+pub(super) fn revision_menu(menu: PopupMenu, immutable: bool, focus: FocusHandle) -> PopupMenu {
     use actions::*;
     menu.action_context(focus)
         .menu("New change", Box::new(NewChild))
         .menu("Edit", Box::new(EditRevision))
         .menu("Describe", Box::new(DescribeRevision))
         .separator()
-        .menu("Rebase onto…", Box::new(PickRebase))
+        .menu_with_disabled("Rebase onto…", Box::new(PickRebase), immutable)
         .menu("Create bookmark…", Box::new(CreateBookmark))
         .menu("Push bookmarks", Box::new(Push))
         .separator()
         .menu("Duplicate", Box::new(DuplicateRevision))
         .menu("Back out", Box::new(BackoutRevision))
         .separator()
-        .menu("Abandon…", Box::new(AbandonRevision))
+        .menu_with_disabled("Abandon…", Box::new(AbandonRevision), immutable)
 }
 
 /// Commands for a changed file in the inspector.

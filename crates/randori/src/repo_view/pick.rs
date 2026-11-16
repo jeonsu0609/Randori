@@ -14,6 +14,10 @@ pub(super) enum Pick {
         store: StoreRef,
         label: SharedString,
     },
+    /// A local bookmark's branch, rebased as `jj rebase -b`.
+    RebaseBranch {
+        bookmark_name: String,
+    },
     MoveFile {
         path: TreePath,
         from: RevId,
@@ -26,13 +30,16 @@ impl Pick {
         match self {
             Pick::Rebase { label, .. } => format!("Choose the new parent for {label}"),
             Pick::MoveRef { label, .. } => format!("Choose where {label} should point"),
+            Pick::RebaseBranch { bookmark_name } => {
+                format!("Choose the revision to rebase {bookmark_name}'s branch onto")
+            }
             Pick::MoveFile { label, .. } => format!("Choose the revision to move {label} into"),
         }
     }
 
     fn verb(&self) -> &'static str {
         match self {
-            Pick::Rebase { .. } => "Rebase here",
+            Pick::Rebase { .. } | Pick::RebaseBranch { .. } => "Rebase here",
             Pick::MoveRef { .. } | Pick::MoveFile { .. } => "Move here",
         }
     }
@@ -75,6 +82,14 @@ impl RepoView {
             cx,
         );
     }
+    /// The bookmark menu's "Rebase onto…": its branch, onto the revision
+    /// chosen next.
+    pub(super) fn pick_rebase_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(StoreRef::LocalBookmark { bookmark_name, .. }) = self.ref_target.clone() else {
+            return;
+        };
+        self.start_pick(Pick::RebaseBranch { bookmark_name }, window, cx);
+    }
     pub(super) fn pick_move_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.refuse_if_immutable("Move file", window, cx) {
             return;
@@ -103,6 +118,9 @@ impl RepoView {
         match pick {
             Pick::Rebase { id, .. } => self.rebase_onto(id, target, window, cx),
             Pick::MoveRef { store, .. } => self.move_ref_to(store, target, window, cx),
+            Pick::RebaseBranch { bookmark_name } => {
+                self.rebase_branch(bookmark_name, target, window, cx)
+            }
             Pick::MoveFile { path, from, .. } => self.move_file_to(path, from, target, window, cx),
         }
         cx.notify();

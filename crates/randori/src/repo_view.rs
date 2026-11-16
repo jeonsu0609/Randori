@@ -177,6 +177,7 @@ pub mod actions {
             // pick mode: choose the target revision from the keyboard
             PickRebase,
             PickMoveBookmark,
+            PickRebaseBranch,
             PickMoveFile,
             ConfirmPick,
             CancelPick,

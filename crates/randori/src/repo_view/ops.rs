@@ -6,13 +6,14 @@
 //! revision, a conflicting bookmark) become warnings, and `InputRequired`
 //! asks for git credentials and retries (see `remote`).
 
+use crate::harness_mark::HarnessMark as _;
 use std::rc::Rc;
 
 use gg_lib::messages::mutations::{
     AbandonRevisions, BackoutRevisions, CheckoutRevision, CopyChanges, CreateRef, CreateRevision,
     DeleteRef, DescribeRevision, DuplicateRevisions, ExternalDiff, ExternalResolve, MoveChanges,
-    MoveRef, MoveRevisions, MutationResult, RedoOperation, RenameBookmark, SplitRevision,
-    TrackBookmark, UndoOperation, UntrackBookmark,
+    MoveRef, MoveRevisions, MutationResult, RebaseBranch, RedoOperation, RenameBookmark,
+    SplitRevision, TrackBookmark, UndoOperation, UntrackBookmark,
 };
 use gg_lib::messages::{InputResponse, RevHeader, RevId, RevSet, StoreRef, TreePath};
 use gg_lib::worker::Mutation;
@@ -210,9 +211,15 @@ impl RepoView {
             return false;
         }
         let change = super::short_id(&id.change.prefix, &id.change.rest, 8);
+        // the revision a rebase starts from is the one that moves
+        let hint = if action == "Rebase" {
+            " To move your work onto it, rebase your work (or drop its bookmark) onto it."
+        } else {
+            ""
+        };
         window.push_notification(
             Notification::warning(format!(
-                "{change} is immutable. Change `immutable_heads()` in jj config to rewrite it."
+                "{change} is immutable. Change `immutable_heads()` in jj config to rewrite it.{hint}"
             ))
             .title(action.to_owned()),
             cx,
@@ -366,6 +373,113 @@ impl RepoView {
                     to: source,
                 },
                 parent_ids: vec![parent],
+            }),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Drag and drop: a local bookmark dropped on a revision asks what to do,
+    /// as GitKraken asks when a branch is dropped on another: rebase its
+    /// branch there (`jj rebase -b`) or only point the bookmark there. A
+    /// remote bookmark or a tag only moves (or is refused, as remote ones are).
+    pub(super) fn drop_ref(
+        &mut self,
+        r#ref: StoreRef,
+        target: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let StoreRef::LocalBookmark { bookmark_name, .. } = &r#ref else {
+            self.move_ref_to(r#ref, target, window, cx);
+            return;
+        };
+        let Some(onto) = self.log.rows.get(target).map(|row| {
+            let id = &row.revision.id;
+            super::short_id(&id.change.prefix, &id.change.rest, 8)
+        }) else {
+            return;
+        };
+        let name = bookmark_name.clone();
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (name, onto, r#ref) = (name.clone(), onto.clone(), r#ref.clone());
+            let (rebase_view, move_view) = (view.clone(), view.clone());
+            let rebase_name = name.clone();
+            dialog
+                .title(format!("{name} onto {onto}"))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .text_sm()
+                        .child(format!(
+                            "Rebase branch moves the revisions of {name} that {onto} does not \
+                             have, with what is on them, onto {onto} (jj rebase -b). The \
+                             bookmark comes along."
+                        ))
+                        .child(format!(
+                            "Move bookmark only points {name} at {onto}; no revision changes."
+                        )),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .gap_2()
+                        .child(
+                            DialogClose::new()
+                                .child(Button::new("cancel").label("Cancel").outline()),
+                        )
+                        .child(
+                            Button::new("move-bookmark")
+                                .harness_mark(|| "move-bookmark")
+                                .label("Move bookmark")
+                                .outline()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let r#ref = r#ref.clone();
+                                    let _ = move_view.update(cx, |view, cx| {
+                                        view.move_ref_to(r#ref, target, window, cx)
+                                    });
+                                }),
+                        )
+                        .child(
+                            DialogAction::new().child(
+                                Button::new("rebase-branch")
+                                    .label("Rebase branch")
+                                    .primary(),
+                            ),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let name = rebase_name.clone();
+                    let _ = rebase_view
+                        .update(cx, |view, cx| view.rebase_branch(name, target, window, cx));
+                    true
+                })
+        });
+    }
+
+    /// Rebases the branch of local bookmark `name` onto the revision in row
+    /// `target`, as `jj rebase -b` (see `RebaseBranch`).
+    pub(super) fn rebase_branch(
+        &mut self,
+        name: String,
+        target: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(parent) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
+            return;
+        };
+        let label = format!(
+            "Rebase {name} onto {}",
+            super::short_id(&parent.change.prefix, &parent.change.rest, 8)
+        );
+        self.run_mutation(
+            label,
+            Box::new(RebaseBranch {
+                bookmark_name: name,
+                parent_id: parent,
             }),
             None,
             window,

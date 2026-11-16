@@ -188,3 +188,43 @@ run_app 'd,cmd-enter' 1
 [ "$(ops)" = "$before" ] ||
     fail "the description was saved again as '$(jj_in log -r @- --no-graph -T description)'"
 echo "ui-flow-test: an unchanged description is not saved: ok"
+
+# A bookmark's branch: base, qa1 (qa) on it, and w1, w2 (topic) on base with
+# the working copy on topic. The log lists @, w2, w1, qa1, base.
+branch_repo() {
+    rm -rf "$work/repo"
+    mkdir -p "$work/repo"
+    (
+        cd "$work/repo"
+        jj git init >/dev/null 2>&1
+        echo base >base.txt && jj commit -m base >/dev/null 2>&1
+        echo qa >qa.txt && jj commit -m qa1 >/dev/null 2>&1
+        jj bookmark create -r @- qa >/dev/null 2>&1
+        jj new @-- >/dev/null 2>&1
+        echo w1 >w1.txt && jj commit -m w1 >/dev/null 2>&1
+        echo w2 >w2.txt && jj commit -m w2 >/dev/null 2>&1
+        jj bookmark create -r @- topic >/dev/null 2>&1
+    )
+}
+
+# topic dropped on qa1, Rebase branch (Enter): as `jj rebase -b topic -o qa`,
+# w1, w2 and the working copy move onto qa1, the bookmark with w2.
+branch_repo
+run_app 'drag:@ref:topic;@row:3,enter'
+[ "$(jj_in log -r 'topic' --no-graph -T 'description.first_line()')" = w2 ] ||
+    fail "topic is not on w2"
+[ "$(jj_in log -r 'topic--' --no-graph -T 'bookmarks')" = qa ] ||
+    fail "topic's branch is not on qa: $(jj_in log -r 'topic--' --no-graph -T 'description.first_line()')"
+[ "$(jj_in log -r '@-' --no-graph -T 'bookmarks')" = topic ] ||
+    fail "the working copy did not come along"
+echo "ui-flow-test: rebase a bookmark's branch: ok"
+
+# Move bookmark instead: only topic moves, to qa1; no revision changes.
+branch_repo
+before="$(jj_in log -r 'all()' --no-graph -T 'commit_id ++ " "')"
+run_app 'drag:@ref:topic;@row:3,click:@move-bookmark'
+[ "$(jj_in log -r 'topic' --no-graph -T 'description.first_line()')" = qa1 ] ||
+    fail "topic does not point at qa1"
+[ "$(jj_in log -r 'all()' --no-graph -T 'commit_id ++ " "')" = "$before" ] ||
+    fail "a revision changed"
+echo "ui-flow-test: move a bookmark only: ok"
