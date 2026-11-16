@@ -402,8 +402,12 @@ pub struct RepoView {
     /// is answered.
     direction_check: Option<Task<()>>,
     /// The sizes of the side panel, the middle and the inspector (see
-    /// `panels::fit_fixed_panels`).
+    /// `panels::fit_fixed_panels`); `body_layout_bare` those of the middle
+    /// and the inspector with the side panel hidden. One state for both would
+    /// hand one layout's sizes to the other's panels as the side panel comes
+    /// and goes.
     body_layout: Entity<ResizableState>,
+    body_layout_bare: Entity<ResizableState>,
     /// Author avatars by email, shared with the list closure.
     avatars: Rc<HashMap<String, SharedString>>,
     /// Pull requests of the workspace's GitHub remote, if it has one.
@@ -718,6 +722,7 @@ impl RepoView {
             dialog_subscription: None,
             direction_check: None,
             body_layout: cx.new(|_| ResizableState::default()),
+            body_layout_bare: cx.new(|_| ResizableState::default()),
             avatars: Rc::default(),
             pulls: None,
             pending_commit_select: None,
