@@ -282,6 +282,43 @@ async fn snapshot_updates_wc_if_changed() -> Result<()> {
     Ok(())
 }
 
+/// the status counts what the working copy changes, by kind: the log marks
+/// the working copy's row with them
+#[tokio::test]
+async fn status_counts_the_working_copy_s_changes() -> Result<()> {
+    let repo = mkrepo();
+
+    let mut session = WorkerSession::default();
+    let mut ws = session.load_workspace(repo.path()).await?;
+    // an empty change on top of the working copy, then one of each kind
+    let mut tx = ws.start_transaction().await?;
+    let current = tx.repo().store().get_commit(ws.wc_id())?;
+    tx.repo_mut()
+        .check_out(ws.name().to_owned(), &current)
+        .await?;
+    ws.finish_transaction(tx, "new change").await?;
+    assert_eq!(
+        ws.format_status().working_copy_changes,
+        crate::messages::ChangeCounts::default()
+    );
+
+    fs::write(repo.path().join("a.txt"), "changed\n").unwrap();
+    fs::write(repo.path().join("new.txt"), "new\n").unwrap();
+    fs::remove_file(repo.path().join("d.txt")).unwrap();
+    ws.import_and_snapshot(true, false).await?;
+    assert_eq!(
+        ws.format_status().working_copy_changes,
+        crate::messages::ChangeCounts {
+            modified: 1,
+            added: 1,
+            deleted: 1,
+            conflicted: 0,
+        }
+    );
+
+    Ok(())
+}
+
 /// the status says whether the working copy changes files: the tab marks itself by it
 #[tokio::test]
 async fn status_tells_whether_the_working_copy_changes_files() -> Result<()> {
