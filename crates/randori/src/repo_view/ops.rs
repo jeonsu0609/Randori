@@ -400,8 +400,64 @@ impl RepoView {
         let Some(parent) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
             return;
         };
-        let onto = super::short_id(&parent.change.prefix, &parent.change.rest, 8);
+        // forward, as jj moves a bookmark without being asked; else a choice
         let name = bookmark_name.clone();
+        self.when_moved_forward(name.clone(), parent.clone(), window, cx, {
+            move |view, forward, window, cx| {
+                if forward {
+                    view.move_ref(r#ref, parent, window, cx);
+                } else {
+                    view.ask_rebase_or_move(r#ref, name, parent, window, cx);
+                }
+            }
+        });
+    }
+
+    /// Asks the worker whether moving local bookmark `name` to `to` moves it
+    /// forward (`to` is its revision or a descendant), as `jj bookmark set`
+    /// does without `--allow-backwards`, then runs `then` with the answer.
+    /// An answer that does not come is "not forward": the move is asked about.
+    pub(super) fn when_moved_forward(
+        &mut self,
+        name: String,
+        to: RevId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let worker = self.worker.clone();
+        let revset = format!("{} & descendants(bookmarks(exact:{name:?}))", to.commit.hex);
+        self.direction_check = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { worker.query_headers(revset, 1) })
+                .await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                view.direction_check = None;
+                let forward = match result {
+                    Ok(headers) => !headers.is_empty(),
+                    Err(err) => {
+                        log::warn!("bookmark direction query failed: {err:#}");
+                        false
+                    }
+                };
+                then(view, forward, window, cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// A local bookmark dropped backwards or sideways: rebase its branch onto
+    /// the revision (`jj rebase -b`), or point it there anyway (`jj bookmark
+    /// set --allow-backwards`), leaving the revisions it was on.
+    fn ask_rebase_or_move(
+        &mut self,
+        r#ref: StoreRef,
+        name: String,
+        parent: RevId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let onto = super::short_id(&parent.change.prefix, &parent.change.rest, 8);
         let view = cx.entity().downgrade();
         let muted = cx.theme().muted_foreground;
         window.open_dialog(cx, move |dialog, _, _| {
@@ -420,11 +476,12 @@ impl RepoView {
                              have, with what is on them, onto {onto}. The bookmark comes along."
                         ))
                         .child(format!(
-                            "Move bookmark only points {name} at {onto}; no revision changes."
+                            "Move bookmark only points {name} at {onto}, which is not after it: \
+                             the revisions it was on keep no bookmark. No revision changes."
                         ))
                         // apart, so a line never breaks inside the command
                         .child(div().text_xs().whitespace_nowrap().text_color(muted).child(
-                            "Rebase branch is jj rebase -b; Move bookmark, jj bookmark set.",
+                            "Rebase branch is jj rebase -b; Move bookmark, jj bookmark set --allow-backwards.",
                         )),
                 )
                 .footer(
@@ -500,6 +557,53 @@ impl RepoView {
         if let Some(to_id) = self.log.rows.get(target).map(|row| row.revision.id.clone()) {
             self.move_ref(r#ref, to_id, window, cx);
         }
+    }
+
+    /// The pick's "Move here": a local bookmark moved forward moves at once;
+    /// backwards or sideways, as `jj bookmark set --allow-backwards`, it is
+    /// confirmed first. A tag or remote bookmark moves (or is refused) as is.
+    pub(super) fn pick_move_ref_to(
+        &mut self,
+        r#ref: StoreRef,
+        target: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let StoreRef::LocalBookmark { bookmark_name, .. } = &r#ref else {
+            self.move_ref_to(r#ref, target, window, cx);
+            return;
+        };
+        let Some(to_id) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
+            return;
+        };
+        let name = bookmark_name.clone();
+        self.when_moved_forward(name.clone(), to_id.clone(), window, cx, {
+            move |view, forward, window, cx| {
+                if forward {
+                    view.move_ref(r#ref, to_id, window, cx);
+                    return;
+                }
+                let onto = super::short_id(&to_id.change.prefix, &to_id.change.rest, 8);
+                let view = cx.entity().downgrade();
+                window.open_alert_dialog(cx, move |alert, _, _| {
+                    let (view, r#ref, to_id) = (view.clone(), r#ref.clone(), to_id.clone());
+                    alert
+                        .title(format!("Move {name} to {onto}?"))
+                        .description(format!(
+                            "{onto} is not after {name}: the revisions {name} was on keep no \
+                             bookmark (jj bookmark set --allow-backwards). Undo moves it back."
+                        ))
+                        .confirm()
+                        .ok_text("Move bookmark")
+                        .on_ok(move |_, window, cx| {
+                            let (r#ref, to_id) = (r#ref.clone(), to_id.clone());
+                            let _ =
+                                view.update(cx, |view, cx| view.move_ref(r#ref, to_id, window, cx));
+                            true
+                        })
+                });
+            }
+        });
     }
 
     /// Points a bookmark or tag at `to_id`.
