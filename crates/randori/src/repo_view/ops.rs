@@ -18,7 +18,7 @@ use gg_lib::messages::mutations::{
 use gg_lib::messages::{InputResponse, RevHeader, RevId, RevSet, StoreRef, TreePath};
 use gg_lib::worker::Mutation;
 use gpui_kit::component::{
-    WindowExt as _,
+    ActiveTheme as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::{DialogAction, DialogClose, DialogFooter},
     input::{Input, InputEvent, InputState},
@@ -395,18 +395,20 @@ impl RepoView {
             self.move_ref_to(r#ref, target, window, cx);
             return;
         };
-        let Some(onto) = self.log.rows.get(target).map(|row| {
-            let id = &row.revision.id;
-            super::short_id(&id.change.prefix, &id.change.rest, 8)
-        }) else {
+        // the revision, not its row: the log may be read again (a fetch, a
+        // snapshot) while the dialog is open, and its rows move
+        let Some(parent) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
             return;
         };
+        let onto = super::short_id(&parent.change.prefix, &parent.change.rest, 8);
         let name = bookmark_name.clone();
         let view = cx.entity().downgrade();
+        let muted = cx.theme().muted_foreground;
         window.open_dialog(cx, move |dialog, _, _| {
             let (name, onto, r#ref) = (name.clone(), onto.clone(), r#ref.clone());
             let (rebase_view, move_view) = (view.clone(), view.clone());
-            let rebase_name = name.clone();
+            let (rebase_name, rebase_parent, move_parent) =
+                (name.clone(), parent.clone(), parent.clone());
             dialog
                 .title(format!("{name} onto {onto}"))
                 .child(
@@ -415,11 +417,14 @@ impl RepoView {
                         .text_sm()
                         .child(format!(
                             "Rebase branch moves the revisions of {name} that {onto} does not \
-                             have, with what is on them, onto {onto} (jj rebase -b). The \
-                             bookmark comes along."
+                             have, with what is on them, onto {onto}. The bookmark comes along."
                         ))
                         .child(format!(
                             "Move bookmark only points {name} at {onto}; no revision changes."
+                        ))
+                        // apart, so a line never breaks inside the command
+                        .child(div().text_xs().whitespace_nowrap().text_color(muted).child(
+                            "Rebase branch is jj rebase -b; Move bookmark, jj bookmark set.",
                         )),
                 )
                 .footer(
@@ -436,9 +441,9 @@ impl RepoView {
                                 .outline()
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
-                                    let r#ref = r#ref.clone();
+                                    let (r#ref, to_id) = (r#ref.clone(), move_parent.clone());
                                     let _ = move_view.update(cx, |view, cx| {
-                                        view.move_ref_to(r#ref, target, window, cx)
+                                        view.move_ref(r#ref, to_id, window, cx)
                                     });
                                 }),
                         )
@@ -451,26 +456,23 @@ impl RepoView {
                         ),
                 )
                 .on_ok(move |_, window, cx| {
-                    let name = rebase_name.clone();
+                    let (name, parent) = (rebase_name.clone(), rebase_parent.clone());
                     let _ = rebase_view
-                        .update(cx, |view, cx| view.rebase_branch(name, target, window, cx));
+                        .update(cx, |view, cx| view.rebase_branch(name, parent, window, cx));
                     true
                 })
         });
     }
 
-    /// Rebases the branch of local bookmark `name` onto the revision in row
-    /// `target`, as `jj rebase -b` (see `RebaseBranch`).
+    /// Rebases the branch of local bookmark `name` onto `parent`, as `jj
+    /// rebase -b` (see `RebaseBranch`).
     pub(super) fn rebase_branch(
         &mut self,
         name: String,
-        target: usize,
+        parent: RevId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(parent) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
-            return;
-        };
         let label = format!(
             "Rebase {name} onto {}",
             super::short_id(&parent.change.prefix, &parent.change.rest, 8)
@@ -495,9 +497,19 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(to_id) = self.log.rows.get(target).map(|row| row.revision.id.clone()) else {
-            return;
-        };
+        if let Some(to_id) = self.log.rows.get(target).map(|row| row.revision.id.clone()) {
+            self.move_ref(r#ref, to_id, window, cx);
+        }
+    }
+
+    /// Points a bookmark or tag at `to_id`.
+    pub(super) fn move_ref(
+        &mut self,
+        r#ref: StoreRef,
+        to_id: RevId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = match &r#ref {
             StoreRef::LocalBookmark { bookmark_name, .. }
             | StoreRef::RemoteBookmark { bookmark_name, .. } => bookmark_name.clone(),
