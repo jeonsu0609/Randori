@@ -28,6 +28,7 @@ gpui_kit::assets::icon_assets!(pub AppIcons, [
     Copy,
     EllipsisVertical,
     ExternalLink,
+    Eye,
     File,
     FileDiff,
     FileInput,
@@ -67,6 +68,8 @@ gpui_kit::assets::icon_assets!(pub AppIcons, [
     Undo2,
     Upload,
     User,
+    UserCheck,
+    UserX,
     X,
 ]);
 
