@@ -198,6 +198,11 @@ pub mod revs {
     }
 
     /// Contains hunk_test.txt with 5 lines: line1-line5
+    /// The pull-request bookmark: a sibling of main on immutable_bookmark
+    pub fn pull_request() -> RevId {
+        mkid("yupnommu", "9ea5c1cb744657ec558fa5c91548f3aedc605bab")
+    }
+
     pub fn hunk_base() -> RevId {
         mkid("xrqnzmzy", "71627400c7459f17fa45ea5dfd2572830f5c26ab")
     }

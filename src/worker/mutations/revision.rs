@@ -13,7 +13,7 @@ use jj_lib::{
     object_id::ObjectId as ObjectIdTrait,
     repo::Repo,
     revset::{RevsetExpression, RevsetStreamExt},
-    rewrite::{self, RebaseOptions, RebasedCommit},
+    rewrite::{self, MoveCommitsLocation, MoveCommitsTarget, RebaseOptions, RebasedCommit},
     transaction::Transaction,
 };
 use pollster::FutureExt as _;
@@ -24,7 +24,7 @@ use crate::{
     messages::mutations::{
         AbandonRevisions, AdoptRevision, BackoutRevisions, CheckoutRevision, CreateRevision,
         CreateRevisionBetween, DescribeRevision, DuplicateRevisions, InsertRevisions,
-        MoveRevisions, MutationOptions, MutationResult,
+        MoveRevisions, MutationOptions, MutationResult, RebaseBranch,
     },
     worker::{Mutation, gui_util::WorkspaceSession},
 };
@@ -632,6 +632,78 @@ impl Mutation for MoveRevisions {
         rewrite::rebase_commit(tx.repo_mut(), oldest.clone(), parent_ids).await?;
 
         match ws.finish_transaction(tx, transaction_description).await? {
+            Some(new_status) => Ok(MutationResult::Updated {
+                new_status,
+                new_selection: None,
+            }),
+            None => Ok(MutationResult::Unchanged),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl Mutation for RebaseBranch {
+    async fn execute(
+        self: Box<Self>,
+        ws: &mut WorkspaceSession,
+        options: &MutationOptions,
+    ) -> Result<MutationResult> {
+        let mut tx = ws.start_transaction().await?;
+
+        let name = jj_lib::ref_name::RefNameBuf::from(self.bookmark_name.clone());
+        let target = ws.view().get_local_bookmark(&name);
+        let Some(Some(head)) = target.as_resolved().cloned() else {
+            if target.is_absent() {
+                precondition!("No such bookmark: {}", self.bookmark_name);
+            }
+            precondition!("Bookmark {} is conflicted", self.bookmark_name);
+        };
+        let parent = ws.resolve_change_id(&self.parent_id)?;
+
+        // as jj-cli's `rebase -b`: the roots of what the bookmark has and the
+        // new parent lacks, moved with their descendants
+        let roots: Vec<CommitId> = RevsetExpression::commit(parent.id().clone())
+            .range(&RevsetExpression::commit(head.clone()))
+            .roots()
+            .evaluate(ws.repo())?
+            .stream()
+            .try_collect()
+            .await?;
+        if roots.is_empty() {
+            precondition!(
+                "{} is already on that revision: nothing to rebase",
+                self.bookmark_name
+            );
+        }
+        let moved: Vec<CommitId> = RevsetExpression::commits(roots.clone())
+            .descendants()
+            .evaluate(ws.repo())?
+            .stream()
+            .try_collect()
+            .await?;
+        if ws.check_immutable(moved.iter().cloned())? && !options.ignore_immutable {
+            precondition!(
+                "{}'s branch has immutable revisions (already in trunk?): nothing of it can be rebased",
+                self.bookmark_name
+            );
+        }
+        if moved.contains(parent.id()) {
+            precondition!("Cannot rebase {} onto its own branch", self.bookmark_name);
+        }
+
+        let location = MoveCommitsLocation {
+            new_parent_ids: vec![parent.id().clone()],
+            new_child_ids: vec![],
+            target: MoveCommitsTarget::Roots(roots),
+        };
+        rewrite::move_commits(tx.repo_mut(), &location, &RebaseOptions::default()).await?;
+
+        let description = format!(
+            "rebase bookmark {} onto commit {}",
+            self.bookmark_name,
+            parent.id().hex()
+        );
+        match ws.finish_transaction(tx, description).await? {
             Some(new_status) => Ok(MutationResult::Updated {
                 new_status,
                 new_selection: None,
@@ -2011,6 +2083,145 @@ mod tests {
             "C should be orphaned to working_copy (A's original parent)"
         );
 
+        Ok(())
+    }
+
+    /// A local bookmark named `name` on `id`.
+    async fn bookmark(
+        ws: &mut WorkspaceSession<'_>,
+        name: &str,
+        id: crate::messages::RevId,
+    ) -> Result<()> {
+        crate::messages::mutations::CreateRef {
+            id,
+            r#ref: crate::messages::StoreRef::LocalBookmark {
+                bookmark_name: name.to_owned(),
+                has_conflict: false,
+                is_synced: false,
+                tracking_remotes: vec![],
+                available_remotes: 0,
+                potential_remotes: 0,
+            },
+        }
+        .execute_unboxed(ws)
+        .await?;
+        Ok(())
+    }
+
+    fn bookmark_head(ws: &WorkspaceSession<'_>, name: &str) -> Commit {
+        let target = ws
+            .view()
+            .get_local_bookmark(&jj_lib::ref_name::RefNameBuf::from(name.to_owned()));
+        let id = target.as_normal().expect("one target").clone();
+        ws.get_commit(&id).expect("the bookmark's commit")
+    }
+
+    /// `topic` (a, then b, on main) with the working copy on it, rebased onto
+    /// pull-request (main's sibling) as `jj rebase -b topic -o pull-request`
+    /// leaves it: the revisions keep their change ids and order, the bookmark
+    /// stays on b, and the working copy comes along.
+    #[tokio::test]
+    async fn rebase_branch_moves_the_bookmark_s_branch_and_its_descendants() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        fs::write(repo.path().join("a.txt"), "a\n")?;
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "a".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let a = ws.get_commit(ws.wc_id())?;
+        CreateRevision {
+            set: RevSet::singleton(ws.format_id(&a)),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        fs::write(repo.path().join("b-new.txt"), "b\n")?;
+        let wc = ws.format_id(&ws.get_commit(ws.wc_id())?);
+        DescribeRevision {
+            id: wc,
+            new_description: "b".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let b = ws.get_commit(ws.wc_id())?;
+        let b_id = ws.format_id(&b);
+        bookmark(&mut ws, "topic", b_id).await?;
+        CreateRevision {
+            set: RevSet::singleton(ws.format_id(&b)),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let on_top = ws.get_commit(ws.wc_id())?.change_id().clone();
+
+        let result = RebaseBranch {
+            bookmark_name: "topic".to_owned(),
+            parent_id: revs::pull_request(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Updated { .. });
+
+        let head = bookmark_head(&ws, "topic");
+        assert_eq!(head.change_id(), b.change_id());
+        assert_eq!(head.description(), "b\n");
+        let parent = ws.get_commit(&head.parent_ids()[0])?;
+        assert_eq!(parent.change_id(), a.change_id());
+        let onto = CommitId::try_from_hex(&revs::pull_request().commit.hex).expect("hex");
+        assert!(ws.repo().index().is_ancestor(&onto, head.id()).await?);
+        let wc = ws.get_commit(ws.wc_id())?;
+        assert_eq!(wc.change_id(), &on_top);
+        assert_eq!(wc.parent_ids(), &[head.id().clone()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebase_branch_says_when_there_is_nothing_to_move() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        bookmark(&mut ws, "here", revs::main_bookmark()).await?;
+
+        // main is already under itself, and under every descendant of it
+        let result = RebaseBranch {
+            bookmark_name: "here".to_owned(),
+            parent_id: revs::main_bookmark(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(
+            result,
+            MutationResult::PreconditionError { message } if message.contains("nothing to rebase")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rebase_branch_refuses_immutable_revisions() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        bookmark(&mut ws, "frozen", revs::immutable_bookmark()).await?;
+        let before = bookmark_head(&ws, "frozen").id().clone();
+
+        // onto a line of its own from the root: the move would take the
+        // immutable history under the bookmark
+        let result = RebaseBranch {
+            bookmark_name: "frozen".to_owned(),
+            parent_id: revs::hunk_base(),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(
+            result,
+            MutationResult::PreconditionError { message } if message.contains("immutable")
+        );
+        assert_eq!(bookmark_head(&ws, "frozen").id(), &before);
         Ok(())
     }
 }

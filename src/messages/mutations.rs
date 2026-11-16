@@ -99,6 +99,15 @@ pub struct MoveRevisions {
     pub parent_ids: Vec<RevId>,
 }
 
+/// Rebases a bookmark's branch onto a revision, as `jj rebase -b`: every
+/// revision the bookmark leads to that the new parent does not have, with
+/// their descendants. The bookmark follows its revision.
+#[derive(Deserialize, Debug)]
+pub struct RebaseBranch {
+    pub bookmark_name: String,
+    pub parent_id: RevId,
+}
+
 /// Sets a revision's parents (used to add/remove parents from merge commits)
 #[derive(Deserialize, Debug)]
 pub struct AdoptRevision {
