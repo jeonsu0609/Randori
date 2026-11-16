@@ -36,6 +36,24 @@ fn has_jj() -> bool {
     Command::new("jj").arg("--version").output().is_ok()
 }
 
+/// jj's repository config for a test repository: what the app reads from the
+/// user's config and the test leans on (the rows of the log, what is
+/// immutable) fixed, as the repository's config wins over the user's.
+const REPO_CONFIG: &[(&str, &str)] = &[
+    ("revsets.log", "all()"),
+    ("revset-aliases.\"immutable_heads()\"", "none()"),
+];
+
+/// `jj git init` in `dir`, with the user's config left out for the CLI and
+/// fixed over for the app (`REPO_CONFIG`).
+fn init(dir: &Path) {
+    std::fs::write(dir.join(".no-user-config.toml"), "").unwrap();
+    jj(dir, &["git", "init"]);
+    for (key, value) in REPO_CONFIG {
+        jj(dir, &["config", "set", "--repo", key, value]);
+    }
+}
+
 /// The tab on `repo` in a test window, loaded.
 fn open<'a>(
     repo: &Path,
@@ -99,8 +117,7 @@ fn changed(repo: &Path, rev: &str) -> String {
 
 /// A described base with a.txt, and a working copy changing it and adding c.txt.
 fn commit_repo(dir: &Path) {
-    std::fs::write(dir.join(".no-user-config.toml"), "").unwrap();
-    jj(dir, &["git", "init"]);
+    init(dir);
     std::fs::write(dir.join("a.txt"), "a\n").unwrap();
     jj(dir, &["describe", "-m", "base"]);
     jj(dir, &["new"]);
@@ -109,8 +126,8 @@ fn commit_repo(dir: &Path) {
     jj(dir, &["status"]);
 }
 
-/// D, a summary typed, ⌘↩ with nothing included: `jj commit` of every
-/// change, the new working copy empty.
+/// D, a summary typed, ⌘↩ (Ctrl+Enter off macOS: `secondary`) with nothing
+/// included: `jj commit` of every change, the new working copy empty.
 #[gpui::test]
 fn commit_every_change(cx: &mut TestAppContext) {
     if !has_jj() {
@@ -121,7 +138,7 @@ fn commit_every_change(cx: &mut TestAppContext) {
     commit_repo(dir.path());
     let (view, cx) = open(dir.path(), cx);
 
-    keys(&view, "d f i x cmd-enter", cx);
+    keys(&view, "d f i x secondary-enter", cx);
 
     let repo = dir.path();
     assert_eq!(
@@ -146,8 +163,7 @@ fn commit_every_change(cx: &mut TestAppContext) {
 /// base; qa1 (qa) on it; w1, w2 (topic) on base with the working copy on
 /// topic.
 fn branch_repo(dir: &Path) {
-    std::fs::write(dir.join(".no-user-config.toml"), "").unwrap();
-    jj(dir, &["git", "init"]);
+    init(dir);
     for (file, message) in [("base.txt", "base"), ("qa.txt", "qa1")] {
         std::fs::write(dir.join(file), "x\n").unwrap();
         jj(dir, &["commit", "-m", message]);
