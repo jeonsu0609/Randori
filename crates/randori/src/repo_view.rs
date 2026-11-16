@@ -430,6 +430,9 @@ pub struct RepoView {
     split_drag: Option<f32>,
     /// The working copy changes files, from the last status.
     working_copy_changed: bool,
+    /// This workspace's working-copy commit (hex) and what it changes, for the
+    /// marks on its row in the log (`log_list::render_wip_counts`).
+    wip: Option<(String, gg_lib::messages::ChangeCounts)>,
     /// The jj settings generation this tab's workspace was loaded with; a
     /// newer one (the Settings window wrote jj's config) opens it again.
     jj_generation: u64,
@@ -734,6 +737,7 @@ impl RepoView {
             column_drag: None,
             split_drag: None,
             working_copy_changed: false,
+            wip: None,
             jj_generation: settings::get(cx).jj_generation,
             reopen_pending: false,
             last_auto_fetch: std::time::Instant::now(),
@@ -841,7 +845,7 @@ impl RepoView {
                             let query = initial_query.unwrap_or(latest_query);
                             let page = worker.query_log(query.clone(), by_date)?;
                             let path = absolute_path.0;
-                            let changed = status.working_copy_changed;
+                            let changed = status.clone();
                             Ok((
                                 WorkspaceInfo {
                                     path: display_path(&path).into(),
@@ -872,8 +876,10 @@ impl RepoView {
 
             let _ = this.update_in(cx, |view, window, cx| {
                 match result {
-                    Ok((workspace, page, changed)) => {
-                        view.set_working_copy_changed(changed, cx);
+                    Ok((workspace, page, status)) => {
+                        view.set_working_copy_changed(status.working_copy_changed, cx);
+                        view.wip =
+                            Some((status.working_copy.hex.clone(), status.working_copy_changes));
                         let text = field_text(&workspace.query, &workspace.default_query);
                         view.revset
                             .update(cx, |state, cx| state.set_value(text, window, cx));
@@ -916,6 +922,11 @@ impl RepoView {
             workspace.can_redo = status.can_redo;
         }
         self.set_working_copy_changed(status.working_copy_changed, cx);
+        let wip = Some((status.working_copy.hex.clone(), status.working_copy_changes));
+        if self.wip != wip {
+            self.wip = wip;
+            cx.notify();
+        }
     }
 
     fn set_working_copy_changed(&mut self, changed: bool, cx: &mut Context<Self>) {
@@ -923,6 +934,12 @@ impl RepoView {
             self.working_copy_changed = changed;
             cx.emit(RepoViewEvent::WorkingCopyChanged);
         }
+    }
+
+    /// What the working copy changes, by kind, as its row in the log shows.
+    #[cfg(test)]
+    pub(crate) fn wip_counts(&self) -> Option<gg_lib::messages::ChangeCounts> {
+        self.wip.as_ref().map(|(_, counts)| *counts)
     }
 
     /// The working copy changes files (the tab shows a dot).

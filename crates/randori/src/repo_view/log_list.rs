@@ -97,6 +97,7 @@ pub(super) fn render_row(
     refs_open: bool,
     owner: &WeakEntity<RepoView>,
     dim: bool,
+    wip: Option<gg_lib::messages::ChangeCounts>,
     cx: &App,
 ) -> ListItem {
     let theme = cx.theme();
@@ -203,6 +204,10 @@ pub(super) fn render_row(
                                 .child("(no description set)"),
                         }),
                 )
+                // the working copy's changes, as GitKraken marks its WIP row
+                .when_some(wip, |this, counts| {
+                    this.child(render_wip_counts(counts, cx))
+                })
                 .when(cols.show_author, |this| {
                     this.child(if cols.compact_author {
                         div()
@@ -260,6 +265,55 @@ pub(super) fn render_row(
                     )
                 }),
         )
+}
+
+/// What the working copy changes, by kind, after its description: a pencil
+/// for files modified, + added, − deleted, ⚠ conflicted; a kind with none is
+/// left out, and so is the whole when nothing changes.
+fn render_wip_counts(counts: gg_lib::messages::ChangeCounts, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let mark = |icon: IconName, n: usize, color: gpui_kit::Hsla, what: &'static str| {
+        (n > 0).then(|| {
+            h_flex()
+                .id(what)
+                .gap_0p5()
+                .text_xs()
+                .text_color(color)
+                .child(gpui_kit::component::Icon::new(icon).xsmall())
+                .child(n.to_string())
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(format!(
+                        "{n} file{} {what}",
+                        if n == 1 { "" } else { "s" }
+                    ))
+                    .build(window, cx)
+                })
+        })
+    };
+    h_flex()
+        .flex_none()
+        .gap_2()
+        .pr_2()
+        .children(mark(
+            IconName::Pencil,
+            counts.modified,
+            theme.warning,
+            "modified",
+        ))
+        .children(mark(IconName::Plus, counts.added, theme.success, "added"))
+        .children(mark(
+            IconName::Minus,
+            counts.deleted,
+            theme.danger,
+            "deleted",
+        ))
+        .children(mark(
+            IconName::TriangleAlert,
+            counts.conflicted,
+            theme.danger,
+            "with a conflict",
+        ))
+        .into_any_element()
 }
 
 /// The branch / tag column: the row's first ref as a chip in its branch
@@ -883,6 +937,7 @@ impl RepoView {
         let owner = cx.entity().downgrade();
         let refs_open = self.refs_hover.open_row();
         let find_bar = self.find.as_ref().map(|find| self.render_find(find, cx));
+        let wip = self.wip.clone();
         let wants_more =
             self.paging.has_more && !self.paging.loading && self.paging.error.is_none();
         let more_owner = owner.clone();
@@ -981,6 +1036,9 @@ impl RepoView {
                                                 || author_filter.as_ref().is_some_and(|f| {
                                                     !f.contains(&rows[ix].author_email)
                                                 }),
+                                            wip.as_ref()
+                                                .filter(|(hex, _)| *hex == rows[ix].id.commit.hex)
+                                                .map(|(_, counts)| *counts),
                                             cx,
                                         )
                                         .harness_mark(move || format!("row:{ix}"))
