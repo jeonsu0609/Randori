@@ -317,6 +317,11 @@ pub struct RenameWorkspace {
 pub struct ExternalDiff {
     pub id: RevId,
     pub path: TreePath,
+    /// A program and its arguments to open instead of `ui.diff-formatter`,
+    /// `$left` and `$right` standing for the two files (Randori's own
+    /// choice of a diff application).
+    #[serde(default)]
+    pub tool: Option<Vec<String>>,
 }
 
 /// Resolves a file's conflict in the user's configured external merge tool

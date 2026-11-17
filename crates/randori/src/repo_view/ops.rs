@@ -7,6 +7,8 @@
 //! asks for git credentials and retries (see `remote`).
 
 use crate::harness_mark::HarnessMark as _;
+use crate::settings;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gg_lib::messages::mutations::{
@@ -637,7 +639,7 @@ impl RepoView {
         Some((detail.header.id.clone(), parent))
     }
 
-    fn selected_file_path(&self) -> Option<TreePath> {
+    pub(super) fn selected_file_path(&self) -> Option<TreePath> {
         let detail = self.inspected.detail.as_ref()?;
         detail
             .files
@@ -910,23 +912,49 @@ impl RepoView {
         );
     }
 
-    /// Opens the selected file's change in the configured external diff tool.
+    /// Opens the selected file's change in the diff application chosen in
+    /// Settings (`diff_apps`), its two versions side by side; with none
+    /// chosen, in the built-in full view.
     pub(super) fn diff_in_tool(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some((id, _)), Some(path)) = (self.detail_ids(), self.selected_file_path()) else {
             return;
         };
-        if !self.workspace.as_ref().is_some_and(|ws| ws.has_diff_tool) {
+        // none chosen: the built-in diff, the full view
+        let Some(app) = settings::get(cx).display.diff_app.clone() else {
+            self.open_focus(super::FocusTab::Diff, false, window, cx);
+            return;
+        };
+        // chosen, then uninstalled or moved
+        let Some(tool) = crate::diff_apps::command(&app) else {
+            let name = crate::diff_apps::name(&app).map_or(app.clone(), str::to_owned);
             window.push_notification(
-                Notification::info(
-                    "Set `ui.diff-formatter` in jj config to open changes in a tool.",
-                )
-                .title("No diff tool"),
+                Notification::error(format!(
+                    "{name} was not found. Choose another in Settings › Integration › Diff tool."
+                ))
+                .title("Open in diff tool"),
                 cx,
             );
             return;
-        }
+        };
         let label = format!("Open {} in diff tool", path.repo_path);
-        self.run_mutation(label, Box::new(ExternalDiff { id, path }), None, window, cx);
+        self.run_mutation(
+            label,
+            Box::new(ExternalDiff {
+                id,
+                path,
+                tool: Some(tool),
+            }),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// The selected file's path in the workspace's folder, where the working
+    /// copy has it: another revision's file may differ there, or be gone.
+    pub(super) fn selected_file_full_path(&self) -> Option<PathBuf> {
+        let root = &self.workspace.as_ref()?.root;
+        Some(full_path(root, &self.selected_file_path()?.repo_path))
     }
 
     // ----- bookmarks ------------------------------------------------------------------------
@@ -1112,4 +1140,10 @@ impl RepoView {
             field.update(cx, |state, cx| state.focus(window, cx));
         });
     }
+}
+
+/// A repository path (`/` between its parts) under `root`, in the system's
+/// own form.
+pub(super) fn full_path(root: &std::path::Path, repo_path: &str) -> PathBuf {
+    root.join(repo_path.split('/').collect::<PathBuf>())
 }

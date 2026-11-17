@@ -51,7 +51,11 @@ impl Render for Pane {
 
 /// `pane` as an element kept between frames while it is not notified.
 pub(super) fn cached(pane: &Entity<Pane>) -> AnyElement {
-    AnyView::from(pane.clone())
-        .cached(gpui_kit::StyleRefinement::default().size_full())
-        .into_any_element()
+    cached_at(pane, gpui_kit::StyleRefinement::default().size_full())
+}
+
+/// `pane` kept between frames, laid out at `style`: a cached view is not
+/// measured from what it draws, so `style` gives it a size.
+pub(super) fn cached_at(pane: &Entity<Pane>, style: gpui_kit::StyleRefinement) -> AnyElement {
+    AnyView::from(pane.clone()).cached(style).into_any_element()
 }

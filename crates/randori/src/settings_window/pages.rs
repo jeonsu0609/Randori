@@ -44,30 +44,7 @@ pub(super) fn general_page(cx: &App) -> SettingPage {
                             }
                         },
                     ),
-                )),
-        )
-        .group(
-            SettingGroup::new()
-                .title("Revisions")
-                .item(
-                    SettingItem::new(
-                        "Order",
-                        SettingField::render(|_, _, cx| {
-                            let by_date = display(cx).log_by_date;
-                            RadioGroup::horizontal("settings-order")
-                                .selected_index(Some(usize::from(by_date)))
-                                .child("Topological")
-                                .child("By date")
-                                .on_click(|ix, _, cx| {
-                                    settings::update_display(cx, |d| d.log_by_date = *ix == 1)
-                                })
-                        }),
-                    )
-                    .description(
-                        "Topological shows one branch at a time, as jj log does; by date \
-                         lists the newest first across branches. The toolbar switches it too.",
-                    ),
-                )
+                ))
                 .item(
                     SettingItem::new(
                         "Mark tabs with changes",
@@ -81,45 +58,63 @@ pub(super) fn general_page(cx: &App) -> SettingPage {
                     .description("A dot on a tab whose working copy changes files."),
                 ),
         )
-        .group(
-            SettingGroup::new()
-                .title("Workspaces")
-                .item(
-                    SettingItem::render(|_, _, cx| source_folders(cx)).description(
-                        "The workspace picker (in the toolbar) lists the jj repositories \
-                             in these folders, two levels down.",
+        .group({
+            // as the other settings: the name and what it does, the button
+            // beside them; the folders chosen under, when there are any
+            let group = SettingGroup::new().title("Workspaces").item(
+                SettingItem::new(
+                    "Source folders",
+                    SettingField::render(|_, _, _| {
+                        Button::new("add-folder")
+                            .outline()
+                            .small()
+                            .icon(IconName::Plus)
+                            .label("Add folder…")
+                            .on_click(|_, _, cx| add_source_folders(cx))
+                    }),
+                )
+                .description(
+                    "The workspace picker (in the toolbar) lists the jj repositories in these \
+                     folders, two levels down.",
+                ),
+            );
+            let group = if display(cx).source_folders.is_empty() {
+                group
+            } else {
+                group.item(
+                    SettingItem::render(|_, _, cx| source_folders(cx)).keywords(["source folders"]),
+                )
+            };
+            group.item(
+                SettingItem::new(
+                    "Fetch automatically",
+                    SettingField::dropdown(
+                        AUTO_FETCH_CHOICES
+                            .iter()
+                            .map(|(mins, label)| (mins.to_string().into(), (*label).into()))
+                            .collect(),
+                        |cx| display(cx).auto_fetch_mins.to_string().into(),
+                        |value, cx| {
+                            let mins = value.parse().unwrap_or(0);
+                            settings::update_display(cx, |d| d.auto_fetch_mins = mins)
+                        },
                     ),
                 )
-                .item(
-                    SettingItem::new(
-                        "Fetch automatically",
-                        SettingField::dropdown(
-                            AUTO_FETCH_CHOICES
-                                .iter()
-                                .map(|(mins, label)| (mins.to_string().into(), (*label).into()))
-                                .collect(),
-                            |cx| display(cx).auto_fetch_mins.to_string().into(),
-                            |value, cx| {
-                                let mins = value.parse().unwrap_or(0);
-                                settings::update_display(cx, |d| d.auto_fetch_mins = mins)
-                            },
-                        ),
-                    )
-                    .description(
-                        "Runs jj git fetch for every open tab. A fetch that fails (no network, \
+                .description(
+                    "Runs jj git fetch for every open tab. A fetch that fails (no network, \
                          a remote that asks for a password) is skipped quietly.",
-                    ),
                 ),
-        )
+            )
+        })
 }
 
+/// The source folders chosen, one a row with a button that takes it out.
 fn source_folders(cx: &App) -> gpui_kit::AnyElement {
     let theme = cx.theme();
     let folders = display(cx).source_folders.clone();
     v_flex()
         .w_full()
         .gap_1()
-        .child(div().text_sm().font_medium().child("Source folders"))
         .children(folders.into_iter().enumerate().map(|(ix, folder)| {
             h_flex()
                 .gap_2()
@@ -144,14 +139,6 @@ fn source_folders(cx: &App) -> gpui_kit::AnyElement {
                         }),
                 )
         }))
-        .child(
-            Button::new("add-folder")
-                .outline()
-                .xsmall()
-                .icon(IconName::Plus)
-                .label("Add folder…")
-                .on_click(|_, _, cx| add_source_folders(cx)),
-        )
         .into_any_element()
 }
 
@@ -196,6 +183,27 @@ pub(super) fn revisions_page() -> SettingPage {
     SettingPage::new("Revisions")
         .icon(IconName::GitGraph)
         .group(
+            SettingGroup::new().title("List").item(
+                SettingItem::new(
+                    "Order",
+                    SettingField::render(|_, _, cx| {
+                        let by_date = display(cx).log_by_date;
+                        RadioGroup::horizontal("settings-order")
+                            .selected_index(Some(usize::from(by_date)))
+                            .child("Topological")
+                            .child("By date")
+                            .on_click(|ix, _, cx| {
+                                settings::update_display(cx, |d| d.log_by_date = *ix == 1)
+                            })
+                    }),
+                )
+                .description(
+                    "Topological shows one branch at a time, as jj log does; by date \
+                         lists the newest first across branches. The toolbar switches it too.",
+                ),
+            ),
+        )
+        .group(
             SettingGroup::new()
                 .title("Columns")
                 .description("The graph and the description are always shown.")
@@ -205,7 +213,7 @@ pub(super) fn revisions_page() -> SettingPage {
                     |d, v| d.visible_columns.refs = v,
                 ))
                 .item(column(
-                    "Change",
+                    "Change id",
                     |d| d.visible_columns.change,
                     |d, v| d.visible_columns.change = v,
                 ))
@@ -227,7 +235,10 @@ pub(super) fn revisions_page() -> SettingPage {
                         },
                     ),
                 )
-                .description("gg.ui.mark-unpushed-bookmarks in your jj config."),
+                .description(
+                    "An upload mark on local bookmarks that moved since their push, or that \
+                     no remote tracks. Kept in your jj config (gg.ui.mark-unpushed-bookmarks).",
+                ),
             ),
         )
 }
@@ -395,17 +406,17 @@ pub(super) fn describe_page() -> SettingPage {
             .default_value(f64::from(default)),
         )
     };
-    SettingPage::new("Describe")
+    SettingPage::new("Commit message")
         .icon(IconName::TextCursorInput)
         .group(
             SettingGroup::new()
                 .title("Subject length")
                 .description(
-                    "The description editor counts the first line's characters and colours \
-                     the count past these limits.",
+                    "The summary field counts its characters, coloured past the first \
+                     number and red past the limit.",
                 )
-                .item(limit("Long past", |l| l.0, |l, v| l.0 = v, 50))
-                .item(limit("Too long past", |l| l.1, |l, v| l.1 = v, 72)),
+                .item(limit("Warn after", |l| l.0, |l, v| l.0 = v, 50))
+                .item(limit("Limit", |l| l.1, |l, v| l.1 = v, 72)),
         )
         .group(
             SettingGroup::new()
@@ -413,7 +424,7 @@ pub(super) fn describe_page() -> SettingPage {
                 .description(
                     "One rule a line: a regular expression, a space, then the URL, where $0 \
                      is the match. Issue keys in descriptions and pull requests become links, \
-                     e.g. MELON-\\d+ https://example.atlassian.net/browse/$0",
+                     e.g. PROJ-\\d+ https://example.atlassian.net/browse/$0",
                 )
                 .item(SettingItem::render(|_, window, cx| {
                     issue_links_editor(window, cx)
@@ -547,7 +558,7 @@ pub(super) fn integration_page(cx: &App) -> SettingPage {
                 .title("Terminal")
                 .item(
                     SettingItem::new(
-                        "Open",
+                        "Terminal app",
                         SettingField::dropdown(
                             terminal_choices(),
                             |cx| display(cx).external_terminal.clone().unwrap_or_default().into(),
@@ -616,9 +627,28 @@ pub(super) fn integration_page(cx: &App) -> SettingPage {
             SettingGroup::new()
                 .title("Tools")
                 .description(
-                    "ui.merge-editor and ui.diff-formatter in your jj config, for \"Resolve in \
-                     merge tool\" and \"Open in diff tool\" (and the jj CLI). Open tabs load \
-                     their workspace again to pick them up.",
+                    "The merge tool and the diff format are jj's (ui.merge-editor, \
+                     ui.diff-formatter), which the jj CLI uses too: open tabs load their \
+                     workspace again to pick them up.",
+                )
+                .item(
+                    SettingItem::new(
+                        "Diff tool",
+                        SettingField::dropdown(
+                            diff_app_choices(),
+                            |cx| display(cx).diff_app.clone().unwrap_or_default().into(),
+                            |value, cx| {
+                                let app = (!value.is_empty()).then(|| value.to_string());
+                                settings::update_display(cx, |d| d.diff_app = app)
+                            },
+                        )
+                        .default_value(SharedString::default()),
+                    )
+                    .description(
+                        "Built in, a file's change opens in Randori's full view. An \
+                         application chosen (the ones installed are listed) shows it instead, \
+                         from \"Open in diff tool\" in a changed file's menu.",
+                    ),
                 )
                 .item(SettingItem::new(
                     "Merge tool",
@@ -637,7 +667,7 @@ pub(super) fn integration_page(cx: &App) -> SettingPage {
                     ),
                 ))
                 .item(SettingItem::new(
-                    "Diff tool",
+                    "Diff format",
                     SettingField::dropdown(
                         diff,
                         |cx| tool_value(&DIFF_TOOLS, &settings::get(cx).diff_formatter),
@@ -724,6 +754,17 @@ fn tool_setting(known: &[(&str, &str)], picked: &str) -> Option<String> {
 }
 
 /// The panel, then the terminal applications that are installed.
+/// Randori's own diff, then the diff applications installed.
+fn diff_app_choices() -> Vec<(SharedString, SharedString)> {
+    std::iter::once(("".into(), "Built-in (full view)".into()))
+        .chain(
+            crate::diff_apps::installed()
+                .iter()
+                .map(|(id, name)| ((*id).into(), (*name).into())),
+        )
+        .collect()
+}
+
 fn terminal_choices() -> Vec<(SharedString, SharedString)> {
     // looked for once: every page is built whenever a setting changes
     static INSTALLED: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();

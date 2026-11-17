@@ -134,7 +134,12 @@ impl RepoView {
         self.start_pick(pick, window, cx);
     }
     /// Enter in pick mode: apply the operation to the selected revision.
+    /// Otherwise Enter goes into the selected revision's changed files.
     pub(super) fn confirm_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pick.is_none() {
+            self.enter_files(window, cx);
+            return;
+        }
         let (Some(pick), Some(target)) = (self.pick.take(), self.selected) else {
             cx.propagate();
             return;

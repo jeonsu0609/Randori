@@ -83,6 +83,20 @@ impl Render for ResizeGhost {
 /// for, so scrolling rarely reaches the end before it comes.
 const PRELOAD_ROWS: usize = 200;
 
+/// A list row's selection: as the list draws it while the list has the keys,
+/// dimmed while the other list has them, so that it shows where ↑↓ go.
+pub(super) fn select_row(
+    item: ListItem,
+    selected: bool,
+    active: bool,
+    theme: &gpui_kit::component::Theme,
+) -> ListItem {
+    item.selected(selected && active)
+        .when(selected && !active, |item| {
+            item.bg(theme.list_active.opacity(0.45))
+        })
+}
+
 /// One log row. `rem` is the window's rem, which the graph's avatars are
 /// sized by; `avatar` is the author's picture when one is known.
 #[allow(clippy::too_many_arguments)]
@@ -91,6 +105,7 @@ pub(super) fn render_row(
     graph: &Graph,
     ix: usize,
     selected: bool,
+    active: bool,
     avatar: Option<SharedString>,
     rem: gpui_kit::Pixels,
     cols: Columns,
@@ -104,7 +119,7 @@ pub(super) fn render_row(
     let theme = cx.theme();
     let color = graph.node_color(ix, cx);
     ListItem::new(("revision", ix))
-        .selected(selected)
+        .map(|item| select_row(item, selected, active, theme))
         .h(row_height())
         .pl_3()
         .pr_3()
@@ -960,6 +975,7 @@ impl RepoView {
         let refs_open = self.refs_hover.open_row();
         let find_bar = self.find.as_ref().map(|find| self.render_find(find, cx));
         let wip = self.wip;
+        let active = self.log_active;
         let wip_row = self.log.working_copy_row;
         let summary_row = self.row_summary_row();
         let summary_field = self.next_commit.row.clone();
@@ -1048,6 +1064,7 @@ impl RepoView {
                                             &graph,
                                             ix,
                                             selected == Some(ix),
+                                            active,
                                             avatar,
                                             rem,
                                             cols,

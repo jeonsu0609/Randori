@@ -24,11 +24,8 @@ impl RepoView {
     }
 
     fn working_copy_change(&self) -> Option<String> {
-        self.log
-            .rows
-            .iter()
-            .find(|row| is_this_working_copy(&row.revision))
-            .map(|row| row.revision.id.change.hex.clone())
+        let ix = self.log.working_copy_row?;
+        Some(self.log.rows.get(ix)?.revision.id.change.hex.clone())
     }
 
     /// From `replace_rows`: runs the check a move asked for.

@@ -231,6 +231,158 @@ fn commit_from_the_working_copy_s_row(cx: &mut TestAppContext) {
     assert_eq!(changed(repo, "@"), "");
 }
 
+/// A changed file clicked, ↓ ↑ and End go through the inspector's files as
+/// they do through the revisions: the diff follows the file and the
+/// revision stays selected. Escape gives the keys back to the revisions.
+#[gpui::test]
+fn arrow_keys_go_through_the_changed_files(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = commit_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+    let state = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| (view.selected_row(), view.shown_file()))
+    };
+    let row = view.read_with(cx, |view, _| view.selected_row());
+    assert_eq!(state(&view, cx), (row, Some("a.txt".into())));
+
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    keys(&view, "down", cx);
+    assert_eq!(state(&view, cx), (row, Some("c.txt".into())));
+    // the last file stays the last
+    keys(&view, "down", cx);
+    assert_eq!(state(&view, cx), (row, Some("c.txt".into())));
+    keys(&view, "up", cx);
+    assert_eq!(state(&view, cx), (row, Some("a.txt".into())));
+    keys(&view, "end", cx);
+    assert_eq!(state(&view, cx), (row, Some("c.txt".into())));
+
+    keys(&view, "escape down", cx);
+    assert_ne!(view.read_with(cx, |view, _| view.selected_row()), row);
+}
+
+/// Enter in the changed files opens the file's full view, as a double click
+/// does, and Escape there closes it, back to the files.
+#[gpui::test]
+fn enter_opens_the_file_s_full_view(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = commit_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+
+    keys(&view, "down enter", cx);
+    let open = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| (view.full_view_open(), view.shown_file()))
+    };
+    assert_eq!(open(&view, cx), (true, Some("c.txt".into())));
+    // closed, the keys go back to the files
+    keys(&view, "escape up", cx);
+    assert_eq!(open(&view, cx), (false, Some("a.txt".into())));
+}
+
+/// With a file's full view open and a file clicked, ↓ goes on through the
+/// files (the full view following), and Escape closes a step at a time: the
+/// full view first, the keys staying with the files, then the files.
+#[gpui::test]
+fn escape_closes_the_full_view_before_leaving_the_files(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = commit_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+    let row = view.read_with(cx, |view, _| view.selected_row());
+    keys(&view, "secondary-shift-d", cx);
+    assert!(view.read_with(cx, |view, _| view.full_view_open()));
+
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    keys(&view, "down", cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.shown_file()),
+        Some("c.txt".into())
+    );
+    keys(&view, "escape", cx);
+    assert!(!view.read_with(cx, |view, _| view.full_view_open()));
+    // the keys are still the files'
+    keys(&view, "up", cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| (view.selected_row(), view.shown_file())),
+        (row, Some("a.txt".into()))
+    );
+    keys(&view, "escape down", cx);
+    assert_ne!(view.read_with(cx, |view, _| view.selected_row()), row);
+}
+
+/// Enter and Escape go in and out a step at a time: the revisions, their
+/// changed files, a file's full view, and back.
+#[gpui::test]
+fn enter_and_escape_go_in_and_out(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = commit_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+    let state = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| {
+            (
+                view.selected_row(),
+                view.shown_file(),
+                view.full_view_open(),
+            )
+        })
+    };
+    let row = view.read_with(cx, |view, _| view.selected_row());
+
+    // the revisions: Enter, and ↓ goes through the files
+    keys(&view, "enter down", cx);
+    assert_eq!(state(&view, cx), (row, Some("c.txt".into()), false));
+    // the files: Enter opens the full view, Escape closes it
+    keys(&view, "enter", cx);
+    assert_eq!(state(&view, cx), (row, Some("c.txt".into()), true));
+    keys(&view, "escape up", cx);
+    assert_eq!(state(&view, cx), (row, Some("a.txt".into()), false));
+    // the files: Escape, and ↓ goes through the revisions again
+    keys(&view, "escape down", cx);
+    assert_ne!(view.read_with(cx, |view, _| view.selected_row()), row);
+}
+
+/// The changed file's menu copies its whole path, in the system's own form.
+#[gpui::test]
+fn the_file_s_path_is_copied(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = commit_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.shown_file()),
+        Some("a.txt".into())
+    );
+    let copied = |cx: &mut VisualTestContext| {
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default()
+    };
+
+    cx.dispatch_action(crate::repo_view::actions::CopyFullFilePath);
+    assert_eq!(
+        std::path::PathBuf::from(copied(cx)).canonicalize().unwrap(),
+        repo.join("a.txt").canonicalize().unwrap()
+    );
+}
+
 /// base; qa1 (qa) on it; w1, w2 (topic) on base with the working copy on
 /// topic.
 fn branch_repo(holder: &Path) -> std::path::PathBuf {

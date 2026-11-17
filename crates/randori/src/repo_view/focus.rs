@@ -169,6 +169,24 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Esc in the full view, or its close button: back a step, to the changed
+    /// files it was opened from (to the revisions when the selected one has
+    /// none). `close_focus` goes to the revisions, for a jump elsewhere.
+    pub(super) fn close_focus_to_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.center.file().is_none() {
+            return;
+        }
+        self.close_focus(window, cx);
+        if self
+            .inspected
+            .detail
+            .as_ref()
+            .is_some_and(|detail| !detail.files.is_empty())
+        {
+            self.files_focus.focus(window, cx);
+        }
+    }
+
     pub(super) fn close_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.center.file().is_some() {
             self.center = Center::Revisions;
@@ -566,8 +584,10 @@ impl RepoView {
                     .ghost()
                     .small()
                     .icon(IconName::X)
-                    .tooltip("Back to the revisions (Esc)")
-                    .on_click(cx.listener(|view, _, window, cx| view.close_focus(window, cx))),
+                    .tooltip("Back to the changed files (Esc)")
+                    .on_click(
+                        cx.listener(|view, _, window, cx| view.close_focus_to_files(window, cx)),
+                    ),
             );
         // wraps where the window is narrow: the line actions go under the
         // controls rather than over them
@@ -674,7 +694,7 @@ impl RepoView {
             .min_h_0()
             .on_action(
                 cx.listener(|view, _: &actions::CloseFileFocus, window, cx| {
-                    view.close_focus(window, cx)
+                    view.close_focus_to_files(window, cx)
                 }),
             )
             .on_action(
@@ -712,7 +732,7 @@ impl RepoView {
     }
 
     /// The next or previous changed file of the selected revision.
-    fn focus_file(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(super) fn focus_file(&mut self, delta: isize, cx: &mut Context<Self>) {
         let count = self
             .inspected
             .detail
@@ -722,7 +742,7 @@ impl RepoView {
             return;
         }
         let current = self.inspected.file.unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, count as isize - 1) as usize;
+        let next = current.saturating_add(delta).clamp(0, count as isize - 1) as usize;
         self.select_file(Some(next), cx);
         self.retarget_focus(cx);
     }

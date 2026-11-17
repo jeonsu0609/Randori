@@ -5,6 +5,10 @@ use gpui_kit::{Pixels, px};
 
 use super::*;
 
+/// The status bar's height: drawn as a pane of its own (`Panes::status`),
+/// it is laid out before it is drawn.
+pub(super) const STATUS_BAR_HEIGHT: gpui_kit::Rems = gpui_kit::rems(1.75);
+
 impl RepoView {
     /// The repository toolbar under the tab strip, laid out as GitKraken's:
     /// panel toggle and the workspace and bookmark switchers at the left, the
@@ -184,7 +188,7 @@ impl RepoView {
             )
     }
 
-    pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (state_color, state_label) = match &self.state {
             LoadState::Loading => (theme.warning, "Loading"),
@@ -193,11 +197,13 @@ impl RepoView {
         };
         let working_copy = self
             .log
-            .rows
-            .iter()
-            .find(|row| is_this_working_copy(&row.revision))
+            .working_copy_row
+            .and_then(|ix| self.log.rows.get(ix))
             .map(|row| row.revision.id.change.prefix.clone());
         StatusBar::new()
+            // a pane's root: nothing around stretches it
+            .w_full()
+            .h(STATUS_BAR_HEIGHT)
             .left(
                 h_flex()
                     .gap_2()
