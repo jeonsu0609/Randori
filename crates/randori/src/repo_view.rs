@@ -234,6 +234,9 @@ const AGE_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Key context of the revision list; arrow and vi keys apply only there.
 pub(crate) const LOG_CONTEXT: &str = "RandoriLog";
+/// The list's keys: not while a field in the list has focus (the working
+/// copy's summary in its row), where they are letters typed.
+const LOG_KEYS: &str = "RandoriLog && !Input";
 /// Key context of one repository tab.
 pub(crate) const REPO_CONTEXT: &str = "RandoriRepo";
 
@@ -253,22 +256,22 @@ pub fn bind_keys(cx: &mut App) {
     use actions::*;
     use gpui_kit::KeyBinding;
     cx.bind_keys([
-        KeyBinding::new("up", SelectPrevious, Some(LOG_CONTEXT)),
-        KeyBinding::new("k", SelectPrevious, Some(LOG_CONTEXT)),
-        KeyBinding::new("down", SelectNext, Some(LOG_CONTEXT)),
-        KeyBinding::new("j", SelectNext, Some(LOG_CONTEXT)),
-        KeyBinding::new("home", SelectFirst, Some(LOG_CONTEXT)),
-        KeyBinding::new("end", SelectLast, Some(LOG_CONTEXT)),
-        KeyBinding::new("/", FocusRevset, Some(LOG_CONTEXT)),
-        KeyBinding::new("n", NewChild, Some(LOG_CONTEXT)),
-        KeyBinding::new("e", EditRevision, Some(LOG_CONTEXT)),
-        KeyBinding::new("d", DescribeRevision, Some(LOG_CONTEXT)),
-        KeyBinding::new("b", CreateBookmark, Some(LOG_CONTEXT)),
-        KeyBinding::new("backspace", AbandonRevision, Some(LOG_CONTEXT)),
-        KeyBinding::new("r", PickRebase, Some(LOG_CONTEXT)),
-        KeyBinding::new("enter", ConfirmPick, Some(LOG_CONTEXT)),
-        KeyBinding::new("escape", CancelPick, Some(LOG_CONTEXT)),
-        KeyBinding::new("delete", AbandonRevision, Some(LOG_CONTEXT)),
+        KeyBinding::new("up", SelectPrevious, Some(LOG_KEYS)),
+        KeyBinding::new("k", SelectPrevious, Some(LOG_KEYS)),
+        KeyBinding::new("down", SelectNext, Some(LOG_KEYS)),
+        KeyBinding::new("j", SelectNext, Some(LOG_KEYS)),
+        KeyBinding::new("home", SelectFirst, Some(LOG_KEYS)),
+        KeyBinding::new("end", SelectLast, Some(LOG_KEYS)),
+        KeyBinding::new("/", FocusRevset, Some(LOG_KEYS)),
+        KeyBinding::new("n", NewChild, Some(LOG_KEYS)),
+        KeyBinding::new("e", EditRevision, Some(LOG_KEYS)),
+        KeyBinding::new("d", DescribeRevision, Some(LOG_KEYS)),
+        KeyBinding::new("b", CreateBookmark, Some(LOG_KEYS)),
+        KeyBinding::new("backspace", AbandonRevision, Some(LOG_KEYS)),
+        KeyBinding::new("r", PickRebase, Some(LOG_KEYS)),
+        KeyBinding::new("enter", ConfirmPick, Some(LOG_KEYS)),
+        KeyBinding::new("escape", CancelPick, Some(LOG_KEYS)),
+        KeyBinding::new("delete", AbandonRevision, Some(LOG_KEYS)),
         KeyBinding::new(platform_key!("l"), FocusRevset, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("f"), FindCommit, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("alt-f"), FocusPanelFilter, Some(REPO_CONTEXT)),
@@ -430,9 +433,9 @@ pub struct RepoView {
     split_drag: Option<f32>,
     /// The working copy changes files, from the last status.
     working_copy_changed: bool,
-    /// This workspace's working-copy commit (hex) and what it changes, for the
-    /// marks on its row in the log (`log_list::render_wip_counts`).
-    wip: Option<(String, gg_lib::messages::ChangeCounts)>,
+    /// What this workspace's working copy changes, from the last status, for
+    /// the marks on its row in the log (`log_list::render_wip_counts`).
+    wip: Option<gg_lib::messages::ChangeCounts>,
     /// The jj settings generation this tab's workspace was loaded with; a
     /// newer one (the Settings window wrote jj's config) opens it again.
     jj_generation: u64,
@@ -500,6 +503,10 @@ struct LogData {
     rows: Vec<LogRow>,
     /// Each row's number by its commit id, added to as pages load.
     row_of_commit: HashMap<String, usize>,
+    /// The row of this workspace's working copy, by the rows' own mark: a
+    /// status read after a snapshot names its new commit before the log has
+    /// it, and the row's marks and summary field stay on it meanwhile.
+    working_copy_row: Option<usize>,
     /// What each row draws, copied so the virtual list owns it.
     row_data: Rc<Vec<RowData>>,
     /// The rows' lanes and lines.
@@ -556,6 +563,9 @@ struct NextCommit {
     /// The working copy (change id) whose description the message box was
     /// filled with, once: a description it has is the commit's to keep.
     prefilled: Option<String>,
+    /// The summary again, in the working copy's row of the log, as
+    /// GitKraken's WIP row has it: kept equal to `message`'s.
+    row: Entity<InputState>,
 }
 
 impl RepoView {
@@ -660,6 +670,37 @@ impl RepoView {
             window,
             cx,
         );
+        // typed in the commit box, the summary is in the row at once: the
+        // inspector's pane draws again, the log's would not
+        _subscriptions.push(cx.subscribe_in(
+            commit_message.summary_field(),
+            window,
+            |view: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    view.sync_row_summary(window, cx);
+                }
+            },
+        ));
+        let row_summary = cx.new(|cx| InputState::new(window, cx).placeholder("// WIP"));
+        _subscriptions.push(cx.subscribe_in(
+            &row_summary,
+            window,
+            |view: &mut Self, state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let text = state.read(cx).value();
+                    view.next_commit.message.set_summary(text, window, cx);
+                    view.notify_pane(PaneId::Inspector, cx);
+                }
+                InputEvent::PressEnter {
+                    secondary: true, ..
+                } => view.commit_changes(window, cx),
+                // on to the description, in the inspector
+                InputEvent::PressEnter { .. } => view.next_commit.message.focus_body(window, cx),
+                // the inspector shows the commit box the summary is part of
+                InputEvent::Focus => view.select_working_copy(cx),
+                _ => {}
+            },
+        ));
         _subscriptions
             .push(cx.observe_global::<Settings>(|view: &mut Self, cx| view.apply_settings(cx)));
         _subscriptions.push(diff_events);
@@ -686,6 +727,7 @@ impl RepoView {
                 lines_left_out: false,
                 pending: None,
                 prefilled: None,
+                row: row_summary,
             },
             line_selection: None,
             refs_hover: RefsHover::default(),
@@ -878,8 +920,7 @@ impl RepoView {
                 match result {
                     Ok((workspace, page, status)) => {
                         view.set_working_copy_changed(status.working_copy_changed, cx);
-                        view.wip =
-                            Some((status.working_copy.hex.clone(), status.working_copy_changes));
+                        view.wip = Some(status.working_copy_changes);
                         let text = field_text(&workspace.query, &workspace.default_query);
                         view.revset
                             .update(cx, |state, cx| state.set_value(text, window, cx));
@@ -922,7 +963,7 @@ impl RepoView {
             workspace.can_redo = status.can_redo;
         }
         self.set_working_copy_changed(status.working_copy_changed, cx);
-        let wip = Some((status.working_copy.hex.clone(), status.working_copy_changes));
+        let wip = Some(status.working_copy_changes);
         if self.wip != wip {
             self.wip = wip;
             cx.notify();
@@ -939,7 +980,24 @@ impl RepoView {
     /// What the working copy changes, by kind, as its row in the log shows.
     #[cfg(test)]
     pub(crate) fn wip_counts(&self) -> Option<gg_lib::messages::ChangeCounts> {
-        self.wip.as_ref().map(|(_, counts)| *counts)
+        self.wip
+    }
+
+    /// Focuses the summary field in the working copy's row, as a click does.
+    #[cfg(test)]
+    pub(crate) fn focus_row_summary(&self, window: &mut Window, cx: &mut App) {
+        self.next_commit
+            .row
+            .update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// The summaries of the commit box and of the working copy's row.
+    #[cfg(test)]
+    pub(crate) fn summaries(&self, cx: &App) -> (String, String) {
+        (
+            self.next_commit.message.summary(cx).to_string(),
+            self.next_commit.row.read(cx).value().to_string(),
+        )
     }
 
     /// The working copy changes files (the tab shows a dot).
@@ -1242,6 +1300,7 @@ impl RepoView {
         self.derived_at = std::time::Instant::now();
         self.log.row_data = Rc::new(Vec::new());
         self.log.row_of_commit.clear();
+        self.log.working_copy_row = None;
         // the rows may be others now; the pointer opens them again as it moves
         self.refs_hover = RefsHover::default();
         self.extend_derived();
@@ -1257,6 +1316,12 @@ impl RepoView {
         let row_data = Rc::make_mut(&mut self.log.row_data);
         let by_date = self.log_by_date;
         let from = row_data.len();
+        if self.log.working_copy_row.is_none() {
+            self.log.working_copy_row = self.log.rows[from..]
+                .iter()
+                .position(|row| is_this_working_copy(&row.revision))
+                .map(|ix| from + ix);
+        }
         self.log.row_of_commit.extend(
             self.log.rows[from..]
                 .iter()
@@ -1528,6 +1593,7 @@ impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_description(window, cx);
         self.prefill_commit_message(window, cx);
+        self.sync_row_summary(window, cx);
         self.focus_find_if_new(window, cx);
         if !self.picked_up.is_empty() {
             cx.defer_in(window, |view, window, cx| view.notify_picked_up(window, cx));
@@ -1570,11 +1636,16 @@ impl RepoView {
     /// Fills the empty message box with the working copy's description, once
     /// per working copy: committing everything describes it with the box's
     /// message, which would drop a description typed before (`jj describe`).
+    ///
+    /// The working copy is the inspector's when it shows the commit box, or
+    /// else its row's in the log, whose summary field shows the message too.
     fn prefill_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.commit_mode() {
-            return;
-        }
-        let Some(header) = self.inspected.detail.as_ref().map(|detail| &detail.header) else {
+        let header = if self.commit_mode() {
+            self.inspected.detail.as_ref().map(|detail| &detail.header)
+        } else {
+            self.row_summary_row().map(|ix| &self.log.rows[ix].revision)
+        };
+        let Some(header) = header else {
             return;
         };
         if self.next_commit.prefilled.as_deref() == Some(header.id.change.hex.as_str()) {
@@ -1584,6 +1655,37 @@ impl RepoView {
         let description = header.description.lines.join("\n");
         if !description.trim().is_empty() && self.next_commit.message.text(cx).is_empty() {
             self.next_commit.message.set(&description, window, cx);
+        }
+    }
+
+    /// The working copy's row in the log, when its message can be typed
+    /// there: this workspace's, rewritable and on one parent, as the commit
+    /// box asks (see `commit_mode`).
+    pub(super) fn row_summary_row(&self) -> Option<usize> {
+        let ix = self.log.working_copy_row?;
+        let rev = &self.log.rows.get(ix)?.revision;
+        (!rev.is_immutable && rev.parent_ids.len() == 1).then_some(ix)
+    }
+
+    /// The row's summary field follows the commit box's summary: typed in the
+    /// inspector (on each change), filled from the description or cleared by
+    /// a commit (on the next draw). What is typed in the row is in the box
+    /// already (see `NextCommit::row`).
+    fn sync_row_summary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let summary = self.next_commit.message.summary(cx);
+        if self.next_commit.row.read(cx).value() != summary {
+            self.next_commit
+                .row
+                .update(cx, |state, cx| state.set_value(summary, window, cx));
+        }
+    }
+
+    /// Selects the working copy's row, for the commit box in the inspector.
+    fn select_working_copy(&mut self, cx: &mut Context<Self>) {
+        if let Some(ix) = self.row_summary_row()
+            && self.selected != Some(ix)
+        {
+            self.select(ix, cx);
         }
     }
 

@@ -98,6 +98,26 @@ impl MessageEditor {
         self.summary.update(cx, |state, cx| state.focus(window, cx));
     }
 
+    /// The summary as typed.
+    pub(super) fn summary(&self, cx: &App) -> SharedString {
+        self.summary.read(cx).value()
+    }
+
+    /// The summary's field, for what follows what is typed in it.
+    pub(super) fn summary_field(&self) -> &Entity<InputState> {
+        &self.summary
+    }
+
+    /// Puts `text` in the summary alone, the description left as it is.
+    pub(super) fn set_summary(&self, text: SharedString, window: &mut Window, cx: &mut App) {
+        self.summary
+            .update(cx, |state, cx| state.set_value(text, window, cx));
+    }
+
+    pub(super) fn focus_body(&self, window: &mut Window, cx: &mut App) {
+        self.body.update(cx, |state, cx| state.focus(window, cx));
+    }
+
     /// The box of the two fields, the summary with its length against
     /// `limits` (long past the first, too long past the second).
     pub(super) fn render(&self, limits: (u32, u32), cx: &App) -> AnyElement {

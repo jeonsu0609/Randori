@@ -154,7 +154,13 @@ fn commit_every_change(cx: &mut TestAppContext) {
     };
     assert_eq!(counts(&view, cx), Some((1, 1, 0)));
 
-    keys(&view, "d f i x secondary-enter", cx);
+    keys(&view, "d f i x", cx);
+    // typed in the inspector's commit box, the summary is in the row too
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.summaries(cx)),
+        ("fix".into(), "fix".into())
+    );
+    keys(&view, "secondary-enter", cx);
 
     // the new working copy changes nothing: its row has no marks
     assert_eq!(counts(&view, cx), Some((0, 0, 0)));
@@ -174,6 +180,52 @@ fn commit_every_change(cx: &mut TestAppContext) {
             ]
         ),
         "fix\n"
+    );
+    assert_eq!(changed(repo, "@-"), "a.txt c.txt");
+    assert_eq!(changed(repo, "@"), "");
+}
+
+/// The summary typed in the working copy's row of the log, as GitKraken's
+/// WIP row takes it: letters that are the list's keys (b, e, n, d) are typed,
+/// the commit box has the same summary, and ⌘↩ there commits every change.
+#[gpui::test]
+fn commit_from_the_working_copy_s_row(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = commit_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+    view.update_in(cx, |view, window, cx| view.focus_row_summary(window, cx));
+    settle(&view, cx);
+
+    let summaries = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| view.summaries(cx))
+    };
+    // Escape goes back to the list, whose D then focuses the commit box
+    keys(&view, "b e n escape d d", cx);
+    assert_eq!(summaries(&view, cx), ("bend".into(), "bend".into()));
+
+    keys(&view, "secondary-enter", cx);
+
+    // the box and the row are cleared for the next commit
+    assert_eq!(summaries(&view, cx), (String::new(), String::new()));
+    let repo = repo.as_path();
+    assert_eq!(
+        jj(
+            repo,
+            &[
+                "--ignore-working-copy",
+                "log",
+                "-r",
+                "@-",
+                "--no-graph",
+                "-T",
+                "description"
+            ]
+        ),
+        "bend\n"
     );
     assert_eq!(changed(repo, "@-"), "a.txt c.txt");
     assert_eq!(changed(repo, "@"), "");
