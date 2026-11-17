@@ -90,11 +90,13 @@ impl Mutation for MoveChanges {
             )
             .await?;
 
-            if commit_remainder.tree_ids() == commit_tree.tree_ids() {
-                // commit didn't touch selected paths - leave unchanged
-            } else if commit_remainder.tree_ids() == commit_parent_tree.tree_ids() {
+            // emptied first: an empty commit is both, and jj squash drops it
+            // (else its description would stay on it and go to the destination)
+            if commit_remainder.tree_ids() == commit_parent_tree.tree_ids() {
                 // commit only touched selected paths - abandon it
                 tx.repo_mut().record_abandoned_commit(commit);
+            } else if commit_remainder.tree_ids() == commit_tree.tree_ids() {
+                // commit didn't touch selected paths - leave unchanged
             } else {
                 // commit touched both - rewrite with remaining changes
                 tx.repo_mut()
@@ -897,6 +899,42 @@ mod tests {
         let parent_header =
             queries::query_revision(&ws, &revs::conflict_bookmark())?.expect("exists");
         assert!(!parent_header.has_conflict);
+
+        Ok(())
+    }
+
+    /// An empty revision squashed whole into its parent goes, as `jj squash
+    /// -r` drops it: its description moves to the parent, not to both.
+    #[tokio::test]
+    async fn move_changes_of_an_empty_revision_abandons_it() -> Result<()> {
+        let repo = mkrepo();
+
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        DescribeRevision {
+            id: revs::working_copy(),
+            new_description: "wip".to_owned(),
+            reset_author: false,
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        let empty = get_by_chid(&ws, &revs::working_copy())?;
+        let parent = ws.get_commit(&empty.parent_ids()[0])?;
+        let (from, to) = (ws.format_id(&empty), ws.format_id(&parent));
+
+        let result = MoveChanges {
+            from: RevSet::singleton(from),
+            to_id: to.commit.clone(),
+            paths: vec![],
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Updated { .. });
+
+        assert!(get_by_chid(&ws, &revs::working_copy()).is_err());
+        let parent = get_by_chid(&ws, &to)?;
+        assert!(parent.description().contains("wip"));
 
         Ok(())
     }
