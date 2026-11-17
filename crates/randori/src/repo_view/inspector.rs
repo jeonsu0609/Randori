@@ -503,6 +503,8 @@ impl RepoView {
             self.select_file(Some(0), cx);
         }
         self.files_focus.focus(window, cx);
+        // the files can be under a long description, out of view
+        self.scroll_file_into_view(cx);
     }
 
     /// ↑↓ in the changed files: the next or previous file shown, as a plain
@@ -510,6 +512,11 @@ impl RepoView {
     fn step_file(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.inspected.marked.clear();
         self.focus_file(delta, cx);
+        self.scroll_file_into_view(cx);
+    }
+
+    /// Scrolls the inspector the least that shows the selected file's row.
+    fn scroll_file_into_view(&mut self, cx: &mut Context<Self>) {
         let Some(ix) = self.inspected.file else {
             return;
         };
