@@ -813,6 +813,7 @@ impl WorkspaceSession<'_> {
     }
 
     pub(crate) fn format_status(&self) -> messages::RepoStatus {
+        let working_copy_changes = self.working_copy_changes();
         messages::RepoStatus {
             operation_description: self
                 .operation
@@ -824,14 +825,15 @@ impl WorkspaceSession<'_> {
                 .clone(),
             working_copy: self.format_commit_id(&self.operation.wc_id),
             can_redo: self.can_redo(),
-            working_copy_changed: self.working_copy_changed(),
-            working_copy_changes: self.working_copy_changes(),
+            // the parents' trees merged once: "changed" is any count
+            working_copy_changed: working_copy_changes != messages::ChangeCounts::default(),
+            working_copy_changes,
         }
     }
 
     /// The files the working-copy commit changes from its parents, by kind:
-    /// paths only, no file read. A failed read counts nothing, as
-    /// `working_copy_changed` does.
+    /// paths only, no file read. A failed read counts nothing (and so the
+    /// status says unchanged): the status still goes out.
     fn working_copy_changes(&self) -> messages::ChangeCounts {
         use futures_util::StreamExt as _;
         let repo = self.operation.repo.as_ref();
@@ -858,17 +860,6 @@ impl WorkspaceSession<'_> {
             anyhow::Ok(counts)
         };
         count.block_on().unwrap_or_default()
-    }
-
-    /// Whether the working-copy commit changes anything. A failed read
-    /// counts as unchanged: the status still goes out.
-    fn working_copy_changed(&self) -> bool {
-        let repo = self.operation.repo.as_ref();
-        let commit = match repo.store().get_commit(&self.operation.wc_id) {
-            Ok(commit) => commit,
-            Err(_) => return false,
-        };
-        commit.is_empty(repo).block_on().is_ok_and(|empty| !empty)
     }
 
     fn can_redo(&self) -> bool {

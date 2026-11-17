@@ -249,7 +249,9 @@ pub struct ChangeCounts {
     pub modified: usize,
     pub added: usize,
     pub deleted: usize,
-    /// Files left with a conflict (counted in their kind too).
+    /// Of the files above, those left with a conflict (counted in their kind
+    /// too). A conflict the revision takes from its parents unchanged is not
+    /// one of its changes, so not counted here.
     pub conflicted: usize,
 }
 
