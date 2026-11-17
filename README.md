@@ -458,6 +458,7 @@ crates/randori   app_view       tabs, rail, palette, settings, saved session
                    dnd, menus   drag payloads, context menus
                  graph          graph lanes, branch colours and avatars per virtual-list row
                  github         GitHub remotes, token lookup, pull request and avatar query
+                 diff_apps      the diff applications "Open in diff tool" can open, per system
                  terminal       a shell in a PTY (alacritty_terminal) drawn with GPUI
                  worker         one jj worker thread per tab
                  harness        the screenshot harness (--screenshot, --keys)
