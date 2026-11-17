@@ -98,6 +98,7 @@ pub(super) fn render_row(
     owner: &WeakEntity<RepoView>,
     dim: bool,
     wip: Option<gg_lib::messages::ChangeCounts>,
+    summary_field: Option<&Entity<InputState>>,
     cx: &App,
 ) -> ListItem {
     let theme = cx.theme();
@@ -170,44 +171,64 @@ pub(super) fn render_row(
                     )
                 })
                 .child(
-                    div()
+                    h_flex()
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .child(match &row.summary {
-                            Some(summary) => h_flex()
+                        .gap_2()
+                        .child(match (summary_field, &row.summary) {
+                            // the commit's summary, typed in place as in
+                            // GitKraken's WIP row
+                            (Some(field), _) => div()
+                                .id("row-summary")
+                                .w(gpui_kit::rems(16.))
+                                .min_w(gpui_kit::rems(6.))
+                                // the row's click, drag and the list's focus
+                                // would take the press from the field, and
+                                // its menu would cover the field's own
+                                .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_mouse_down(gpui_kit::MouseButton::Right, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .harness_mark(|| "row-summary")
+                                .child(Input::new(field).small())
+                                .into_any_element(),
+                            (None, Some(summary)) => div()
                                 .min_w_0()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .when(row.is_working_copy, |this| this.font_medium())
-                                        .child(summary.clone()),
-                                )
-                                // the rest of the description, in what room is left
-                                .when_some(row.body.clone(), |this, body| {
-                                    this.child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_color(theme.muted_foreground)
-                                            .child(body),
-                                    )
-                                }),
-                            None => div()
+                                .truncate()
+                                .when(row.is_working_copy, |this| this.font_medium())
+                                .child(summary.clone())
+                                .into_any_element(),
+                            (None, None) => div()
                                 .min_w_0()
                                 .truncate()
                                 .italic()
                                 .text_color(theme.muted_foreground)
-                                .child("(no description set)"),
-                        }),
+                                .child("(no description set)")
+                                .into_any_element(),
+                        })
+                        // the working copy's changes right after its summary,
+                        // as GitKraken marks its WIP row
+                        .when_some(wip, |this, counts| {
+                            this.child(render_wip_counts(counts, cx))
+                        })
+                        // the rest of the description, in what room is left
+                        .when_some(
+                            row.body.clone().filter(|_| summary_field.is_none()),
+                            |this, body| {
+                                this.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(theme.muted_foreground)
+                                        .child(body),
+                                )
+                            },
+                        ),
                 )
-                // the working copy's changes, as GitKraken marks its WIP row
-                .when_some(wip, |this, counts| {
-                    this.child(render_wip_counts(counts, cx))
-                })
                 .when(cols.show_author, |this| {
                     this.child(if cols.compact_author {
                         div()
@@ -267,7 +288,7 @@ pub(super) fn render_row(
         )
 }
 
-/// What the working copy changes, by kind, after its description: a pencil
+/// What the working copy changes, by kind, after its summary: a pencil
 /// for files modified, + added, − deleted, ⚠ conflicted; a kind with none is
 /// left out, and so is the whole when nothing changes.
 fn render_wip_counts(counts: gg_lib::messages::ChangeCounts, cx: &App) -> AnyElement {
@@ -293,7 +314,6 @@ fn render_wip_counts(counts: gg_lib::messages::ChangeCounts, cx: &App) -> AnyEle
     h_flex()
         .flex_none()
         .gap_2()
-        .pr_2()
         .children(mark(
             IconName::Pencil,
             counts.modified,
@@ -937,7 +957,10 @@ impl RepoView {
         let owner = cx.entity().downgrade();
         let refs_open = self.refs_hover.open_row();
         let find_bar = self.find.as_ref().map(|find| self.render_find(find, cx));
-        let wip = self.wip.clone();
+        let wip = self.wip;
+        let wip_row = self.log.working_copy_row;
+        let summary_row = self.row_summary_row();
+        let summary_field = self.next_commit.row.clone();
         let wants_more =
             self.paging.has_more && !self.paging.loading && self.paging.error.is_none();
         let more_owner = owner.clone();
@@ -957,9 +980,7 @@ impl RepoView {
             .when_some(self.pick.as_ref(), |this, pick| {
                 this.child(self.render_pick_bar(pick, cx))
             })
-            // a row of its own, outside the list: inside, its field would be
-            // in the list's key context, and letters typed there would run
-            // the list's shortcuts (d, e, r…)
+            // a row of its own, above the list's rows
             .children(find_bar)
             .child(
                 div().relative().flex_1().min_h_0().child(
@@ -1036,9 +1057,8 @@ impl RepoView {
                                                 || author_filter.as_ref().is_some_and(|f| {
                                                     !f.contains(&rows[ix].author_email)
                                                 }),
-                                            wip.as_ref()
-                                                .filter(|(hex, _)| *hex == rows[ix].id.commit.hex)
-                                                .map(|(_, counts)| *counts),
+                                            wip.filter(|_| wip_row == Some(ix)),
+                                            (summary_row == Some(ix)).then_some(&summary_field),
                                             cx,
                                         )
                                         .harness_mark(move || format!("row:{ix}"))
