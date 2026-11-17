@@ -12,8 +12,11 @@ impl RepoView {
         root.on_action(cx.listener(|view, _: &actions::FocusRevset, window, cx| {
             view.revset.update(cx, |state, cx| state.focus(window, cx));
         }))
+        // the list, or the full view or pull request while it takes the
+        // list's place: a list not on screen would take the keys and do
+        // nothing with them
         .on_action(cx.listener(|view, _: &actions::FocusLog, window, cx| {
-            view.log_focus.focus(window, cx);
+            view.command_focus().focus(window, cx);
         }))
         .on_action(cx.listener(|view, _: &actions::Reload, window, cx| {
             if matches!(view.state, LoadState::Failed(_)) {
@@ -201,6 +204,20 @@ impl RepoView {
         .on_action(
             cx.listener(|view, _: &actions::DiffInTool, window, cx| view.diff_in_tool(window, cx)),
         )
+        // the selected file where it is on disk (the menu offers these only
+        // while it is there), and its whole path
+        .on_action(cx.listener(|view, _: &actions::RevealFile, _, cx| {
+            if let Some(path) = view.selected_file_full_path().filter(|path| path.exists()) {
+                cx.reveal_path(&path)
+            }
+        }))
+        .on_action(cx.listener(|view, _: &actions::CopyFullFilePath, _, cx| {
+            if let Some(path) = view.selected_file_full_path() {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                    path.to_string_lossy().into_owned(),
+                ))
+            }
+        }))
         .on_action(cx.listener(|view, _: &actions::SquashHunk, window, cx| {
             view.squash_hunk_into_parent(window, cx)
         }))

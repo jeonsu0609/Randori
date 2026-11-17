@@ -9,6 +9,7 @@
 
 mod app_view;
 mod assets;
+mod diff_apps;
 mod github;
 mod graph;
 #[cfg(feature = "screenshot")]

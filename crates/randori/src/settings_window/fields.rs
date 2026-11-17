@@ -78,7 +78,7 @@ pub(super) fn issue_links_editor(window: &mut Window, cx: &mut App) -> gpui_kit:
             let input = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 8)
-                    .placeholder("MELON-\\d+ https://example.atlassian.net/browse/$0")
+                    .placeholder("PROJ-\\d+ https://example.atlassian.net/browse/$0")
                     .default_value(text)
             });
             let subscription =

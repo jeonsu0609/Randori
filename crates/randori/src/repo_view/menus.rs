@@ -28,12 +28,19 @@ pub(super) fn revision_menu(menu: PopupMenu, immutable: bool, focus: FocusHandle
 
 /// Commands for a changed file in the inspector.
 /// `picked` is how many files the menu acts on, for Split; `None` in the
-/// working copy, which is split by committing what is ticked.
+/// working copy, which is split by committing what is ticked. `diff_tool`:
+/// a diff application is chosen in Settings (without one the full view is
+/// the diff, and the item is left out); `on_disk`: the file is in the
+/// workspace's folder, to show. The names are the same on every
+/// system.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn file_menu(
     menu: PopupMenu,
     has_conflict: bool,
     immutable: bool,
     picked: Option<usize>,
+    diff_tool: bool,
+    on_disk: bool,
     focus: FocusHandle,
 ) -> PopupMenu {
     use actions::*;
@@ -48,8 +55,16 @@ pub(super) fn file_menu(
         .menu("Open full view", Box::new(OpenFileDiff))
         .menu("Blame", Box::new(OpenFileBlame))
         .menu("File history", Box::new(OpenFileHistory))
-        .separator()
-        .menu("Open in diff tool", Box::new(DiffInTool));
+        .separator();
+    let menu = if diff_tool {
+        menu.menu("Open in diff tool", Box::new(DiffInTool))
+            .separator()
+    } else {
+        menu
+    };
+    let menu = menu
+        .menu_with_disabled("Show in folder", Box::new(RevealFile), !on_disk)
+        .menu("Copy full path", Box::new(CopyFullFilePath));
     if immutable {
         menu
     } else {

@@ -14,7 +14,7 @@ use std::path::Path;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _, StyledExt as _, Theme, WindowExt as _,
+    ActiveTheme as _, Sizable as _, Theme, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
@@ -238,7 +238,7 @@ impl Render for SettingsWindow {
             .text_color(theme.foreground)
             .child(
                 Pages::new("randori-settings")
-                    .sidebar_width(px(200.))
+                    .sidebar_width(px(220.))
                     .default_selected_index(first_page())
                     .pages([
                         general_page(cx),

@@ -188,6 +188,9 @@ pub mod actions {
             RestoreFile,
             ResolveInTool,
             DiffInTool,
+            // the selected file where it is on disk, and its path
+            RevealFile,
+            CopyFullFilePath,
             SquashHunk,
             SplitLines,
             // what the next commit includes, in the working copy's inspector
@@ -239,6 +242,8 @@ pub(crate) const LOG_CONTEXT: &str = "RandoriLog";
 const LOG_KEYS: &str = "RandoriLog && !Input";
 /// Key context of one repository tab.
 pub(crate) const REPO_CONTEXT: &str = "RandoriRepo";
+/// Key context of the inspector's changed files, once one is clicked.
+pub(crate) const FILES_CONTEXT: &str = "RandoriFiles";
 
 /// `cmd-<key>` on macOS, `ctrl-<key>` elsewhere.
 macro_rules! platform_key {
@@ -272,6 +277,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", ConfirmPick, Some(LOG_KEYS)),
         KeyBinding::new("escape", CancelPick, Some(LOG_KEYS)),
         KeyBinding::new("delete", AbandonRevision, Some(LOG_KEYS)),
+        // the changed files, as the revisions: the diff follows the file
+        KeyBinding::new("up", SelectPrevious, Some(FILES_CONTEXT)),
+        KeyBinding::new("k", SelectPrevious, Some(FILES_CONTEXT)),
+        KeyBinding::new("down", SelectNext, Some(FILES_CONTEXT)),
+        KeyBinding::new("j", SelectNext, Some(FILES_CONTEXT)),
+        KeyBinding::new("home", SelectFirst, Some(FILES_CONTEXT)),
+        KeyBinding::new("end", SelectLast, Some(FILES_CONTEXT)),
+        // the file's full view, as a double click opens it; Esc closes it
+        // when open, else goes back to the revisions (`REPO_CONTEXT`)
+        KeyBinding::new("enter", OpenFileDiff, Some(FILES_CONTEXT)),
+        KeyBinding::new("escape", CloseFileFocus, Some(FILES_CONTEXT)),
         KeyBinding::new(platform_key!("l"), FocusRevset, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("f"), FindCommit, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("alt-f"), FocusPanelFilter, Some(REPO_CONTEXT)),
@@ -317,8 +333,8 @@ struct WorkspaceInfo {
     remotes: Vec<String>,
     /// Whether the last undo can be redone.
     can_redo: bool,
-    /// `ui.diff-formatter` / `ui.merge-editor` are configured.
-    has_diff_tool: bool,
+    /// `ui.merge-editor` is configured. ("Open in diff tool" opens the
+    /// application chosen in Settings, `diff_apps`.)
     has_merge_tool: bool,
 }
 
@@ -369,6 +385,17 @@ pub struct RepoView {
     sidebar_visible: bool,
     /// Focus for the revision list; arrow keys and j/k move the selection.
     log_focus: FocusHandle,
+    /// The inspector's changed files, for the keys through them once one is
+    /// clicked (`FILES_CONTEXT`).
+    files_focus: FocusHandle,
+    /// Whether the revisions' list, and the changed files, have the keys: the
+    /// one without them draws its selection dimmed. Read as the tab draws.
+    log_active: bool,
+    files_active: bool,
+    /// The inspector's scroll, and where its file rows were drawn: a file
+    /// chosen with the keys is scrolled into view.
+    inspector_scroll: gpui_kit::ScrollHandle,
+    file_rows: gpui_kit::ScrollHandle,
     /// Focus for the tab itself while there is no list to focus.
     root_focus: FocusHandle,
     _events: Task<()>,
@@ -653,6 +680,8 @@ impl RepoView {
         });
 
         let mut _subscriptions = _subscriptions;
+        let log_focus = cx.focus_handle();
+        let files_focus = cx.focus_handle();
         // ⌘↩ saves a description, or commits in the working copy's box
         let description_editor = message::MessageEditor::new(
             "Summary",
@@ -745,7 +774,12 @@ impl RepoView {
             diff_mode,
             revset,
             sidebar_visible: true,
-            log_focus: cx.focus_handle(),
+            log_focus,
+            files_focus,
+            log_active: false,
+            files_active: false,
+            inspector_scroll: gpui_kit::ScrollHandle::new(),
+            file_rows: gpui_kit::ScrollHandle::new(),
             root_focus: cx.focus_handle(),
             _events,
             _subscriptions,
@@ -838,8 +872,8 @@ impl RepoView {
         self.description.drafts.len() + usize::from(self.description_dirty(cx))
     }
 
-    /// Index of the selected log row (reported by `--keys`).
-    #[cfg(feature = "screenshot")]
+    /// Index of the selected log row (reported by `--keys`, and the tests').
+    #[cfg(any(test, feature = "screenshot"))]
     pub fn selected_row(&self) -> Option<usize> {
         self.selected
     }
@@ -876,7 +910,6 @@ impl RepoView {
                             status,
                             git_remotes,
                             git_remote_urls,
-                            has_external_diff_tool,
                             has_external_merge_tool,
                             ..
                         } => {
@@ -900,7 +933,6 @@ impl RepoView {
                                     operation: status.operation_description.into(),
                                     remotes: git_remotes,
                                     can_redo: status.can_redo,
-                                    has_diff_tool: has_external_diff_tool,
                                     has_merge_tool: has_external_merge_tool,
                                 },
                                 page,
@@ -989,6 +1021,26 @@ impl RepoView {
         self.next_commit
             .row
             .update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// Focuses the inspector's changed files, as a click on one does.
+    #[cfg(test)]
+    pub(crate) fn focus_files(&self, window: &mut Window, cx: &mut App) {
+        self.files_focus.focus(window, cx);
+    }
+
+    /// Whether a file's full view takes the revisions' place.
+    #[cfg(test)]
+    pub(crate) fn full_view_open(&self) -> bool {
+        self.center.file().is_some()
+    }
+
+    /// The changed file whose diff is shown, by its path.
+    #[cfg(test)]
+    pub(crate) fn shown_file(&self) -> Option<String> {
+        let detail = self.inspected.detail.as_ref()?;
+        let file = detail.files.get(self.inspected.file?)?;
+        Some(file.path.to_string())
     }
 
     /// The summaries of the commit box and of the working copy's row.
@@ -1266,12 +1318,7 @@ impl RepoView {
                         .position(|row| row.revision.id.change.hex == hex)
                 })
             })
-            .or_else(|| {
-                self.log
-                    .rows
-                    .iter()
-                    .position(|row| is_this_working_copy(&row.revision))
-            })
+            .or(self.log.working_copy_row)
             .or(if self.log.rows.is_empty() {
                 None
             } else {
@@ -1569,7 +1616,9 @@ impl RepoView {
                 }
             }
             "gg://progress" => {
-                self.progress = match payload.get("type").and_then(|value| value.as_str()) {
+                // git's every progress line: the status bar alone draws
+                // again, and only for a new text
+                let progress = match payload.get("type").and_then(|value| value.as_str()) {
                     Some("Progress") => payload
                         .get("overall_percent")
                         .and_then(|value| value.as_u64())
@@ -1580,7 +1629,10 @@ impl RepoView {
                         .map(|text| text.trim().to_owned().into()),
                     _ => None,
                 };
-                cx.notify();
+                if self.progress != progress {
+                    self.progress = progress;
+                    self.notify_pane(PaneId::Status, cx);
+                }
             }
             other => log::debug!("unhandled worker event {other}"),
         }
@@ -1591,6 +1643,12 @@ impl RepoView {
 
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // which list has the keys, read as the frame is drawn: moving focus
+        // draws the window again (`Window::focus`). A focus listener runs at
+        // the end of a frame, where asking for another is ignored, and the
+        // dimmed selection stayed a key behind.
+        self.log_active = self.log_focus.contains_focused(window, cx);
+        self.files_active = self.files_focus.contains_focused(window, cx);
         self.sync_description(window, cx);
         self.prefill_commit_message(window, cx);
         self.sync_row_summary(window, cx);
@@ -1628,7 +1686,13 @@ impl Render for RepoView {
                 let body = self.render_body(window, cx);
                 self.with_terminal(body, window, cx)
             }))
-            .child(self.render_status_bar(cx))
+            .child(pane::cached_at(
+                &self.panes.status,
+                gpui_kit::StyleRefinement::default()
+                    .w_full()
+                    .h(panels::STATUS_BAR_HEIGHT)
+                    .flex_none(),
+            ))
     }
 }
 
@@ -1754,6 +1818,8 @@ enum PaneId {
     Log,
     Side,
     Inspector,
+    Changes,
+    Status,
 }
 
 impl RepoView {
@@ -1766,6 +1832,8 @@ impl RepoView {
             PaneId::Log => &self.panes.log,
             PaneId::Side => &self.panes.side,
             PaneId::Inspector => &self.panes.inspector,
+            PaneId::Changes => &self.panes.changes,
+            PaneId::Status => &self.panes.status,
         };
         pane.update(cx, |_, cx| cx.notify());
     }
@@ -1778,6 +1846,9 @@ struct Panes {
     side: Entity<pane::Pane>,
     inspector: Entity<pane::Pane>,
     changes: Entity<pane::Pane>,
+    /// The status bar: a running operation's progress, which can come many
+    /// times a second, draws it alone.
+    status: Entity<pane::Pane>,
 }
 
 impl Panes {
@@ -1793,6 +1864,7 @@ impl Panes {
             }),
             inspector: pane(|view, cx| view.render_inspector(cx)),
             changes: pane(|view, cx| view.render_changes(cx)),
+            status: pane(|view, cx| view.render_status_bar(cx).into_any_element()),
         }
     }
 }

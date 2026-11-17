@@ -59,12 +59,13 @@ impl RepoView {
                 .child(div().text_sm().min_w_0().truncate().child(value))
         };
 
-        v_flex()
+        let inspector = v_flex()
             .id("inspector")
             .size_full()
             .min_h_0()
             .bg(theme.sidebar)
-            .overflow_y_scrollbar()
+            .overflow_y_scroll()
+            .track_scroll(&self.inspector_scroll)
             .child(
                 v_flex()
                     .px_4()
@@ -314,107 +315,221 @@ impl RepoView {
                             .child(format!("−{deletions}")),
                     ),
             )
-            .children(detail.files.iter().enumerate().map(|(ix, file)| {
-                let marked = self.inspected.marked.contains(&file.path);
-                ListItem::new(("file", ix))
-                    .harness_mark(|| format!("file:{}", file.tree_path.repo_path))
-                    .px_4()
-                    .py_1()
-                    .selected(self.inspected.file == Some(ix) || marked)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .gap_2()
-                            // whether the commit includes the file, as GitHub
-                            // Desktop's box beside each
-                            .when(commit_mode, |row| {
-                                let state = self
-                                    .next_commit
-                                    .included
-                                    .file(&file.tree_path.repo_path, &file.hunks);
-                                row.child(
-                                    inclusion_box(
-                                        ("include-file", ix),
-                                        state,
-                                        match state {
-                                            Inclusion::Nothing => "Include in the commit",
-                                            Inclusion::Some => "Include every change in the commit",
-                                            Inclusion::All => "Leave out of the commit",
-                                        },
-                                        theme,
-                                    )
-                                    .harness_mark(|| {
-                                        format!("include:{}", file.tree_path.repo_path)
-                                    })
-                                    .on_click(cx.listener(
-                                        move |view, _, _, cx| {
-                                            cx.stop_propagation();
-                                            view.include_file(ix, state != Inclusion::All, cx)
-                                        },
-                                    )),
+            // ↑↓ go through the files once one is clicked, the diff following
+            .child(
+                v_flex()
+                    .id("files")
+                    .track_focus(&self.files_focus)
+                    .key_context(FILES_CONTEXT)
+                    .track_scroll(&self.file_rows)
+                    .on_action(cx.listener(|view, _: &actions::SelectPrevious, _, cx| {
+                        view.step_file(-1, cx)
+                    }))
+                    .on_action(
+                        cx.listener(|view, _: &actions::SelectNext, _, cx| view.step_file(1, cx)),
+                    )
+                    .on_action(cx.listener(|view, _: &actions::SelectFirst, _, cx| {
+                        view.step_file(isize::MIN, cx)
+                    }))
+                    .on_action(cx.listener(|view, _: &actions::SelectLast, _, cx| {
+                        view.step_file(isize::MAX, cx)
+                    }))
+                    // Esc closes the full view first, a step at a time: then
+                    // it goes back to the revisions (`FocusLog`)
+                    .on_action(
+                        cx.listener(|view, _: &actions::CloseFileFocus, window, cx| {
+                            if view.center.file().is_some() {
+                                view.close_focus_to_files(window, cx);
+                            } else {
+                                cx.propagate();
+                            }
+                        }),
+                    )
+                    .children(detail.files.iter().enumerate().map(|(ix, file)| {
+                        let marked = self.inspected.marked.contains(&file.path);
+                        ListItem::new(("file", ix))
+                            .harness_mark(|| format!("file:{}", file.tree_path.repo_path))
+                            .px_4()
+                            .py_1()
+                            .map(|item| {
+                                let selected = self.inspected.file == Some(ix) || marked;
+                                super::log_list::select_row(
+                                    item,
+                                    selected,
+                                    self.files_active,
+                                    theme,
                                 )
                             })
-                            .child(file_summary(file, theme)),
-                    )
-                    // a double click opens the file's full view, as in GitKraken;
-                    // ⌘ and ⇧ pick files for Split
-                    .on_click(
-                        cx.listener(move |view, event: &gpui_kit::ClickEvent, window, cx| {
-                            view.click_file(ix, event.modifiers(), cx);
-                            if event.modifiers().secondary(cx) || event.modifiers().shift {
-                                return;
-                            }
-                            if view.center.file().is_some() {
-                                // the full view follows the file picked here
-                                view.retarget_focus(cx);
-                            } else if event.click_count() >= 2 {
-                                view.open_focus(FocusTab::Diff, false, window, cx);
-                            }
-                        }),
-                    )
-                    .on_mouse_down(
-                        gpui_kit::MouseButton::Right,
-                        cx.listener(move |view, _, window, cx| {
-                            // the menu acts on the picked files when this is one of them
-                            if marked {
-                                view.select_file(Some(ix), cx);
-                            } else {
-                                view.click_file(ix, gpui_kit::Modifiers::default(), cx);
-                            }
-                            view.command_focus().focus(window, cx);
-                        }),
-                    )
-                    .on_drag(
-                        DraggedFile {
-                            path: file.tree_path.clone(),
-                            from: header.id.clone(),
-                            label: file.name.clone(),
-                        },
-                        |dragged, _, _, cx| {
-                            cx.new(|_| DragChip {
-                                label: format!("Move {}", dragged.label).into(),
-                                icon: IconName::File,
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap_2()
+                                    // whether the commit includes the file, as GitHub
+                                    // Desktop's box beside each
+                                    .when(commit_mode, |row| {
+                                        let state = self
+                                            .next_commit
+                                            .included
+                                            .file(&file.tree_path.repo_path, &file.hunks);
+                                        row.child(
+                                            inclusion_box(
+                                                ("include-file", ix),
+                                                state,
+                                                match state {
+                                                    Inclusion::Nothing => "Include in the commit",
+                                                    Inclusion::Some => {
+                                                        "Include every change in the commit"
+                                                    }
+                                                    Inclusion::All => "Leave out of the commit",
+                                                },
+                                                theme,
+                                            )
+                                            .harness_mark(|| {
+                                                format!("include:{}", file.tree_path.repo_path)
+                                            })
+                                            .on_click(
+                                                cx.listener(move |view, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    view.include_file(
+                                                        ix,
+                                                        state != Inclusion::All,
+                                                        cx,
+                                                    )
+                                                }),
+                                            ),
+                                        )
+                                    })
+                                    .child(file_summary(file, theme)),
+                            )
+                            // a double click opens the file's full view, as in GitKraken;
+                            // ⌘ and ⇧ pick files for Split
+                            .on_click(cx.listener(
+                                move |view, event: &gpui_kit::ClickEvent, window, cx| {
+                                    view.files_focus.focus(window, cx);
+                                    view.click_file(ix, event.modifiers(), cx);
+                                    if event.modifiers().secondary(cx) || event.modifiers().shift {
+                                        return;
+                                    }
+                                    if view.center.file().is_some() {
+                                        // the full view follows the file picked here
+                                        view.retarget_focus(cx);
+                                    } else if event.click_count() >= 2 {
+                                        view.open_focus(FocusTab::Diff, false, window, cx);
+                                    }
+                                },
+                            ))
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Right,
+                                cx.listener(move |view, _, window, cx| {
+                                    // the menu acts on the picked files when this is one of them
+                                    if marked {
+                                        view.select_file(Some(ix), cx);
+                                    } else {
+                                        view.click_file(ix, gpui_kit::Modifiers::default(), cx);
+                                    }
+                                    view.command_focus().focus(window, cx);
+                                }),
+                            )
+                            .on_drag(
+                                DraggedFile {
+                                    path: file.tree_path.clone(),
+                                    from: header.id.clone(),
+                                    label: file.name.clone(),
+                                },
+                                |dragged, _, _, cx| {
+                                    cx.new(|_| DragChip {
+                                        label: format!("Move {}", dragged.label).into(),
+                                        icon: IconName::File,
+                                    })
+                                },
+                            )
+                            .context_menu({
+                                let focus = self.command_focus();
+                                let has_conflict = file.has_conflict;
+                                let immutable = header.is_immutable;
+                                // the working copy picks no files for Split (its
+                                // boxes are for Split off): the file clicked
+                                let picked = Some(if marked {
+                                    self.inspected.marked.len()
+                                } else {
+                                    1
+                                });
+                                let diff_tool = settings::get(cx).display.diff_app.is_some();
+                                let full = self.workspace.as_ref().map(|workspace| {
+                                    super::ops::full_path(
+                                        &workspace.root,
+                                        &file.tree_path.repo_path,
+                                    )
+                                });
+                                move |menu, _, _| {
+                                    // looked at as the menu opens, not as rows draw
+                                    let on_disk = full.as_ref().is_some_and(|path| path.exists());
+                                    file_menu(
+                                        menu,
+                                        has_conflict,
+                                        immutable,
+                                        picked,
+                                        diff_tool,
+                                        on_disk,
+                                        focus.clone(),
+                                    )
+                                }
                             })
-                        },
-                    )
-                    .context_menu({
-                        let focus = self.command_focus();
-                        let has_conflict = file.has_conflict;
-                        let immutable = header.is_immutable;
-                        // the working copy picks no files for Split (its
-                        // boxes are for Split off): the file clicked
-                        let picked = Some(if marked {
-                            self.inspected.marked.len()
-                        } else {
-                            1
-                        });
-                        move |menu, _, _| {
-                            file_menu(menu, has_conflict, immutable, picked, focus.clone())
-                        }
-                    })
-            }))
+                    })),
+            );
+        div()
+            .relative()
+            .size_full()
+            .min_h_0()
+            .child(inspector)
+            .child(Scrollbar::vertical(&self.inspector_scroll))
             .into_any_element()
+    }
+
+    /// Enter in the revisions: the keys go to the selected revision's changed
+    /// files, the file shown kept. Nothing while it loads, or without files.
+    pub(super) fn enter_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.inspected.loading {
+            return;
+        }
+        let Some(detail) = self.inspected.detail.as_ref() else {
+            return;
+        };
+        if detail.files.is_empty() {
+            return;
+        }
+        if self.inspected.file.is_none() {
+            self.select_file(Some(0), cx);
+        }
+        self.files_focus.focus(window, cx);
+    }
+
+    /// ↑↓ in the changed files: the next or previous file shown, as a plain
+    /// click shows it (the full view follows), and scrolled into view.
+    fn step_file(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.inspected.marked.clear();
+        self.focus_file(delta, cx);
+        let Some(ix) = self.inspected.file else {
+            return;
+        };
+        // where the row was drawn, against what the inspector shows
+        let (Some(row), viewport) = (
+            self.file_rows.bounds_for_item(ix),
+            self.inspector_scroll.bounds(),
+        ) else {
+            return;
+        };
+        let mut offset = self.inspector_scroll.offset();
+        if row.top() < viewport.top() {
+            offset.y += viewport.top() - row.top();
+        } else if row.bottom() > viewport.bottom() {
+            offset.y -= row.bottom() - viewport.bottom();
+        } else {
+            return;
+        }
+        self.inspector_scroll.set_offset(offset);
+        cx.notify();
     }
 
     /// The commit message box of the working copy's inspector, with Commit:

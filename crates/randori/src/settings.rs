@@ -145,6 +145,9 @@ pub struct DisplaySettings {
     /// The terminal panel's font, instead of the code font.
     pub terminal_font: Option<String>,
     pub terminal_font_size: Option<f32>,
+    /// The application "Open in diff tool" opens (`diff_apps`); `None` is
+    /// none chosen.
+    pub diff_app: Option<String>,
 }
 
 impl Default for DisplaySettings {
@@ -169,6 +172,7 @@ impl Default for DisplaySettings {
             external_terminal: None,
             terminal_font: None,
             terminal_font_size: None,
+            diff_app: None,
         }
     }
 }

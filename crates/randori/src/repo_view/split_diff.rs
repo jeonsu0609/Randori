@@ -130,7 +130,13 @@ impl RepoView {
                     }
                     let x = f32::from(event.event.position.x - event.bounds.left());
                     view.split_drag = Some(clamp_ratio(x / width));
-                    cx.notify();
+                    // the inspector's diff is a pane of its own; the full
+                    // view and the pull request are drawn by the tab
+                    if id == "changes-split" {
+                        view.notify_pane(PaneId::Changes, cx);
+                    } else {
+                        cx.notify();
+                    }
                 },
             ))
             .child(

@@ -86,13 +86,26 @@ impl Mutation for ExternalDiff {
         let from_tree = rewrite::merge_commit_trees(ws.repo(), &parents).await?;
         let to_tree = commit.tree();
 
-        let tool_args: jj_cli::config::CommandNameAndArgs =
-            ws.data.workspace_settings.get("ui.diff-formatter")?;
-        let tool = if let Some(name) = tool_args.as_str() {
-            merge_tools::get_external_tool_config(&ws.data.workspace_settings, name)?
-                .unwrap_or_else(|| ExternalMergeTool::with_program(name))
+        // a program given, or else the one jj's config names
+        let given = self.tool.as_deref().and_then(|tool| tool.split_first());
+        let keep_files = given.is_some();
+        let tool = if let Some((program, args)) = given {
+            ExternalMergeTool {
+                program: program.clone(),
+                diff_args: args.to_vec(),
+                // the files by their whole paths
+                diff_do_chdir: false,
+                ..Default::default()
+            }
         } else {
-            ExternalMergeTool::with_diff_args(&tool_args)
+            let tool_args: jj_cli::config::CommandNameAndArgs =
+                ws.data.workspace_settings.get("ui.diff-formatter")?;
+            if let Some(name) = tool_args.as_str() {
+                merge_tools::get_external_tool_config(&ws.data.workspace_settings, name)?
+                    .unwrap_or_else(|| ExternalMergeTool::with_program(name))
+            } else {
+                ExternalMergeTool::with_diff_args(&tool_args)
+            }
         };
 
         let repo_path = RepoPath::from_internal_string(&self.path.repo_path)?;
@@ -136,6 +149,20 @@ impl Mutation for ExternalDiff {
                 ]);
 
                 let ui = Ui::null();
+                // an application may return before it has read the files
+                // (one already running opens them in its window): they
+                // are left for the system's temporary folder cleaning
+                if keep_files {
+                    let kept = temp_dir.keep();
+                    merge_tools::invoke_external_diff(
+                        &ui,
+                        &mut std::io::sink(),
+                        &tool,
+                        &kept,
+                        &patterns,
+                    )?;
+                    return Ok(());
+                }
                 merge_tools::invoke_external_diff(
                     &ui,
                     &mut std::io::sink(),
@@ -936,6 +963,63 @@ mod tests {
     use jj_lib::ref_name::WorkspaceName;
     use jj_lib::str_util::StringMatcher;
     use std::fs;
+
+    /// "Open in diff tool" with a program given (Randori's diff application):
+    /// it gets the file's version before the change and after it, by their
+    /// whole paths, and they are still there once it has read them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_diff_opens_the_program_given() -> Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+        // an empty change on the working copy, then a.txt changed in it
+        let mut tx = ws.start_transaction().await?;
+        let current = tx.repo().store().get_commit(ws.wc_id())?;
+        tx.repo_mut()
+            .check_out(ws.name().to_owned(), &current)
+            .await?;
+        ws.finish_transaction(tx, "new change").await?;
+        let before = fs::read_to_string(repo.path().join("a.txt")).unwrap();
+        fs::write(repo.path().join("a.txt"), "changed\n").unwrap();
+        ws.import_and_snapshot(true, false).await?;
+
+        // the program copies the two files it is given
+        let out = tempfile::tempdir().unwrap();
+        let script = format!(
+            "cp \"$0\" '{dir}/left.part' && cp \"$1\" '{dir}/right.part' && \
+             mv '{dir}/left.part' '{dir}/left' && mv '{dir}/right.part' '{dir}/right'",
+            dir = out.path().display()
+        );
+        let result = ExternalDiff {
+            id: ws.format_id(&ws.get_commit(ws.wc_id())?),
+            path: super::split::tests::tree_path("a.txt"),
+            tool: Some(vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                script,
+                "$left".to_owned(),
+                "$right".to_owned(),
+            ]),
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Unchanged);
+
+        // it runs on a thread of its own
+        let right = out.path().join("right");
+        let start = std::time::Instant::now();
+        while !right.exists() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "the program did not run"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(fs::read_to_string(out.path().join("left")).unwrap(), before);
+        assert_eq!(fs::read_to_string(right).unwrap(), "changed\n");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn immutability_of_bookmark() -> Result<()> {
