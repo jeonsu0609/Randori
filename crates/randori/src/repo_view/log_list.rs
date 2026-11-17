@@ -193,7 +193,9 @@ pub(super) fn render_row(
                                     cx.stop_propagation()
                                 })
                                 .harness_mark(|| "row-summary")
-                                .child(Input::new(field).small())
+                                // named for a screen reader: the hint is
+                                // only "// WIP"
+                                .child(Input::new(field).small().aria_label("Commit summary"))
                                 .into_any_element(),
                             (None, Some(summary)) => div()
                                 .min_w_0()
