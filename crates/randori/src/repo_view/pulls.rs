@@ -10,6 +10,7 @@ use gpui_kit::component::{WindowExt as _, notification::Notification};
 use super::github_access::{github_token, within};
 use super::*;
 use crate::github::{self, Checks, FetchError, GitHubRepo, PullRequest, Review};
+use crate::harness_mark::HarnessMark as _;
 
 /// How often the background loop checks whether a refresh is due; the
 /// interval itself is a setting.
@@ -37,6 +38,8 @@ pub(super) struct Pulls {
     last_fetch: Option<Instant>,
     /// The default branch's recent authors came with a refresh already.
     authors_loaded: bool,
+    /// A forced refresh was asked for while one was on its way: it follows.
+    refetch: bool,
     /// Author emails asked about by commit (answered, or in flight).
     avatars_asked: HashSet<String>,
     _timer: Task<()>,
@@ -76,6 +79,7 @@ impl RepoView {
             expanded: true,
             token: None,
             fetching: false,
+            refetch: false,
             last_fetch: None,
             authors_loaded: false,
             avatars_asked: HashSet::new(),
@@ -96,7 +100,13 @@ impl RepoView {
             .is_some_and(|at| at.elapsed() < MIN_INTERVAL);
         // "Only when asked" also skips the refresh on window focus
         let manual = settings::get(cx).display.pull_refresh_secs == 0;
-        if pulls.fetching || (!force && (recent || manual)) {
+        if pulls.fetching {
+            // what is on its way was asked before: a forced refresh (after a
+            // merge or a comment) follows it
+            pulls.refetch |= force;
+            return;
+        }
+        if !force && (recent || manual) {
             return;
         }
         pulls.fetching = true;
@@ -125,6 +135,7 @@ impl RepoView {
                 };
                 pulls.fetching = false;
                 pulls.last_fetch = Some(Instant::now());
+                let refetch = std::mem::take(&mut pulls.refetch);
                 match result {
                     Some(Ok(snapshot)) => {
                         pulls.authors_loaded = true;
@@ -153,6 +164,9 @@ impl RepoView {
                         log::warn!("pull requests: {err:#}");
                         pulls.state = PullsState::Failed(format!("{err:#}").into());
                     }
+                }
+                if refetch {
+                    view.refresh_pulls(true, cx);
                 }
                 cx.notify();
             });
@@ -414,6 +428,7 @@ impl RepoView {
                             let selected = selected_commit.as_deref() == Some(pr.head_oid.as_str());
                             let number = pr.number;
                             render_pull(pr, ix, selected, cx)
+                                .harness_mark(move || format!("pull:{number}"))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.open_pull(number, window, cx)
                                 }))

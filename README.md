@@ -249,11 +249,12 @@ Settings (every minute by default), when the window comes back to the front (at
 most every 30 seconds) and from **Refresh pull requests** in the palette.
 
 An open pull request takes the place of the revisions, the diff and the
-inspector, as its page on GitHub looks (`Esc` goes back):
+inspector, as its page on GitHub looks (`Esc` goes back, except from the
+comment box, where it would drop what is typed):
 
 | Tab | What it shows |
 | --- | --- |
-| Overview | The description (Markdown, with task lists, tables and code) and the conversation: comments, reviews, pushed commits, merges. Beside it the review decision, reviewers and their reviews, assignees, labels, checks (failing first) and the branch, with **Show in the graph** to select the head revision |
+| Overview | The description (Markdown, with task lists, tables and code) and the conversation: comments, reviews, pushed commits, merges. Under it, kept in reach however long the conversation is, whether it can be merged (conflicts, a review or check the branch's rules require, a draft) and the **Merge** button, its menu choosing among the ways the repository allows (merge commit, squash, rebase); it asks first, and offers to delete the branch after when GitHub does not. Then a comment box (`⌘↩` comments). Beside it **Submit a review** (comment, approve or request changes; GitHub takes only comments on your own), the review decision, reviewers and their reviews, assignees, labels, checks (failing first) and the branch, with **Show in the graph** to select the head revision |
 | Files changed | The changed files and their diff, unified or split (the divider moves as in the changes panel), with review threads under the lines they are on. Click a file to go to it |
 
 The view follows the pull request: when the list refreshes and GitHub has
@@ -271,6 +272,11 @@ request query brings the authors of recent commits on the default branch; any
 other author in the loaded revisions is asked about by one of their commits,
 once. Authors whose commits GitHub does not have
 (not pushed) get their initials.
+
+Merging, commenting and reviewing write to GitHub with that token, as you:
+a merge goes only if the head is still the one the page shows (a push since is
+refused, not merged unseen), and anything GitHub refuses (a conflict, no write
+access, the branch's rules) is shown above the comment box.
 
 Randori uses the token you already have: `GH_TOKEN` or `GITHUB_TOKEN` for
 github.com, `GH_ENTERPRISE_TOKEN` only for the Enterprise host `GH_HOST` names,

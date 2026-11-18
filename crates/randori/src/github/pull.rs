@@ -108,18 +108,126 @@ pub struct ReviewThread {
     pub comments_total: u64,
 }
 
+/// How a pull request is merged: GitHub's three ways, as the repository
+/// allows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    /// The merge button's words, as GitHub's.
+    pub fn verb(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "Merge pull request",
+            MergeMethod::Squash => "Squash and merge",
+            MergeMethod::Rebase => "Rebase and merge",
+        }
+    }
+
+    /// The method's menu item, as GitHub's.
+    pub fn label(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "Create a merge commit",
+            MergeMethod::Squash => "Squash and merge",
+            MergeMethod::Rebase => "Rebase and merge",
+        }
+    }
+
+    fn api(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "MERGE",
+            MergeMethod::Squash => "SQUASH",
+            MergeMethod::Rebase => "REBASE",
+        }
+    }
+}
+
+/// Whether an open pull request can be merged now, from GitHub's
+/// `mergeable` and `mergeStateStatus`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mergeability {
+    /// No conflicts, and the branch protection is met.
+    Clean,
+    /// Mergeable, but a check did not pass.
+    Unstable,
+    /// The head conflicts with the base.
+    Conflicting,
+    /// Branch protection holds it: a review or a check it requires.
+    Blocked,
+    /// The base moved on and the protection wants the head up to date.
+    Behind,
+    /// A draft is not merged.
+    Draft,
+    /// GitHub has not worked it out yet (it does so after a push).
+    Unknown,
+}
+
+impl Mergeability {
+    /// The merge button may be pressed.
+    pub fn allows_merge(self) -> bool {
+        matches!(self, Mergeability::Clean | Mergeability::Unstable)
+    }
+}
+
+/// What the merge box needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergeInfo {
+    pub state: Mergeability,
+    /// The ways the repository allows, in GitHub's order.
+    pub methods: Vec<MergeMethod>,
+    /// The viewer may merge (write access or more).
+    pub can_merge: bool,
+    /// GitHub deletes the head branch on merge by itself.
+    pub deletes_branch: bool,
+    /// The head branch's node, when it is in this repository and still
+    /// there: what deleting the branch deletes.
+    pub head_ref_id: Option<String>,
+}
+
+/// A review's verdict, as it is submitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewEvent {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl ReviewEvent {
+    fn api(self) -> &'static str {
+        match self {
+            ReviewEvent::Comment => "COMMENT",
+            ReviewEvent::Approve => "APPROVE",
+            ReviewEvent::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
+
+    /// GitHub takes an approval without words, the others with.
+    pub fn needs_body(self) -> bool {
+        self != ReviewEvent::Approve
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PullDetail {
+    /// GitHub's node id, which merges, comments and reviews name.
+    pub id: String,
     pub number: u64,
     pub title: String,
     pub url: String,
     pub body: String,
     pub state: PullState,
     pub author: Person,
+    /// Who merged it, once merged.
+    pub merged_by: Option<Person>,
     pub created_at: String,
     pub head_ref: String,
     pub base_ref: String,
     pub head_oid: String,
+    /// GitHub's last update of it, as the list has it.
+    pub updated_at: String,
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
@@ -137,6 +245,12 @@ pub struct PullDetail {
     pub threads: Vec<ReviewThread>,
     /// All the review threads; more than `threads` past the first 100.
     pub threads_total: u64,
+    pub merge: MergeInfo,
+    /// Who the token is: the comment box's name and picture.
+    pub viewer: Person,
+    /// The viewer opened it: GitHub refuses their approval or request for
+    /// changes.
+    pub viewer_is_author: bool,
 }
 
 const PERSON: &str = "login avatarUrl(size: 64)";
@@ -144,9 +258,13 @@ const PERSON: &str = "login avatarUrl(size: 64)";
 fn detail_query() -> String {
     format!(
         "query($owner: String!, $name: String!, $number: Int!) {{
+  viewer {{ {PERSON} }}
   repository(owner: $owner, name: $name) {{
+    viewerPermission mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed deleteBranchOnMerge
     pullRequest(number: $number) {{
-      number title url body state isDraft createdAt
+      id number title url body state isDraft createdAt updatedAt
+      mergeable mergeStateStatus viewerDidAuthor isCrossRepository headRef {{ id }}
+      mergedBy {{ {PERSON} }}
       author {{ {PERSON} }}
       headRefName baseRefName headRefOid
       additions deletions changedFiles reviewDecision
@@ -410,7 +528,19 @@ pub fn parse_detail(value: &Value) -> Result<PullDetail> {
             })
             .collect();
 
+    // a merge closes the pull request too, at the same moment: GitHub's
+    // page shows the merge only
+    let merged_at: Vec<&str> = nodes(&pr["timelineItems"])
+        .filter(|item| item["__typename"].as_str() == Some("MergedEvent"))
+        .filter_map(|item| item["createdAt"].as_str())
+        .collect();
     let timeline: Vec<TimelineItem> = nodes(&pr["timelineItems"])
+        .filter(|item| {
+            item["__typename"].as_str() != Some("ClosedEvent")
+                || !item["createdAt"]
+                    .as_str()
+                    .is_some_and(|at| merged_at.contains(&at))
+        })
         .filter_map(|item| {
             let event = |text: &str| TimelineItem::Event {
                 actor: person(&item["actor"]),
@@ -476,18 +606,25 @@ pub fn parse_detail(value: &Value) -> Result<PullDetail> {
         })
         .collect::<Vec<_>>();
     let checks_context = &pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
+    let repository = &value["data"]["repository"];
 
     Ok(PullDetail {
+        id: text(&pr["id"]),
+        merge: merge_info(repository, pr, state),
+        viewer: person(&value["data"]["viewer"]),
+        viewer_is_author: pr["viewerDidAuthor"].as_bool().unwrap_or_default(),
         number: pr["number"].as_u64().unwrap_or_default(),
         title: text(&pr["title"]),
         url: text(&pr["url"]),
         body: text(&pr["body"]),
         state,
         author: person(&pr["author"]),
+        merged_by: (!pr["mergedBy"].is_null()).then(|| person(&pr["mergedBy"])),
         created_at: text(&pr["createdAt"]),
         head_ref: text(&pr["headRefName"]),
         base_ref: text(&pr["baseRefName"]),
         head_oid: text(&pr["headRefOid"]),
+        updated_at: text(&pr["updatedAt"]),
         additions: pr["additions"].as_u64().unwrap_or_default(),
         deletions: pr["deletions"].as_u64().unwrap_or_default(),
         changed_files: pr["changedFiles"].as_u64().unwrap_or_default(),
@@ -512,6 +649,156 @@ pub fn parse_detail(value: &Value) -> Result<PullDetail> {
         threads_total: total(&pr["reviewThreads"]).max(threads.len() as u64),
         threads,
     })
+}
+
+/// The merge box's facts, from the repository and the pull request.
+fn merge_info(repository: &Value, pr: &Value, state: PullState) -> MergeInfo {
+    let allowed = |field: &str| repository[field].as_bool().unwrap_or_default();
+    let methods = [
+        (MergeMethod::Merge, "mergeCommitAllowed"),
+        (MergeMethod::Squash, "squashMergeAllowed"),
+        (MergeMethod::Rebase, "rebaseMergeAllowed"),
+    ]
+    .into_iter()
+    .filter(|(_, field)| allowed(field))
+    .map(|(method, _)| method)
+    .collect();
+    let mergeability = if state == PullState::Draft {
+        Mergeability::Draft
+    } else if pr["mergeable"].as_str() == Some("CONFLICTING") {
+        Mergeability::Conflicting
+    } else {
+        match pr["mergeStateStatus"].as_str() {
+            Some("CLEAN" | "HAS_HOOKS") => Mergeability::Clean,
+            Some("UNSTABLE") => Mergeability::Unstable,
+            Some("DIRTY") => Mergeability::Conflicting,
+            Some("BLOCKED") => Mergeability::Blocked,
+            Some("BEHIND") => Mergeability::Behind,
+            Some("DRAFT") => Mergeability::Draft,
+            _ => Mergeability::Unknown,
+        }
+    };
+    MergeInfo {
+        state: mergeability,
+        methods,
+        can_merge: matches!(
+            repository["viewerPermission"].as_str(),
+            Some("ADMIN" | "MAINTAIN" | "WRITE")
+        ),
+        deletes_branch: allowed("deleteBranchOnMerge"),
+        head_ref_id: (pr["isCrossRepository"].as_bool() == Some(false))
+            .then(|| pr["headRef"]["id"].as_str().map(str::to_owned))
+            .flatten(),
+    }
+}
+
+/// Merges pull request `id` (its node id) the `method` way, if its head is
+/// still `head_oid`: a push since the page loaded makes GitHub refuse, rather
+/// than merge what was not seen.
+pub async fn merge(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    id: String,
+    method: MergeMethod,
+    head_oid: String,
+) -> Result<(), FetchError> {
+    let (query, variables) = merge_request(&id, method, &head_oid);
+    let value = graphql(&client, &repo, &token, query, variables).await?;
+    mutated(&value, "mergePullRequest")
+}
+
+fn merge_request(id: &str, method: MergeMethod, head_oid: &str) -> (&'static str, Value) {
+    (
+        "mutation($id: ID!, $method: PullRequestMergeMethod!, $head: GitObjectID) {
+  mergePullRequest(input: {pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $head}) {
+    pullRequest { state }
+  }
+}",
+        json!({ "id": id, "method": method.api(), "head": head_oid }),
+    )
+}
+
+/// Deletes a branch on GitHub by its node id (the head branch after a merge).
+pub async fn delete_branch(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    ref_id: String,
+) -> Result<(), FetchError> {
+    let value = graphql(
+        &client,
+        &repo,
+        &token,
+        "mutation($id: ID!) { deleteRef(input: {refId: $id}) { clientMutationId } }",
+        json!({ "id": ref_id }),
+    )
+    .await?;
+    mutated(&value, "deleteRef")
+}
+
+/// Adds a comment to the conversation of pull request `id`.
+pub async fn comment(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    id: String,
+    body: String,
+) -> Result<(), FetchError> {
+    let value = graphql(
+        &client,
+        &repo,
+        &token,
+        "mutation($id: ID!, $body: String!) {
+  addComment(input: {subjectId: $id, body: $body}) { clientMutationId }
+}",
+        json!({ "id": id, "body": body }),
+    )
+    .await?;
+    mutated(&value, "addComment")
+}
+
+/// Submits a review of pull request `id`: approval, a request for changes,
+/// or a comment, with `body`.
+pub async fn review(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    id: String,
+    event: ReviewEvent,
+    body: String,
+) -> Result<(), FetchError> {
+    let (query, variables) = review_request(&id, event, &body);
+    let value = graphql(&client, &repo, &token, query, variables).await?;
+    mutated(&value, "addPullRequestReview")
+}
+
+fn review_request(id: &str, event: ReviewEvent, body: &str) -> (&'static str, Value) {
+    (
+        "mutation($id: ID!, $event: PullRequestReviewEvent!, $body: String) {
+  addPullRequestReview(input: {pullRequestId: $id, event: $event, body: $body}) { clientMutationId }
+}",
+        json!({
+            "id": id,
+            "event": event.api(),
+            // an approval without words sends none
+            "body": (!body.trim().is_empty()).then_some(body),
+        }),
+    )
+}
+
+/// Reads a mutation's answer: GitHub answers a refusal (a conflict, no
+/// permission, a moved head) with the field null and the reason in `errors`.
+fn mutated(value: &Value, field: &str) -> Result<(), FetchError> {
+    let node = &value["data"][field];
+    if node.is_null() {
+        let message = value["errors"][0]["message"]
+            .as_str()
+            .unwrap_or("GitHub did not do it")
+            .to_owned();
+        return Err(anyhow::anyhow!(message).into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -552,6 +839,8 @@ mod tests {
                 { "__typename": "IssueComment", "author": null, "body": "hi",
                   "createdAt": "2026-11-01T02:00:00Z" },
                 { "__typename": "MergedEvent", "actor": { "login": "ian", "avatarUrl": null },
+                  "createdAt": "2026-11-02T00:00:00Z" },
+                { "__typename": "ClosedEvent", "actor": { "login": "ian", "avatarUrl": null },
                   "createdAt": "2026-11-02T00:00:00Z" }
             ] },
             "reviewThreads": { "totalCount": 120, "nodes": [
@@ -586,7 +875,9 @@ mod tests {
             pr.checks.iter().map(|c| c.state).collect::<Vec<_>>(),
             [Checks::Passing, Checks::Running, Checks::Failing]
         );
+        // the merge's own closing is left out, as GitHub's page does
         assert_eq!(pr.timeline.len(), 3);
+        assert_eq!(pr.merged_by, None);
         assert!(
             matches!(&pr.timeline[1], TimelineItem::Comment { author, .. } if author.login == "ghost")
         );
@@ -603,6 +894,105 @@ mod tests {
         // a connection without a count is as long as what came
         assert_eq!(pr.threads[1].comments_total, 0);
         assert_eq!(pr.threads[1].side, Side::Left);
+    }
+
+    fn merge_detail(repository: Value, pr: Value) -> PullDetail {
+        let mut pr = pr;
+        pr["number"] = json!(1);
+        let mut repository = repository;
+        repository["pullRequest"] = pr;
+        parse_detail(&json!({ "data": {
+            "viewer": { "login": "van", "avatarUrl": "https://a/van" },
+            "repository": repository
+        } }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_merge_box_reads_the_repository_and_the_pull_request() {
+        let detail = merge_detail(
+            json!({ "viewerPermission": "WRITE", "mergeCommitAllowed": false,
+                    "squashMergeAllowed": true, "rebaseMergeAllowed": true,
+                    "deleteBranchOnMerge": false }),
+            json!({ "id": "PR_1", "state": "OPEN", "isDraft": false,
+                    "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE",
+                    "viewerDidAuthor": true, "isCrossRepository": false,
+                    "headRef": { "id": "REF_1" } }),
+        );
+        assert_eq!(detail.id, "PR_1");
+        assert_eq!(detail.viewer.login, "van");
+        assert!(detail.viewer_is_author);
+        let merge = detail.merge;
+        assert_eq!(merge.methods, [MergeMethod::Squash, MergeMethod::Rebase]);
+        assert_eq!(merge.state, Mergeability::Unstable);
+        assert!(merge.state.allows_merge());
+        assert!(merge.can_merge);
+        assert!(!merge.deletes_branch);
+        assert_eq!(merge.head_ref_id.as_deref(), Some("REF_1"));
+    }
+
+    #[test]
+    fn what_holds_a_merge_back() {
+        let state = |pr: Value| {
+            merge_detail(json!({ "viewerPermission": "READ" }), pr)
+                .merge
+                .state
+        };
+        // a conflict wins over what the status says
+        assert_eq!(
+            state(
+                json!({ "state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "BLOCKED" })
+            ),
+            Mergeability::Conflicting
+        );
+        assert_eq!(
+            state(json!({ "state": "OPEN", "isDraft": true, "mergeStateStatus": "CLEAN" })),
+            Mergeability::Draft
+        );
+        assert_eq!(
+            state(json!({ "state": "OPEN", "mergeStateStatus": "BEHIND" })),
+            Mergeability::Behind
+        );
+        assert_eq!(state(json!({ "state": "OPEN" })), Mergeability::Unknown);
+        assert!(!Mergeability::Blocked.allows_merge());
+        // a fork's branch is not this repository's to delete; read access
+        // does not merge
+        let fork = merge_detail(
+            json!({ "viewerPermission": "READ" }),
+            json!({ "state": "OPEN", "isCrossRepository": true, "headRef": { "id": "REF_2" } }),
+        );
+        assert_eq!(fork.merge.head_ref_id, None);
+        assert!(!fork.merge.can_merge);
+    }
+
+    #[test]
+    fn merges_and_reviews_ask_github_as_it_wants() {
+        let (query, variables) = merge_request("PR_1", MergeMethod::Squash, "abc");
+        assert!(query.contains("mergePullRequest"));
+        assert_eq!(
+            variables,
+            json!({ "id": "PR_1", "method": "SQUASH", "head": "abc" })
+        );
+        let (_, approve) = review_request("PR_1", ReviewEvent::Approve, "  ");
+        assert_eq!(approve["body"], Value::Null);
+        assert_eq!(approve["event"], "APPROVE");
+        let (_, changes) = review_request("PR_1", ReviewEvent::RequestChanges, "fix it");
+        assert_eq!(changes["body"], "fix it");
+        assert!(ReviewEvent::Comment.needs_body() && !ReviewEvent::Approve.needs_body());
+    }
+
+    #[test]
+    fn a_refusal_is_github_s_reason() {
+        let refused = json!({ "data": { "mergePullRequest": null },
+            "errors": [{ "message": "Pull Request is not mergeable" }] });
+        match mutated(&refused, "mergePullRequest") {
+            Err(FetchError::Other(err)) => {
+                assert_eq!(err.to_string(), "Pull Request is not mergeable")
+            }
+            _ => panic!("a refusal is an error"),
+        }
+        let done = json!({ "data": { "addComment": { "clientMutationId": null } } });
+        assert!(mutated(&done, "addComment").is_ok());
     }
 
     #[test]

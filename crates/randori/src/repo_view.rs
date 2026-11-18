@@ -305,7 +305,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(platform_key!("shift-b"), SwitchBookmark, Some(REPO_CONTEXT)),
         KeyBinding::new("ctrl-`", ToggleTerminal, Some(REPO_CONTEXT)),
         KeyBinding::new("escape", CloseFileFocus, Some(FOCUS_CONTEXT)),
-        KeyBinding::new("escape", ClosePull, Some(pull_view::PULL_CONTEXT)),
+        // not from a field (the comment box): Esc there would drop what is typed
+        KeyBinding::new("escape", ClosePull, Some(pull_view::PULL_KEYS)),
         KeyBinding::new("alt-down", NextChange, Some(FOCUS_CONTEXT)),
         KeyBinding::new("alt-up", PreviousChange, Some(FOCUS_CONTEXT)),
         KeyBinding::new("]", NextFile, Some(FOCUS_CONTEXT)),

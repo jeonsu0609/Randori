@@ -9,6 +9,7 @@
 //! request from a fork, or one not fetched yet, takes GitHub's diff instead.
 
 use gpui_kit::component::diff::{DiffAnnotation, DiffFileStatus, DiffLinePosition, DiffSide};
+use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::text::TextView;
 
 use std::collections::HashMap;
@@ -27,9 +28,17 @@ use futures::FutureExt as _;
 
 /// Checks listed before the rest are counted only.
 const CHECKS_SHOWN: usize = 6;
+/// How often, and how far apart, the view asks again while GitHub has not
+/// worked out whether the pull request can be merged.
+const MERGEABILITY_RETRIES: u8 = 5;
+const MERGEABILITY_RETRY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Key context of the pull request view; Esc closes it.
 pub(super) const PULL_CONTEXT: &str = "RandoriPull";
+/// Where Esc closes the view: anywhere in it but a field.
+pub(super) const PULL_KEYS: &str = "RandoriPull && !Input";
+
+mod write;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum PullTab {
@@ -116,11 +125,8 @@ pub(super) struct PullView {
     pub(super) handle: FocusHandle,
     detail: Load<Rc<PullDetail>>,
     threads: ThreadIndex,
-    /// The Overview, its own (cached) view: the tab's other redraws leave
-    /// a long conversation alone.
-    overview: Option<Entity<PullOverview>>,
-    /// Dropped with the view, so closed pull requests leave nothing behind.
-    _overview_events: Option<gpui_kit::Subscription>,
+    /// The Overview's three views, once the detail is in.
+    overview: Option<Overview>,
     files: Load<Rc<Vec<PullFile>>>,
     /// The changed-file list, virtualized: a large pull request has
     /// thousands of files.
@@ -131,6 +137,9 @@ pub(super) struct PullView {
     /// Bumped by each load, so only the latest answer is shown when a reload
     /// overtakes an earlier one.
     detail_load: u64,
+    /// A detail load is on its way: the list's refresh does not start another
+    /// (it would cancel this one, which began after what the list saw).
+    detail_in_flight: bool,
     diff_load: u64,
     /// The loads in flight, dropped with the view or by the next load: closing
     /// the pull request, opening another or reloading cancels them, GitHub's
@@ -138,10 +147,65 @@ pub(super) struct PullView {
     /// and its answer is dropped.
     _detail_task: Option<Task<()>>,
     _diff_task: Option<Task<()>>,
+    /// The Overview's comment box, made with the view (a field needs a
+    /// window, which the detail's arrival has not), so what is typed stays
+    /// through reloads.
+    comment: Entity<TextareaState>,
+    _comment_events: gpui_kit::Subscription,
+    /// Among the list's open pull requests at its last refresh; leaving them
+    /// (merged, closed) reloads the detail once. The list holds the 30 last
+    /// updated: one pushed out of them reloads once too, to the same page.
+    listed: bool,
+    /// Reloads while GitHub works out whether it can be merged.
+    unknown_retries: u8,
+    _retry: Option<Task<()>>,
 }
 
-/// The Overview tab: the description, the conversation and the facts beside.
-pub(super) struct PullOverview {
+/// The Overview tab, three views the tab draws side by side, none inside
+/// another: gpui redraws whatever is inside a view it redraws, cached or not
+/// (`refreshing`), and the comment box redraws its view at every key and
+/// every blink of its cursor. So the conversation and the side column are
+/// views of their own, cached, beside the composer, which is not.
+struct Overview {
+    conversation: Entity<PullConversation>,
+    facts: Entity<PullFacts>,
+    composer: Entity<PullComposer>,
+    /// Dropped with the view, so closed pull requests leave nothing behind.
+    _events: [gpui_kit::Subscription; 2],
+}
+
+impl Overview {
+    fn render(&self) -> AnyElement {
+        // the conversation scrolls; merging and commenting stay in reach
+        // under it, however long it is
+        h_flex()
+            .size_full()
+            .min_h_0()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(
+                        div().flex_1().min_h_0().child(
+                            gpui_kit::AnyView::from(self.conversation.clone())
+                                .cached(gpui_kit::StyleRefinement::default().size_full()),
+                        ),
+                    )
+                    .child(self.composer.clone()),
+            )
+            .child(
+                div().w(gpui_kit::rems(17.)).flex_none().h_full().child(
+                    gpui_kit::AnyView::from(self.facts.clone())
+                        .cached(gpui_kit::StyleRefinement::default().size_full()),
+                ),
+            )
+            .into_any_element()
+    }
+}
+
+/// The description and the conversation.
+pub(super) struct PullConversation {
     detail: Rc<PullDetail>,
     _theme: gpui_kit::Subscription,
     /// The issue link rules the text was drawn with.
@@ -149,19 +213,87 @@ pub(super) struct PullOverview {
     _settings: gpui_kit::Subscription,
 }
 
-pub(super) enum OverviewEvent {
-    /// "Show in the graph".
-    ShowHead,
-}
-
-impl EventEmitter<OverviewEvent> for PullOverview {}
-
-impl Render for PullOverview {
+impl Render for PullConversation {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let detail = self.detail.clone();
-        overview(&detail, cx)
+        conversation(&detail, cx)
     }
 }
+
+/// The side column: "Submit a review" (the composer's), reviewers, labels,
+/// checks, the branch.
+pub(super) struct PullFacts {
+    detail: Rc<PullDetail>,
+    composer: Entity<PullComposer>,
+    _theme: gpui_kit::Subscription,
+}
+
+impl Render for PullFacts {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let detail = self.detail.clone();
+        let review_button = write::review_button(&detail, &self.composer, cx);
+        facts(&detail, review_button, cx)
+    }
+}
+
+/// What writes to GitHub, under the conversation: the merge box and the
+/// comment box (see [`write`]).
+pub(super) struct PullComposer {
+    detail: Rc<PullDetail>,
+    /// The comment box (see [`PullView::comment`]).
+    comment: Entity<TextareaState>,
+    /// The repository and token merges, comments and reviews go with (the
+    /// detail's); kept in memory only, as the list's.
+    access: (github::GitHubRepo, String),
+    /// The comment on its way, to empty the box once GitHub has it.
+    pending_comment: Option<String>,
+    /// What is on its way to GitHub, on the buttons: one request at a time.
+    busy: Option<&'static str>,
+    /// Why the last request failed, shown above the comment box.
+    error: Option<SharedString>,
+    /// The way chosen in the merge button's menu; the repository's first
+    /// otherwise.
+    method: Option<gh::MergeMethod>,
+    /// The view asked GitHub again as often as it does, and mergeability is
+    /// still unknown: "Check again" is offered.
+    checking_gave_up: bool,
+    /// The tab, which says how a write went if the view closed meanwhile.
+    owner: gpui_kit::WeakEntity<RepoView>,
+}
+
+impl Render for PullComposer {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let merge_box = self.merge_box(cx);
+        let comment_box = self.comment_box(cx);
+        let theme = cx.theme();
+        v_flex()
+            .flex_none()
+            .px_6()
+            .py_3()
+            .gap_3()
+            .border_t_1()
+            .border_color(theme.border)
+            // opaque: what the conversation draws past its scrolled edge (a
+            // marker) is not to show through
+            .bg(theme.background)
+            .children(merge_box)
+            .child(comment_box)
+    }
+}
+
+/// "Show in the graph", from the side column.
+pub(super) struct ShowHead;
+
+pub(super) enum OverviewEvent {
+    /// A merge, comment or review went to GitHub (or was refused): the pull
+    /// request and the list reload.
+    Changed,
+    /// "Check again", after the view stopped asking whether it can be merged.
+    CheckAgain,
+}
+
+impl EventEmitter<ShowHead> for PullFacts {}
+impl EventEmitter<OverviewEvent> for PullComposer {}
 
 impl RepoView {
     /// Opens pull request `number` of the section in the pull request view
@@ -178,6 +310,30 @@ impl RepoView {
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode));
         let handle = cx.focus_handle();
         handle.focus(window, cx);
+        let comment = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .placeholder("Add a comment")
+        });
+        // ⌘↩ (Ctrl+Enter elsewhere) comments. What is typed redraws the
+        // Overview by itself: it draws the field.
+        let _comment_events = cx.subscribe_in(
+            &comment,
+            window,
+            |view: &mut RepoView, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter {
+                    secondary: true, ..
+                } = event
+                    && let Some(composer) = view
+                        .center
+                        .pull()
+                        .and_then(|pull| pull.overview.as_ref())
+                        .map(|overview| overview.composer.clone())
+                {
+                    composer.update(cx, |composer, cx| composer.submit_comment(window, cx))
+                }
+            },
+        );
         let view = PullView {
             number: pr.number,
             title: pr.title.clone().into(),
@@ -191,16 +347,21 @@ impl RepoView {
             detail: Load::Loading,
             threads: ThreadIndex::default(),
             overview: None,
-            _overview_events: None,
             files: Load::Loading,
             files_scroll: UniformListScrollHandle::new(),
             source: None,
             selected_file: None,
             diff,
             detail_load: 0,
+            detail_in_flight: false,
             diff_load: 0,
             _detail_task: None,
             _diff_task: None,
+            comment,
+            _comment_events,
+            listed: true,
+            unknown_retries: 0,
+            _retry: None,
         };
         self.center = Center::Pull(Box::new(view));
         // the two load side by side: the diff needs only the list's commits
@@ -223,6 +384,12 @@ impl RepoView {
             return;
         };
         let Some(pr) = self.pull_request_numbered(number) else {
+            // merged or closed (here or elsewhere): once, the detail says how
+            if let Some(pull) = self.center.pull_mut().filter(|pull| pull.listed) {
+                pull.listed = false;
+                let detail = !pull.detail_in_flight;
+                self.load_pull(detail, false, cx);
+            }
             return;
         };
         let (base, head, base_ref, updated) = (
@@ -234,18 +401,27 @@ impl RepoView {
         let Some(pull) = self.center.pull_mut() else {
             return;
         };
-        if pull.updated_at == updated {
+        pull.listed = true;
+        // an answer older than what the view has seen (a refresh sent before
+        // a write, back after its reload) brings nothing
+        if !later(&updated, &pull.updated_at) {
             return;
         }
         // new commits on the base branch leave the merge base, and so the
         // diff, as it was: only a push to the head or a new base branch
         // changes it
         let moved = pull.head_oid != head || pull.base_ref != base_ref;
+        // a push sets GitHub working out mergeability again: as many tries
+        // as the first time
+        if pull.head_oid != head {
+            pull.unknown_retries = 0;
+        }
         pull.base_ref = base_ref;
         pull.updated_at = updated;
         pull.base_oid = base;
         pull.head_oid = head;
-        self.load_pull(true, moved, cx);
+        let detail = !pull.detail_in_flight;
+        self.load_pull(detail, moved, cx);
     }
 
     /// Loads the detail (the Overview) and the diff, either or both, side by
@@ -263,6 +439,7 @@ impl RepoView {
         let (base, head) = (pull.base_oid.clone(), pull.head_oid.clone());
         let detail_load = detail.then(|| {
             pull.detail_load += 1;
+            pull.detail_in_flight = true;
             pull.detail_load
         });
         let diff_load = diff.then(|| {
@@ -346,10 +523,18 @@ impl RepoView {
         result: Result<(String, Result<PullDetail, FetchError>), String>,
         cx: &mut Context<Self>,
     ) {
+        // what the Overview writes goes with the token the detail came with
         let detail = match result {
             Ok((token, detail)) => {
+                let repo = self.github_access().map(|(repo, _)| repo);
+                let access = repo.map(|repo| (repo, token.clone()));
                 self.remember_github_token(token);
-                detail.map_err(fetch_message)
+                match (detail, access) {
+                    (Ok(detail), Some(access)) => Ok((detail, access)),
+                    // turned off while it loaded
+                    (Ok(_), None) => Err("GitHub is turned off in Settings.".to_owned()),
+                    (Err(err), _) => Err(fetch_message(err)),
+                }
             }
             Err(message) => Err(message),
         };
@@ -360,42 +545,126 @@ impl RepoView {
         else {
             return;
         };
+        pull.detail_in_flight = false;
         match detail {
-            Ok(detail) => {
+            Ok((detail, access)) => {
                 let detail = Rc::new(detail);
+                // what the detail saw, so the list's refresh does not load it
+                // again
+                if later(&detail.updated_at, &pull.updated_at) {
+                    pull.updated_at = detail.updated_at.clone();
+                }
                 pull.title = detail.title.clone().into();
                 pull.threads = ThreadIndex::of(&detail.threads);
                 pull.detail = Load::Ready(detail.clone());
+                // GitHub works out mergeability after a push: ask again a few
+                // times rather than leave "Checking…" until the next refresh
+                let checking = detail.merge.state == gh::Mergeability::Unknown
+                    && matches!(detail.state, PullState::Open);
+                let retrying = checking && pull.unknown_retries < MERGEABILITY_RETRIES;
+                let gave_up = checking && !retrying;
+                if retrying {
+                    pull.unknown_retries += 1;
+                    pull._retry = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(MERGEABILITY_RETRY).await;
+                        let _ = this.update(cx, |view, cx| {
+                            if view.center.pull().is_some_and(|pull| pull.number == number) {
+                                view.load_pull(true, false, cx);
+                            }
+                        });
+                    }));
+                } else if !checking {
+                    pull.unknown_retries = 0;
+                }
+
+                let comment = pull.comment.clone();
                 match &pull.overview {
-                    Some(overview) => overview.update(cx, |overview, cx| {
-                        overview.detail = detail;
-                        cx.notify();
-                    }),
+                    Some(overview) => {
+                        // a reload that brought nothing new (the tries while
+                        // GitHub works out mergeability) leaves a long
+                        // conversation alone; the composer shows mergeability
+                        if *overview.conversation.read(cx).detail != *detail {
+                            overview.conversation.update(cx, |conversation, cx| {
+                                conversation.detail = detail.clone();
+                                cx.notify();
+                            });
+                            overview.facts.update(cx, |facts, cx| {
+                                facts.detail = detail.clone();
+                                cx.notify();
+                            });
+                        }
+                        overview.composer.update(cx, |composer, cx| {
+                            composer.detail = detail;
+                            composer.checking_gave_up = gave_up;
+                            composer.access = access;
+                            cx.notify();
+                        });
+                    }
                     None => {
-                        let overview = cx.new(|cx| PullOverview {
-                            detail,
+                        let conversation = cx.new(|cx| PullConversation {
+                            detail: detail.clone(),
                             _theme: cx
                                 .observe_global::<gpui_kit::component::Theme>(|_, cx| cx.notify()),
                             links: crate::settings::get(cx).display.issue_links.clone(),
                             // the issue link rules make the text's links; other
                             // settings leave a long conversation alone
                             _settings: cx.observe_global::<crate::settings::Settings>(
-                                |overview: &mut PullOverview, cx| {
+                                |conversation: &mut PullConversation, cx| {
                                     let links = &crate::settings::get(cx).display.issue_links;
-                                    if *links != overview.links {
-                                        overview.links = links.clone();
+                                    if *links != conversation.links {
+                                        conversation.links = links.clone();
                                         cx.notify();
                                     }
                                 },
                             ),
                         });
-                        let subscription =
-                            cx.subscribe(&overview, |view, _, event, cx| match event {
-                                OverviewEvent::ShowHead => view.show_pull_head_now(cx),
-                            });
+                        let owner = cx.entity().downgrade();
+                        let composer = cx.new(|_| PullComposer {
+                            detail: detail.clone(),
+                            comment,
+                            access,
+                            busy: None,
+                            error: None,
+                            pending_comment: None,
+                            method: None,
+                            checking_gave_up: gave_up,
+                            owner,
+                        });
+                        let facts = cx.new(|cx| PullFacts {
+                            detail,
+                            composer: composer.clone(),
+                            _theme: cx
+                                .observe_global::<gpui_kit::component::Theme>(|_, cx| cx.notify()),
+                        });
+                        let _events = [
+                            cx.subscribe(&facts, |view, _, _: &ShowHead, cx| {
+                                view.show_pull_head_now(cx)
+                            }),
+                            cx.subscribe(&composer, |view, _, event, cx| match event {
+                                // the detail at once: GitHub moves the pull
+                                // request's `updatedAt` a moment after a
+                                // review, so the list may not show the change
+                                // yet; the list too, for the section
+                                OverviewEvent::Changed => {
+                                    view.load_pull(true, false, cx);
+                                    view.refresh_pulls(true, cx);
+                                }
+                                OverviewEvent::CheckAgain => {
+                                    // as many tries again as the first time
+                                    if let Some(pull) = view.center.pull_mut() {
+                                        pull.unknown_retries = 0;
+                                    }
+                                    view.load_pull(true, false, cx);
+                                }
+                            }),
+                        ];
                         if let Some(pull) = self.center.pull_mut() {
-                            pull.overview = Some(overview);
-                            pull._overview_events = Some(subscription);
+                            pull.overview = Some(Overview {
+                                conversation,
+                                facts,
+                                composer,
+                                _events,
+                            });
                         }
                     }
                 }
@@ -593,10 +862,22 @@ impl RepoView {
                             false,
                             cx,
                         ))
-                        .child(div().min_w_0().truncate().child(format!(
-                            "{} wants to merge {} into {}",
-                            detail.author.login, detail.head_ref, detail.base_ref
-                        )))
+                        .child(div().min_w_0().truncate().child(match detail.state {
+                            PullState::Merged => format!(
+                                "{} merged {} into {}",
+                                detail.merged_by.as_ref().unwrap_or(&detail.author).login,
+                                detail.head_ref,
+                                detail.base_ref
+                            ),
+                            PullState::Closed => format!(
+                                "{} wanted to merge {} into {}",
+                                detail.author.login, detail.head_ref, detail.base_ref
+                            ),
+                            PullState::Open | PullState::Draft => format!(
+                                "{} wants to merge {} into {}",
+                                detail.author.login, detail.head_ref, detail.base_ref
+                            ),
+                        }))
                         .child(
                             div()
                                 .flex_none()
@@ -632,9 +913,7 @@ impl RepoView {
         let content = match pull.tab {
             PullTab::Overview => match &pull.detail {
                 Load::Ready(_) => match &pull.overview {
-                    Some(overview) => gpui_kit::AnyView::from(overview.clone())
-                        .cached(gpui_kit::StyleRefinement::default().size_full())
-                        .into_any_element(),
+                    Some(overview) => overview.render(),
                     None => pull_note(None, cx),
                 },
                 Load::Loading => pull_note(None, cx),
@@ -662,10 +941,9 @@ impl RepoView {
     }
 }
 
-/// The Overview's content.
-fn overview(detail: &Rc<PullDetail>, cx: &mut Context<PullOverview>) -> AnyElement {
+/// The description and the conversation, scrolling (see [`PullConversation`]).
+fn conversation(detail: &Rc<PullDetail>, cx: &mut Context<PullConversation>) -> AnyElement {
     {
-        let theme = cx.theme();
         let mut conversation: Vec<AnyElement> = vec![comment_card(
             pull_id(detail.number, "body", 0),
             &detail.author,
@@ -734,6 +1012,27 @@ fn overview(detail: &Rc<PullDetail>, cx: &mut Context<PullOverview>) -> AnyEleme
             });
         }
 
+        v_flex()
+            .id("pull-conversation")
+            .size_full()
+            .overflow_y_scrollbar()
+            .px_6()
+            .py_4()
+            .gap_3()
+            .children(conversation)
+            .into_any_element()
+    }
+}
+
+/// The side column: "Submit a review", the review decision, reviewers,
+/// assignees, labels, checks and the branch.
+fn facts(
+    detail: &Rc<PullDetail>,
+    review_button: Option<AnyElement>,
+    cx: &mut Context<PullFacts>,
+) -> AnyElement {
+    {
+        let theme = cx.theme();
         let section = |title: &'static str, body: AnyElement| {
             v_flex()
                 .gap_1p5()
@@ -920,47 +1219,28 @@ fn overview(detail: &Rc<PullDetail>, cx: &mut Context<PullOverview>) -> AnyEleme
                     .xsmall()
                     .icon(IconName::GitGraph)
                     .label("Show in the graph")
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(OverviewEvent::ShowHead))),
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ShowHead))),
             )
             .into_any_element();
 
-        h_flex()
+        v_flex()
+            .id("pull-facts")
             .size_full()
-            .min_h_0()
-            .items_start()
-            .child(
-                v_flex()
-                    .id("pull-conversation")
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .overflow_y_scrollbar()
-                    .px_6()
-                    .py_4()
-                    .gap_3()
-                    .children(conversation),
-            )
-            .child(
-                v_flex()
-                    .id("pull-facts")
-                    .w(gpui_kit::rems(17.))
-                    .flex_none()
-                    .h_full()
-                    .overflow_y_scrollbar()
-                    .px_4()
-                    .py_4()
-                    .gap_3()
-                    .border_l_1()
-                    .border_color(theme.border)
-                    .when_some(decision, |this, (text, color)| {
-                        this.child(div().text_sm().font_medium().text_color(color).child(text))
-                    })
-                    .child(section("Reviewers", reviewers))
-                    .child(section("Assignees", assignees))
-                    .child(section("Labels", labels))
-                    .child(section("Checks", checks))
-                    .child(section("Branch", branch)),
-            )
+            .overflow_y_scrollbar()
+            .px_4()
+            .py_4()
+            .gap_3()
+            .border_l_1()
+            .border_color(theme.border)
+            .children(review_button)
+            .when_some(decision, |this, (text, color)| {
+                this.child(div().text_sm().font_medium().text_color(color).child(text))
+            })
+            .child(section("Reviewers", reviewers))
+            .child(section("Assignees", assignees))
+            .child(section("Labels", labels))
+            .child(section("Checks", checks))
+            .child(section("Branch", branch))
             .into_any_element()
     }
 }
@@ -1213,6 +1493,12 @@ async fn github_diff(
 
 /// One token lookup that the detail and the diff both wait on.
 type SharedToken = futures::future::Shared<futures::future::BoxFuture<'static, Option<String>>>;
+
+/// Whether GitHub time `at` is after `seen`. GitHub writes its times in one
+/// form (`2026-11-18T07:59:10Z`, UTC, to the second), which orders as text.
+fn later(at: &str, seen: &str) -> bool {
+    at > seen
+}
 
 fn fetch_message(err: FetchError) -> String {
     match err {
@@ -1518,6 +1804,18 @@ fn on_github_row(text: &str, url: &str, cx: &App) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_later_update_counts() {
+        // a refresh sent before a write, back after the reload that saw it
+        assert!(!later("2026-11-18T07:59:09Z", "2026-11-18T07:59:10Z"));
+        assert!(!later("2026-11-18T07:59:10Z", "2026-11-18T07:59:10Z"));
+        assert!(later("2026-11-18T07:59:10Z", "2026-11-18T07:59:09Z"));
+        // across a day and a year, as text
+        assert!(later("2027-01-01T00:00:00Z", "2026-12-31T23:59:59Z"));
+        // nothing seen yet: any update is later
+        assert!(later("2026-11-18T07:59:10Z", ""));
+    }
 
     fn thread(path: &str, line: Option<u64>) -> gh::ReviewThread {
         gh::ReviewThread {
