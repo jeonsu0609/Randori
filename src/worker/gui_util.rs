@@ -1380,8 +1380,9 @@ impl WorkspaceSession<'_> {
 
         tx.repo_mut().rebase_descendants().await?;
 
-        self.finish_transaction(tx, format!("import git refs: {:?}", stats))
-            .await?;
+        // jj's own words for it: the stats are for the log, not the op log
+        log::debug!("import git refs: {stats:?}");
+        self.finish_transaction(tx, "import git refs").await?;
         Ok(())
     }
 }
