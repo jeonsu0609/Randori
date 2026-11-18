@@ -767,7 +767,7 @@ pub(super) async fn update_tree_entry(
     let mut builder = MergedTreeBuilder::new(original_tree.clone());
     builder.set_or_remove(
         path.to_owned(),
-        Merge::normal(TreeValue::File {
+        Some(TreeValue::File {
             id: new_blob,
             executable,
             copy_id: CopyId::placeholder(),
@@ -1150,7 +1150,7 @@ mod tests {
         // A should be abandoned (only touched z.txt)
         let a_exists = ws.evaluate_revset_str(&a_id.change.hex);
         assert!(
-            a_exists.is_err() || a_exists.unwrap().is_empty()?,
+            a_exists.is_err() || a_exists.unwrap().is_empty().await?,
             "commit A should be abandoned"
         );
 
@@ -2491,11 +2491,10 @@ mod tests {
         let repo = mkrepo();
         let mut session = WorkerSession::default();
         let mut ws = session.load_workspace(repo.path()).await?;
-        let parent_file = ws
-            .get_commit(ws.wc_id())?
-            .tree()
-            .entries()
-            .next()
+        let tree = ws.get_commit(ws.wc_id())?.tree();
+        let mut entries = tree.entries();
+        let parent_file = futures_util::StreamExt::next(&mut entries)
+            .await
             .map(|(path, _)| path.as_internal_file_string().to_owned())
             .expect("a file in the working copy");
         let result = IgnoreNewFiles {

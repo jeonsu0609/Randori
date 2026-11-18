@@ -26,7 +26,7 @@ use jj_lib::{
         ContentDiff, DiffHunk, DiffHunkKind, find_line_ranges,
     },
     diff_presentation::LineCompareMode,
-    files::FileMergeHunkLevel,
+    files::{FileMergeHunkLevel, MergeOptions},
     graph::{GraphEdgeType, GraphNode, TopoGroupedGraph},
     matchers::EverythingMatcher,
     merge::{Diff, SameChange},
@@ -38,7 +38,6 @@ use jj_lib::{
         Revset, RevsetContainingFn, RevsetEvaluationError, RevsetExpression, RevsetStreamExt as _,
     },
     rewrite,
-    tree_merge::MergeOptions,
 };
 use pollster::FutureExt as _;
 
@@ -488,12 +487,13 @@ pub async fn query_revisions(ws: &WorkspaceSession<'_>, set: RevSet) -> Result<R
 
     // compute combined changes: diff from parents to final
     let mut changes = Vec::new();
-    let tree_diff = parent_tree.diff_stream(&final_tree, &EverythingMatcher);
+    let tree_diff = parent_tree.diff(&final_tree, &EverythingMatcher);
     let conflict_labels = Diff::new(parent_tree.labels(), final_tree.labels());
     format_tree_changes(ws, &mut changes, tree_diff, conflict_labels).await?;
 
     let mut conflicts = Vec::new();
-    for (path, entry) in final_tree.entries() {
+    let mut entries = final_tree.entries();
+    while let Some((path, entry)) = futures_util::StreamExt::next(&mut entries).await {
         if let Ok(entry) = entry
             && !entry.is_resolved()
         {
@@ -1032,26 +1032,27 @@ pub async fn query_annotation(
     let annotation = annotator.to_annotation();
 
     let mut lines = Vec::new();
-    let mut runs: Vec<(CommitId, usize, usize)> = Vec::new();
+    // the annotation holds each line's commit: a block takes it as it is
+    let mut runs: Vec<(&jj_lib::commit::Commit, usize, usize)> = Vec::new();
     for (origin, line) in annotation.lines() {
         // Err: the line comes from outside the domain; its commit is still the answer
-        let commit_id = origin.unwrap_or_else(|id| id).clone();
+        let commit = origin.unwrap_or_else(|commit| commit);
         let text = String::from_utf8_lossy(line);
         lines.push(text.trim_end_matches(['\n', '\r']).to_owned());
         match runs.last_mut() {
-            Some((id, _, len)) if *id == commit_id => *len += 1,
-            _ => runs.push((commit_id, lines.len() - 1, 1)),
+            Some((last, _, len)) if last.id() == commit.id() => *len += 1,
+            _ => runs.push((commit, lines.len() - 1, 1)),
         }
     }
     // blame does not show immutability, so skip that check for every block
-    let mut headers: HashMap<CommitId, RevHeader> = HashMap::new();
+    let mut headers: HashMap<&CommitId, RevHeader> = HashMap::new();
     let mut blocks = Vec::with_capacity(runs.len());
-    for (commit_id, start, len) in runs {
-        let header = match headers.get(&commit_id) {
+    for (commit, start, len) in runs {
+        let header = match headers.get(commit.id()) {
             Some(header) => header.clone(),
             None => {
-                let header = ws.format_header(&ws.get_commit(&commit_id)?, Some(false))?;
-                headers.insert(commit_id.clone(), header.clone());
+                let header = ws.format_header(commit, Some(false))?;
+                headers.insert(commit.id(), header.clone());
                 header
             }
         };
@@ -1111,7 +1112,7 @@ pub async fn query_commit_range_diff(
     let to = store.get_commit_async(&head).await?;
     let (from_tree, to_tree) = (from.tree(), to.tree());
     let mut changes = Vec::new();
-    let tree_diff = from_tree.diff_stream(&to_tree, &EverythingMatcher);
+    let tree_diff = from_tree.diff(&to_tree, &EverythingMatcher);
     let labels = Diff::new(from_tree.labels(), to_tree.labels());
     format_tree_changes(ws, &mut changes, tree_diff, labels).await?;
     Ok(Some(changes))

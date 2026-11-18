@@ -32,7 +32,7 @@ use anyhow::{Context, Error, Result, anyhow};
 use jj_cli::{cli_util, git_util::load_git_import_options, revset_util, ui::Ui};
 use jj_lib::default_backend_factories;
 use jj_lib::git::{self, GitFetch, GitFetchRefExpression, GitSettings};
-use jj_lib::ref_name::{RefNameBuf, RemoteName, RemoteNameBuf, RemoteRefSymbol};
+use jj_lib::ref_name::{RefNameBuf, RemoteName, RemoteNameBuf, RemoteRefSymbol, WorkspaceName};
 use jj_lib::repo::Repo;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
@@ -231,12 +231,30 @@ impl WorkerSession {
         let (workspace, _) = if colocated {
             let git_path = location.join(".git");
             if git_path.exists() {
-                Workspace::init_external_git(&settings, &canonical_location, &git_path).await? // existing .git/, create .jj
+                Workspace::init_external_git(
+                    &settings,
+                    &canonical_location,
+                    WorkspaceName::DEFAULT,
+                    &git_path,
+                )
+                .await? // existing .git/, create .jj
             } else {
-                Workspace::init_colocated_git(&settings, &canonical_location, object_hash).await? // create .git/ and .jj/
+                Workspace::init_colocated_git(
+                    &settings,
+                    &canonical_location,
+                    WorkspaceName::DEFAULT,
+                    object_hash,
+                )
+                .await? // create .git/ and .jj/
             }
         } else {
-            Workspace::init_internal_git(&settings, &canonical_location, object_hash).await? // create .jj/ with a .git/ inside it
+            Workspace::init_internal_git(
+                &settings,
+                &canonical_location,
+                WorkspaceName::DEFAULT,
+                object_hash,
+            )
+            .await? // create .jj/ with a .git/ inside it
         };
         gui_util::maybe_add_gitignore(&workspace)?;
 
@@ -277,9 +295,21 @@ impl WorkerSession {
 
         // init empty
         let (workspace, repo) = if colocated {
-            Workspace::init_colocated_git(&settings, &canonical_location, object_hash).await?
+            Workspace::init_colocated_git(
+                &settings,
+                &canonical_location,
+                WorkspaceName::DEFAULT,
+                object_hash,
+            )
+            .await?
         } else {
-            Workspace::init_internal_git(&settings, &canonical_location, object_hash).await?
+            Workspace::init_internal_git(
+                &settings,
+                &canonical_location,
+                WorkspaceName::DEFAULT,
+                object_hash,
+            )
+            .await?
         };
         gui_util::maybe_add_gitignore(&workspace)?;
 
@@ -304,7 +334,7 @@ impl WorkerSession {
             &default_backend_factories::default_backend_factories(),
             &default_backend_factories::default_working_copy_factories(),
         )?;
-        let repo = workspace.repo_loader().load_at_head().await?;
+        let repo = workspace.load_at_head().await?;
 
         // fetch from origin, including all tags
         let mut auth_ctx = AuthContext::new(None);
@@ -327,16 +357,14 @@ impl WorkerSession {
                     cli_util::start_repo_transaction(&repo, workspace.workspace_name(), &[]);
                 let mut fetcher =
                     GitFetch::new(tx.repo_mut(), subprocess_options, &import_options)?;
-                let refspecs = git::expand_fetch_refspecs(
-                    remote_name,
-                    GitFetchRefExpression {
-                        bookmark: StringExpression::all(),
-                        tag: tag_expr,
-                    },
-                )?;
+                // jj expands it into refspecs as it fetches
+                let refs = GitFetchRefExpression {
+                    bookmark: StringExpression::all(),
+                    tag: tag_expr,
+                };
 
                 fetcher
-                    .fetch(remote_name, refspecs, cb, None)
+                    .fetch(remote_name, &refs, cb, None)
                     .context("Failed to fetch from remote")?;
 
                 pollster::block_on(fetcher.import_refs()).context("Failed to import refs")?;
@@ -382,7 +410,7 @@ impl WorkerSession {
                 &default_backend_factories::default_backend_factories(),
                 &default_backend_factories::default_working_copy_factories(),
             )?;
-            let repo = workspace.repo_loader().load_at_head().await?;
+            let repo = workspace.load_at_head().await?;
 
             let commit = repo.store().get_commit(&wc_id)?;
             workspace

@@ -11,14 +11,16 @@ use std::{
 };
 
 use anyhow::{Context, Error, Result, anyhow};
-use chrono::TimeZone;
 use futures_util::TryStreamExt;
 use itertools::Itertools;
 use jj_cli::{
-    cli_util::{self, default_ignored_remote_name, short_operation_hash},
-    git_util::{is_colocated_git_workspace, load_git_import_options},
-    revset_util,
+    cli_util::{self, short_operation_hash},
+    git_util::load_git_import_options,
     ui::Ui,
+};
+use jj_frontend::{
+    git_util::is_colocated_git_workspace,
+    revset_util::{self, default_ignored_remote_name},
 };
 use jj_lib::{
     backend::{BackendError, ChangeId, CommitId},
@@ -164,8 +166,7 @@ impl WorkerSession {
             true
         };
 
-        let is_colocated =
-            is_colocated_git_workspace(&workspace).map_err(|e| Error::new(e.error))?;
+        let is_colocated = is_colocated_git_workspace(&workspace)?;
 
         Ok(WorkspaceSession {
             session: self,
@@ -226,6 +227,8 @@ impl WorkspaceSession<'_> {
             &self.operation.repo,
             &*default_backend_factories::default_working_copy_factory(),
             workspace_name.clone(),
+            // the operation is this workspace's, as `jj workspace add` makes it
+            Some(self.workspace.workspace_name()),
         )
         .await?;
 
@@ -244,7 +247,14 @@ impl WorkspaceSession<'_> {
             .await?;
 
         if colocate {
-            git::reset_head(tx.repo_mut(), &workspace_name, &path, &new_wc_commit).await?;
+            // a new workspace has no earlier commit: a forced reset, as jj's
+            git::reset_head(
+                tx.repo_mut(),
+                &workspace_name,
+                &path,
+                (None, &new_wc_commit),
+            )
+            .await?;
         }
 
         self.finish_transaction(
@@ -841,8 +851,7 @@ impl WorkspaceSession<'_> {
             let commit = repo.store().get_commit(&self.operation.wc_id)?;
             let parents = commit.parents().await?;
             let parent_tree = rewrite::merge_commit_trees(repo, &parents).await?;
-            let mut diff =
-                parent_tree.diff_stream(&commit.tree(), &jj_lib::matchers::EverythingMatcher);
+            let mut diff = parent_tree.diff(&commit.tree(), &jj_lib::matchers::EverythingMatcher);
             let mut counts = messages::ChangeCounts::default();
             while let Some(entry) = diff.next().await {
                 let values = entry.values?;
@@ -1002,7 +1011,7 @@ impl WorkspaceSession<'_> {
         let intersection_revset = check_revset.intersection(&immutable_revset);
 
         let immutable_revs = self.evaluate_revset_expr(repo, intersection_revset)?;
-        Ok(!immutable_revs.is_empty()?)
+        Ok(!immutable_revs.is_empty().block_on()?)
     }
 
     /// checks if any commit in an iterator is immutable
@@ -1101,11 +1110,12 @@ impl WorkspaceSession<'_> {
             .transpose()?;
         if self.is_colocated {
             if let Some(wc_commit) = &maybe_new_wc_commit {
+                // the old commit lets jj keep what is staged in the index
                 git::reset_head(
                     tx.repo_mut(),
                     self.workspace.workspace_name(),
                     self.workspace.workspace_root(),
-                    wc_commit,
+                    (maybe_old_wc_commit.as_ref(), wc_commit),
                 )
                 .await?;
             }
@@ -1387,18 +1397,19 @@ impl WorkspaceData {
             path_converter: &self.path_converter,
             workspace_name: name,
         };
+        // as jj's own (jj-frontend's workspace_env) does
         let now = if let Some(timestamp) = self.workspace_settings.commit_timestamp() {
-            chrono::Local
-                .timestamp_millis_opt(timestamp.timestamp.0)
+            jiff::Timestamp::from_millisecond(timestamp.timestamp.0)
                 .unwrap()
+                .to_zoned(jiff::tz::TimeZone::system())
         } else {
-            chrono::Local::now()
+            jiff::Zoned::now()
         };
         RevsetParseContext {
             aliases_map: &self.aliases_map,
             local_variables: HashMap::new(),
             user_email: self.workspace_settings.user_email(),
-            date_pattern_context: now.into(),
+            current_time: now,
             default_ignored_remote: default_ignored_remote_name(store),
             fileset_aliases_map: &self.fileset_aliases_map,
             extensions: &self.extensions,
@@ -1510,7 +1521,7 @@ impl OperationData {
 
 /// jj-cli has this, but it needs a `WorkspaceCommandHelper`
 pub(crate) fn maybe_add_gitignore(workspace: &Workspace) -> Result<()> {
-    if is_colocated_git_workspace(workspace).map_err(|e| Error::new(e.error))? {
+    if is_colocated_git_workspace(workspace)? {
         let gitignore_path = workspace.workspace_root().join(".jj").join(".gitignore");
         std::fs::write(&gitignore_path, "/*\n")
             .with_context(|| format!("Failed to write {}", gitignore_path.display()))?;
@@ -1694,8 +1705,14 @@ async fn load_at_head(workspace: &Workspace, data: &WorkspaceData) -> Result<Ope
         loader.op_store(),
         async |op_heads| {
             // might want to set some tags
+            // the merge is this workspace's, as jj's own load_at_head makes it
             let (merged_repo, _num_rebased) = loader
-                .merge_operations(op_heads, None, Some("resolve concurrent operations"), [])
+                .merge_operations(
+                    op_heads,
+                    Some(workspace.workspace_name()),
+                    Some("resolve concurrent operations"),
+                    [],
+                )
                 .await?;
             Ok::<Operation, RepoLoaderError>(merged_repo.operation().clone())
         },
@@ -1739,7 +1756,7 @@ impl WorkspaceSession<'_> {
 
         let mut builder = jj_lib::merged_tree_builder::MergedTreeBuilder::new(wc_commit.tree());
         for path in paths {
-            builder.set_or_remove(path.clone(), jj_lib::merge::Merge::absent());
+            builder.set_or_remove(path.clone(), None);
         }
         let new_tree = builder.write_tree().await?;
 
@@ -1778,7 +1795,7 @@ impl WorkspaceSession<'_> {
             // an error; other changes are concurrent edits, left for the next
             // snapshot to record
             let matcher = jj_lib::matchers::FilesMatcher::new(paths);
-            let back = after.entries_matching(&matcher).count();
+            let back = futures_util::StreamExt::count(after.entries_matching(&matcher)).await;
             locked_ws.locked_wc().reset(&new_commit).await?;
             if back > 0 {
                 return Err(anyhow!(
