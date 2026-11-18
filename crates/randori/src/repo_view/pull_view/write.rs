@@ -9,6 +9,7 @@ use std::cell::Cell;
 use std::future::Future;
 
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::button::DropdownButton;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
@@ -19,13 +20,14 @@ use gpui_kit::component::radio::{Radio, RadioGroup};
 use http_client::HttpClient;
 
 use super::*;
-use crate::harness_mark::HarnessMark as _;
 use gh::{MergeMethod, Mergeability, ReviewEvent};
 
 /// What is on its way, on the button that sent it.
 const MERGING: &str = "Merging…";
 const COMMENTING: &str = "Commenting…";
 const REVIEWING: &str = "Reviewing…";
+const RESOLVING: &str = "Resolving…";
+const DISCARDING: &str = "Discarding…";
 
 /// What was done, said once the pull request's view has closed.
 fn done_words(busy: &str) -> &'static str {
@@ -84,17 +86,20 @@ impl PullComposer {
                 .map_err(fetch_message);
             let shown = this.update_in(cx, |view, window, cx| {
                 view.busy = None;
-                let sent = view.pending_comment.take();
+                let sent = view.sent.take();
                 match &result {
                     // the box empties, unless more was typed meanwhile
-                    Ok(()) => {
-                        if let Some(sent) = sent
-                            && view.comment.read(cx).value().trim() == sent
-                        {
-                            view.comment
-                                .update(cx, |state, cx| state.set_value("", window, cx));
+                    Ok(()) => match sent {
+                        Some(Sent::Comment(sent)) => {
+                            if view.comment.read(cx).value().trim() == sent {
+                                view.comment
+                                    .update(cx, |state, cx| state.set_value("", window, cx));
+                            }
                         }
-                    }
+                        // the tab's: a line comment's or a reply's box
+                        Some(posted) => cx.emit(OverviewEvent::Posted(posted)),
+                        None => {}
+                    },
                     Err(message) => view.error = Some(message.clone().into()),
                 }
                 cx.emit(OverviewEvent::Changed);
@@ -254,7 +259,7 @@ impl PullComposer {
             return;
         }
         let id = self.detail.id.clone();
-        self.pending_comment = Some(body.clone());
+        self.sent = Some(Sent::Comment(body.clone()));
         self.send(
             COMMENTING,
             move |client, repo, token| gh::comment(client, repo, token, id, body),
@@ -272,6 +277,12 @@ impl PullComposer {
             return;
         }
         let own = self.detail.viewer_is_author;
+        // the line comments gathered so far go with it, and say enough
+        let pending = self
+            .detail
+            .pending_review
+            .as_ref()
+            .map(|review| review.comments);
         let event = Rc::new(Cell::new(ReviewEvent::Comment));
         let missing = Rc::new(Cell::new(false));
         let body = cx.new(|cx| {
@@ -289,12 +300,24 @@ impl PullComposer {
             let selected = REVIEW_CHOICES
                 .iter()
                 .position(|(choice, _)| *choice == event.get());
+            let discard_view = view.clone();
             dialog
-                .title("Submit a review")
+                .title(if pending.is_some() {
+                    "Finish your review"
+                } else {
+                    "Submit a review"
+                })
                 .w(gpui_kit::px(520.))
                 .child(
                     v_flex()
                         .gap_3()
+                        .children(pending.map(|comments| {
+                            div().text_sm().child(format!(
+                                "{comments} pending comment{} go{} with it.",
+                                if comments == 1 { "" } else { "s" },
+                                if comments == 1 { "es" } else { "" },
+                            ))
+                        }))
                         .child(Textarea::new(&body))
                         .child(
                             RadioGroup::vertical("pull-review-event")
@@ -334,6 +357,20 @@ impl PullComposer {
                 .footer(
                     DialogFooter::new()
                         .gap_2()
+                        .when(pending.is_some(), |footer| {
+                            footer.child(
+                                Button::new("discard-review")
+                                    .label("Discard review")
+                                    .danger()
+                                    .outline()
+                                    .on_click(move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        let _ = discard_view.update(cx, |view, cx| {
+                                            view.confirm_discard_review(window, cx)
+                                        });
+                                    }),
+                            )
+                        })
                         .child(
                             DialogClose::new()
                                 .child(Button::new("cancel").label("Cancel").outline()),
@@ -346,7 +383,9 @@ impl PullComposer {
                 .on_ok(move |_, window, cx| {
                     let event = ok_event.get();
                     let text = body.read(cx).value().trim().to_owned();
-                    if event.needs_body() && text.is_empty() {
+                    // comments waiting in the review say something already
+                    let said = pending.is_some_and(|comments| comments > 0);
+                    if event.needs_body() && text.is_empty() && !said {
                         ok_missing.set(true);
                         window.refresh();
                         return false;
@@ -361,6 +400,8 @@ impl PullComposer {
         });
     }
 
+    /// Submits a review: the viewer's pending one, with its line comments,
+    /// when there is one, else a new one.
     fn review(
         &mut self,
         event: ReviewEvent,
@@ -369,12 +410,139 @@ impl PullComposer {
         cx: &mut Context<Self>,
     ) {
         let id = self.detail.id.clone();
+        let pending = self.detail.pending_review.clone();
         self.send(
             REVIEWING,
-            move |client, repo, token| gh::review(client, repo, token, id, event, body),
+            move |client, repo, token| async move {
+                match pending {
+                    Some(pending) => {
+                        gh::submit_review(client, repo, token, pending.id, event, body).await
+                    }
+                    None => gh::review(client, repo, token, id, event, body).await,
+                }
+            },
             window,
             cx,
         );
+    }
+
+    /// Posts what a line comment's box holds on its lines, as `target` says;
+    /// the box goes once GitHub has it.
+    pub(super) fn post_line_comment(
+        &mut self,
+        draft: u64,
+        head: String,
+        comment: gh::LineComment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy.is_some() || comment.body.trim().is_empty() {
+            return;
+        }
+        // The box's lines are of the diff of `head`, the commit it was opened
+        // on. A new review is made on that commit, so they land where they
+        // were seen (GitHub marks them outdated if a push moved them). A
+        // review in progress has its own commit, which takes no other.
+        if let gh::ThreadTarget::Pending(_) = &comment.target
+            && let Some(pending) = &self.detail.pending_review
+            // a commit GitHub did not give is left to GitHub to judge
+            && !pending.commit.is_empty()
+            && pending.commit != head
+        {
+            self.error = Some(
+                "Your review in progress was started on another commit of this pull request, \
+                 and its comments are on that commit's lines. Finish or discard it, then add \
+                 this comment again."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        let id = self.detail.id.clone();
+        self.sent = Some(Sent::Draft(draft, comment.body.clone()));
+        self.send(
+            COMMENTING,
+            move |client, repo, token| gh::comment_on_lines(client, repo, token, id, head, comment),
+            window,
+            cx,
+        );
+    }
+
+    /// Answers thread `thread`, into the viewer's pending review when there
+    /// is one.
+    pub(super) fn post_reply(
+        &mut self,
+        thread: String,
+        body: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy.is_some() || body.trim().is_empty() {
+            return;
+        }
+        let pending = self
+            .detail
+            .pending_review
+            .as_ref()
+            .map(|review| review.id.clone());
+        self.sent = Some(Sent::Reply(thread.clone(), body.clone()));
+        self.send(
+            COMMENTING,
+            move |client, repo, token| gh::reply(client, repo, token, thread, body, pending),
+            window,
+            cx,
+        );
+    }
+
+    /// Resolves thread `thread`, or opens it again.
+    pub(super) fn set_resolved(
+        &mut self,
+        thread: String,
+        resolved: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send(
+            RESOLVING,
+            move |client, repo, token| gh::resolve(client, repo, token, thread, resolved),
+            window,
+            cx,
+        );
+    }
+
+    /// Asks before dropping the viewer's pending review and its comments.
+    fn confirm_discard_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.detail.pending_review.clone() else {
+            return;
+        };
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            let id = pending.id.clone();
+            alert
+                .title("Discard your review?")
+                .description(format!(
+                    "Its {} pending comment{} go{} too. GitHub has no undo for this.",
+                    pending.comments,
+                    if pending.comments == 1 { "" } else { "s" },
+                    if pending.comments == 1 { "es" } else { "" },
+                ))
+                .confirm()
+                .ok_text("Discard review")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let id = id.clone();
+                    let _ = view.update(cx, |view, cx| {
+                        view.send(
+                            DISCARDING,
+                            move |client, repo, token| gh::discard_review(client, repo, token, id),
+                            window,
+                            cx,
+                        )
+                    });
+                    true
+                })
+        });
     }
 
     /// The merge box, under the conversation of an open pull request: whether
@@ -649,9 +817,10 @@ pub(super) fn review_button(
         return None;
     }
     let busy = composer.read(cx).busy;
-    let label = match busy {
-        Some(REVIEWING) => REVIEWING,
-        _ => "Submit a review",
+    let label: SharedString = match (busy, &detail.pending_review) {
+        (Some(REVIEWING), _) => REVIEWING.into(),
+        (_, Some(pending)) => format!("Finish your review ({})", pending.comments).into(),
+        _ => "Submit a review".into(),
     };
     let composer = composer.clone();
     Some(
