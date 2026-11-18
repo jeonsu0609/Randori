@@ -17,7 +17,7 @@ use gg_lib::messages::mutations::{
     MoveRef, MoveRevisions, MutationResult, RebaseBranch, RedoOperation, RenameBookmark,
     SplitRevision, TrackBookmark, UndoOperation, UntrackBookmark,
 };
-use gg_lib::messages::{InputResponse, RevHeader, RevId, RevSet, StoreRef, TreePath};
+use gg_lib::messages::{CommitId, InputResponse, RevHeader, RevId, RevSet, StoreRef, TreePath};
 use gg_lib::worker::Mutation;
 use gpui_kit::component::{
     ActiveTheme as _, WindowExt as _,
@@ -262,6 +262,171 @@ impl RepoView {
                 cx,
             );
         }
+    }
+
+    /// Moves the selected revision's changes into its parent and abandons it,
+    /// as `jj squash -r`: the parent keeps both descriptions, and the
+    /// revision's children move onto the parent. Undo brings it back.
+    pub(super) fn squash_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked_by_pick(window, cx) {
+            return;
+        }
+        if self.refuse_if_immutable("Squash", window, cx) {
+            return;
+        }
+        let Some(ix) = self.selected else {
+            return;
+        };
+        let (id, to_id) = match self.squash_target(ix) {
+            Ok(target) => target,
+            Err(reason) => {
+                window.push_notification(Notification::warning(reason).title("Squash"), cx);
+                return;
+            }
+        };
+        self.run_mutation(
+            "Squash into parent",
+            Box::new(MoveChanges {
+                from: RevSet {
+                    from: id.clone(),
+                    to: id,
+                },
+                to_id,
+                paths: vec![],
+            }),
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Row `ix`'s revision and its one parent, to squash it into, or why
+    /// not, as far as the log shows: a merge has no one parent, and jj does
+    /// not rewrite an immutable parent (a parent outside the log is left to
+    /// jj).
+    pub(super) fn squash_target(&self, ix: usize) -> Result<(RevId, CommitId), &'static str> {
+        let row = self
+            .log
+            .rows
+            .get(ix)
+            .ok_or("The revision is not in the log.")?;
+        let parent = match row.revision.parent_ids.as_slice() {
+            [parent] => parent,
+            [] => return Err("The root revision has no parent."),
+            _ => return Err("A merge has more than one parent to squash into."),
+        };
+        let immutable = self
+            .log
+            .row_of_commit
+            .get(&parent.hex)
+            .and_then(|&at| self.log.rows.get(at))
+            .is_some_and(|parent| parent.revision.is_immutable);
+        if immutable {
+            return Err(
+                "The parent is immutable. Change `immutable_heads()` in jj config to rewrite it.",
+            );
+        }
+        Ok((row.revision.id.clone(), parent.clone()))
+    }
+
+    /// Row `ix`'s commit on GitHub, when the workspace's GitHub remote has
+    /// it: the revision is immutable (trunk and what is under it) or under a
+    /// bookmark of that remote in the log. Elsewhere the page would be a 404.
+    /// Immutable is a guess: a tag never pushed makes a revision immutable
+    /// too. It stands for the bookmark the log may not lead to (in Mine, the
+    /// rows between are not there); asking jj (`::remote_bookmarks()`) would
+    /// be exact, but the menu is built as it opens, with no time to.
+    pub(super) fn commit_link(&self, ix: usize) -> Option<String> {
+        let workspace = self.workspace.as_ref()?;
+        let (remote, repo) = crate::github::GitHubRepo::pick_named(&workspace.remote_urls)?;
+        let row = self.log.rows.get(ix)?;
+        (row.revision.is_immutable || self.under_remote_bookmark(ix, remote))
+            .then(|| repo.commit_url(&row.revision.id.commit.hex))
+    }
+
+    /// Whether row `ix` is a bookmark of `remote` or an ancestor of one, as far
+    /// as the log's rows go.
+    fn under_remote_bookmark(&self, ix: usize, remote: &str) -> bool {
+        let rows = &self.log.rows;
+        let mut queue: std::collections::VecDeque<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.revision.refs.iter().any(|r| {
+                    matches!(r, StoreRef::RemoteBookmark { remote_name, .. } if remote_name == remote)
+                })
+            })
+            .map(|(at, _)| at)
+            .collect();
+        let mut seen: std::collections::HashSet<usize> = queue.iter().copied().collect();
+        while let Some(at) = queue.pop_front() {
+            if at == ix {
+                return true;
+            }
+            for parent in &rows[at].revision.parent_ids {
+                if let Some(&next) = self.log.row_of_commit.get(&parent.hex)
+                    && seen.insert(next)
+                {
+                    queue.push_back(next);
+                }
+            }
+        }
+        false
+    }
+
+    /// The selected revision's change id (`change`) or commit id, whole, on
+    /// the clipboard.
+    pub(super) fn copy_selected_id(&self, change: bool, cx: &mut Context<Self>) {
+        let Some(header) = self.selected_header() else {
+            return;
+        };
+        copy_to_clipboard(
+            if change {
+                header.id.change.hex.clone()
+            } else {
+                header.id.commit.hex.clone()
+            },
+            cx,
+        );
+    }
+
+    /// The selected revision's page on GitHub, on the clipboard. The menu
+    /// offers it only where there is one; from the palette, a note says why not.
+    pub(super) fn copy_selected_link(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected.and_then(|ix| self.commit_link(ix)) {
+            Some(link) => copy_to_clipboard(link, cx),
+            None => window.push_notification(
+                Notification::info(
+                    "The revision is not on the workspace's GitHub remote: push it first.",
+                )
+                .title("No link to copy"),
+                cx,
+            ),
+        }
+    }
+
+    /// The inspected revision's commit id, whole, on the clipboard (a click on
+    /// the inspector's Commit).
+    pub(super) fn copy_inspected_commit_id(&self, cx: &mut Context<Self>) {
+        if let Some(detail) = &self.inspected.detail {
+            copy_to_clipboard(detail.header.id.commit.hex.clone(), cx);
+        }
+    }
+
+    /// Selects the inspected revision's parent `n` (a click on one of the
+    /// inspector's Parents), widening the log when it does not have it.
+    pub(super) fn go_to_parent(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .inspected
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.parent_ids.get(n))
+            .cloned()
+        else {
+            return;
+        };
+        let row = self.log.row_of_commit.get(&id.commit.hex).copied();
+        self.select_or_reveal(&id, row, window, cx);
     }
 
     /// Abandon is destructive, so it asks first.
@@ -1146,4 +1311,9 @@ impl RepoView {
 /// own form.
 pub(super) fn full_path(root: &std::path::Path, repo_path: &str) -> PathBuf {
     root.join(repo_path.split('/').collect::<PathBuf>())
+}
+
+/// Puts `text` on the clipboard.
+pub(super) fn copy_to_clipboard(text: String, cx: &mut gpui_kit::App) {
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
 }

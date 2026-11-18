@@ -166,7 +166,7 @@ impl RepoView {
 
     /// Selects revision `id`: its row, or, when the log does not have it, the
     /// log widened to take it in (the revset field shows how).
-    fn select_or_reveal(
+    pub(super) fn select_or_reveal(
         &mut self,
         id: &RevId,
         row: Option<usize>,

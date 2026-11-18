@@ -9,7 +9,16 @@ use super::*;
 /// tab, so the menu shows the same key bindings as the keyboard. An immutable
 /// revision's rewrites are offered disabled: jj would refuse them, and
 /// "Rebase onto…" on, say, trunk moves trunk, not one's work onto it.
-pub(super) fn revision_menu(menu: PopupMenu, immutable: bool, focus: FocusHandle) -> PopupMenu {
+/// `no_squash`: a merge, or a revision on an immutable parent, is not
+/// squashed; `linkable`: the link is to the commit on GitHub, so it is
+/// offered for a commit there.
+pub(super) fn revision_menu(
+    menu: PopupMenu,
+    immutable: bool,
+    no_squash: bool,
+    linkable: bool,
+    focus: FocusHandle,
+) -> PopupMenu {
     use actions::*;
     menu.action_context(focus)
         .menu("New change", Box::new(NewChild))
@@ -17,11 +26,20 @@ pub(super) fn revision_menu(menu: PopupMenu, immutable: bool, focus: FocusHandle
         .menu("Describe", Box::new(DescribeRevision))
         .separator()
         .menu_with_disabled("Rebase onto…", Box::new(PickRebase), immutable)
+        .menu_with_disabled(
+            "Squash into parent",
+            Box::new(SquashRevision),
+            immutable || no_squash,
+        )
         .menu("Create bookmark…", Box::new(CreateBookmark))
         .menu("Push bookmarks", Box::new(Push))
         .separator()
         .menu("Duplicate", Box::new(DuplicateRevision))
         .menu("Back out", Box::new(BackoutRevision))
+        .separator()
+        .menu("Copy change ID", Box::new(CopyChangeId))
+        .menu("Copy commit ID", Box::new(CopyCommitId))
+        .menu_with_disabled("Copy link to commit", Box::new(CopyCommitLink), !linkable)
         .separator()
         .menu_with_disabled("Abandon…", Box::new(AbandonRevision), immutable)
 }

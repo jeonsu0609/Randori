@@ -46,6 +46,7 @@ impl RepoView {
         let issues = crate::issue_links::find(&description_text, cx);
         let subject_limits = settings::get(cx).display.subject_limits;
 
+        let primary = theme.primary;
         let fact = |label: &'static str, value: AnyElement| {
             v_flex()
                 .gap_0p5()
@@ -223,26 +224,57 @@ impl RepoView {
                             .to_string()
                             .into_any_element(),
                     ))
+                    // the commit id copies, as GitKraken's SHA does; a parent
+                    // goes to its row
                     .child(fact(
                         "Commit",
                         div()
+                            .id("commit-id")
                             .font_family(theme.mono_font_family.clone())
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(primary))
                             .child(
                                 header.id.commit.prefix.clone()
                                     + &header.id.commit.rest[..6.min(header.id.commit.rest.len())],
+                            )
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("Copy commit ID")
+                                    .build(window, cx)
+                            })
+                            .on_click(
+                                cx.listener(|view, _, _, cx| view.copy_inspected_commit_id(cx)),
                             )
                             .into_any_element(),
                     ))
                     .child(fact(
                         "Parents",
-                        div()
-                            .font_family(theme.mono_font_family.clone())
-                            .child(if detail.parents.is_empty() {
-                                "none".to_owned()
-                            } else {
-                                detail.parents.join(", ")
-                            })
-                            .into_any_element(),
+                        if detail.parent_ids.is_empty() {
+                            div()
+                                .font_family(theme.mono_font_family.clone())
+                                .child("none")
+                                .into_any_element()
+                        } else {
+                            h_flex()
+                                .gap_2()
+                                .font_family(theme.mono_font_family.clone())
+                                .children(detail.parents.iter().enumerate().map(|(n, label)| {
+                                    div()
+                                        .id(("parent", n))
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(primary))
+                                        .child(label.clone())
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                "Go to parent",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.go_to_parent(n, window, cx)
+                                        }))
+                                }))
+                                .into_any_element()
+                        },
                     )),
             )
             .child(
