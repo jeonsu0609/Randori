@@ -21,7 +21,7 @@ use jj_cli::{
 use jj_lib::{
     backend::{CommitId, TreeValue},
     conflicts::{self, ConflictMarkerStyle, ConflictMaterializeOptions, MaterializedTreeValue},
-    files::FileMergeHunkLevel,
+    files::{FileMergeHunkLevel, MergeOptions},
     git::{
         self, GitFetchRefExpression, GitPushOptions, GitPushRefTargets, GitSettings,
         GitSubprocessOptions, REMOTE_NAME_FOR_LOCAL_GIT_REPO,
@@ -41,7 +41,6 @@ use jj_lib::{
     store::Store,
     str_util::StringExpression,
     transaction::Transaction,
-    tree_merge::MergeOptions,
 };
 use pollster::FutureExt as _;
 
@@ -297,13 +296,11 @@ impl Mutation for GitFetch {
                     .unwrap_or_else(StringExpression::all),
                 ),
             };
-            let refspecs = git::expand_fetch_refspecs(
-                RemoteName::new(remote_name),
-                GitFetchRefExpression {
-                    bookmark: bookmark_expr,
-                    tag: tag_expr,
-                },
-            )?;
+            // jj expands it into refspecs as it fetches
+            let refs = GitFetchRefExpression {
+                bookmark: bookmark_expr,
+                tag: tag_expr,
+            };
 
             let result = auth_ctx.with_callbacks(
                 Some(progress_sender.clone()),
@@ -316,7 +313,7 @@ impl Mutation for GitFetch {
                         git::GitFetch::new(tx.repo_mut(), subprocess_options, &import_options)?;
 
                     fetcher
-                        .fetch(RemoteName::new(remote_name), refspecs, cb, None)
+                        .fetch(RemoteName::new(remote_name), &refs, cb, None)
                         .context("failed to fetch")?;
 
                     pollster::block_on(fetcher.import_refs()).context("failed to import refs")?;

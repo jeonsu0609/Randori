@@ -1,4 +1,4 @@
-# Randori: jj-lib 0.46 needs rustc 1.97.1+, and gpui-pre 0.3.11 uses library
+# Randori: jj-lib 0.47 needs rustc 1.97.1+, and gpui-pre 0.3.12 uses library
 # features stabilized after 1.97 (result_option_map_or_default). Pinned here so
 # the machine-wide default toolchain does not have to move.
 [toolchain]

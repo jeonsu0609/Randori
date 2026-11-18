@@ -336,7 +336,7 @@ unchanged.
 
 ## Running
 
-Randori needs Rust 1.99.1, pinned in `rust-toolchain.toml` (jj-lib 0.46 and
+Randori needs Rust 1.99.1, pinned in `rust-toolchain.toml` (jj-lib 0.47 and
 GPUI both require a recent compiler; rustup installs it on first build), and
 git 2.42 or newer for jj's git operations. If an older git comes first on
 `PATH`, point jj at a newer one; Randori reads the same setting:
