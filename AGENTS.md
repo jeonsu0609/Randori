@@ -54,12 +54,14 @@ cancels the run for the push before it. `main` takes changes through pull
 requests only; CI is not a required check, since a documentation change runs
 none.
 
-The gpui-kit fork (`jeonsu0609/gpui-kit`, see
-[`doc/randori/gpui-kit-patch.md`](doc/randori/gpui-kit-patch.md)) keeps
-`main` as upstream's, one branch per upstream pull request (off upstream
-`main`, rebased onto it and pushed with `--force-with-lease` to update, deleted
-once merged), and `randori/v<version>`: that release with the patches Randori
-needs, cherry-picked, whose commit `[patch.crates-io]` pins.
+Randori uses gpui-kit's crates.io releases. The gpui-kit fork
+(`jeonsu0609/gpui-kit`) keeps `main` as upstream's and one branch per upstream
+pull request (off upstream `main`, rebased onto it and pushed with
+`--force-with-lease` to update, deleted once merged). A change Randori needs
+before a release has it goes on a `randori/v<version>` branch, that release
+with the change cherry-picked, pinned for every gpui-kit crate by
+`[patch.crates-io]` (they must come from one commit, or gpui-component builds
+against a second gpui-base), until a release has it; 0.10.0 ended the last one.
 
 ## Releases
 

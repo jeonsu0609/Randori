@@ -491,12 +491,10 @@ src/messages     request and response types shared with the UI
   `src/messages`, `src/config`, `src/askpass.rs`). GG's Tauri app, web mode and
   Svelte frontend are not part of Randori; GG's documentation is kept in
   [`doc/gg/`](doc/gg/).
-- gpui-kit comes from Randori's fork, `jeonsu0609/gpui-kit`: the 0.9.0
-  release plus three changes (a ratio for the two sides of a split diff, the
-  file header kept in view when a diff switches modes, and
-  `keep_text_selection` for buttons that act on a text selection), through
-  `[patch.crates-io]`. What changed and how to update it:
-  [`doc/randori/gpui-kit-patch.md`](doc/randori/gpui-kit-patch.md).
+- gpui-kit is the crates.io release (0.10.0). The three changes Randori once
+  built from its fork (a ratio for the two sides of a split diff, the file
+  header kept in view when a diff switches modes, and `keep_text_selection`
+  for buttons that act on a text selection) are in gpui-kit since 0.10.0.
 
 ## Based on GG
 

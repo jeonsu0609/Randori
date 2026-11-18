@@ -158,8 +158,8 @@ echo "ui-flow-test: split off what is included: ok"
 # full view (⇧⌘D), whose diff has the height the changes panel lacks in a small
 # window, over the new line numbers of lines 2 and 3, 25 points left of their
 # boxes (`@line:new:2-25+0`); Esc goes back to commit. The click on Include
-# lines is the one gpui-kit used to clear the selection for (see
-# doc/randori/gpui-kit-patch.md).
+# lines is the one gpui-kit cleared the selection for before 0.10.0
+# (`keep_text_selection`).
 rm -rf "$work/repo"
 mkdir -p "$work/repo"
 (
