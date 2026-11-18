@@ -62,11 +62,16 @@ impl GitHubRepo {
 
     /// `origin` if it is on GitHub, otherwise the first remote that is.
     pub fn pick(remotes: &[(String, String)]) -> Option<Self> {
+        Self::pick_named(remotes).map(|(_, repo)| repo)
+    }
+
+    /// [`Self::pick`]'s repository with the name of the remote it is.
+    pub fn pick_named(remotes: &[(String, String)]) -> Option<(&str, Self)> {
         remotes
             .iter()
             .filter(|(name, _)| name == "origin")
             .chain(remotes.iter())
-            .find_map(|(_, url)| Self::from_remote_url(url))
+            .find_map(|(name, url)| Some((name.as_str(), Self::from_remote_url(url)?)))
     }
 
     /// The REST API's URL for `path` (which starts with `/`).
@@ -88,6 +93,11 @@ impl GitHubRepo {
 
     pub fn web_url(&self) -> String {
         format!("https://{}/{}/{}", self.host, self.owner, self.name)
+    }
+
+    /// The page of commit `sha`.
+    pub fn commit_url(&self, sha: &str) -> String {
+        format!("{}/commit/{sha}", self.web_url())
     }
 }
 

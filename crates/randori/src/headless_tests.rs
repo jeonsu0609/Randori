@@ -383,6 +383,96 @@ fn the_file_s_path_is_copied(cx: &mut TestAppContext) {
     );
 }
 
+/// The menu's copies: the selected revision's ids, whole, as jj writes them.
+#[gpui::test]
+fn a_revision_s_ids_are_copied(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = commit_repo(dir.path());
+    let (_view, cx) = open(&repo, cx);
+    let copied = |cx: &mut VisualTestContext| {
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default()
+    };
+    let id = |template: &str| {
+        jj(
+            &repo,
+            &[
+                "--ignore-working-copy",
+                "log",
+                "-r",
+                "@",
+                "--no-graph",
+                "-T",
+                template,
+            ],
+        )
+    };
+
+    cx.dispatch_action(crate::repo_view::actions::CopyChangeId);
+    assert_eq!(copied(cx), id("change_id"));
+    cx.dispatch_action(crate::repo_view::actions::CopyCommitId);
+    assert_eq!(copied(cx), id("commit_id"));
+}
+
+/// The link to a commit is offered where GitHub has it: base, under
+/// `qa@origin`, but not w2, on no remote bookmark.
+#[gpui::test]
+fn a_link_is_offered_for_a_commit_on_github(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    jj(
+        &repo,
+        &[
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/name.git",
+        ],
+    );
+    // qa as if fetched from origin: its git ref, imported
+    let qa = jj(&repo, &["log", "-r", "qa", "--no-graph", "-T", "commit_id"]);
+    let git_dir = jj(&repo, &["git", "root"]);
+    let out = Command::new("git")
+        .args([
+            "--git-dir",
+            git_dir.trim(),
+            "update-ref",
+            "refs/remotes/origin/qa",
+            &qa,
+        ])
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    jj(&repo, &["git", "import"]);
+    let base = jj(
+        &repo,
+        &["log", "-r", "qa-", "--no-graph", "-T", "commit_id"],
+    );
+    let (view, cx) = open(&repo, cx);
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    let (base_link, w2) = view.read_with(cx, |view, _| (view.link_of_row(4), view.link_of_row(1)));
+    assert_eq!(
+        base_link,
+        Some(format!("https://github.com/owner/name/commit/{base}"))
+    );
+    assert_eq!(w2, None);
+}
+
 /// base; qa1 (qa) on it; w1, w2 (topic) on base with the working copy on
 /// topic.
 fn branch_repo(holder: &Path) -> std::path::PathBuf {
@@ -399,6 +489,101 @@ fn branch_repo(holder: &Path) -> std::path::PathBuf {
     }
     jj(dir, &["bookmark", "create", "-r", "@-", "topic"]);
     dir.clone()
+}
+
+/// w2 selected, Squash into parent: as `jj squash -r w2`, w1 has both files
+/// and both descriptions, and w2 is gone.
+#[gpui::test]
+fn squash_a_revision_into_its_parent(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    keys(&view, "down", cx);
+    cx.dispatch_action(crate::repo_view::actions::SquashRevision);
+    settle(&view, cx);
+
+    assert_eq!(
+        changed(&repo, "description(substring:\"w1\")"),
+        "w1.txt w2.txt"
+    );
+    let w2 = jj(
+        &repo,
+        &[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "description(exact:\"w2\n\")",
+            "--no-graph",
+            "-T",
+            "change_id",
+        ],
+    );
+    assert_eq!(w2, "");
+}
+
+/// Squash into parent is not offered where jj would refuse it: on qa1, whose
+/// parent (base) a tag makes immutable. w2's parent is not.
+#[gpui::test]
+fn no_squash_into_an_immutable_parent(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    jj(&repo, &["tag", "set", "-r", "qa-", "v1"]);
+    let (view, cx) = open(&repo, cx);
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    let (qa1, w2) = view.read_with(cx, |view, _| {
+        (view.squash_refused(3), view.squash_refused(1))
+    });
+    assert!(qa1);
+    assert!(!w2);
+}
+
+/// In the inspector, a click on Commit copies the whole commit id and one on a
+/// parent selects it: w2's is w1.
+#[gpui::test]
+fn the_inspector_s_commit_copies_and_its_parent_goes(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    keys(&view, "down", cx);
+    view.update(cx, |view, cx| view.click_commit(cx));
+    let copied = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default();
+    let w2 = jj(
+        &repo,
+        &[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "description(exact:\"w2\n\")",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ],
+    );
+    assert_eq!(copied, w2);
+
+    view.update_in(cx, |view, window, cx| view.click_parent(0, window, cx));
+    settle(&view, cx);
+    assert_eq!(view.read_with(cx, |view, _| view.selected_row()), Some(2));
 }
 
 /// w1 selected, R, qa1 chosen with the keys and Enter: as `jj rebase -r w1

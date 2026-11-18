@@ -148,6 +148,22 @@ impl RepoView {
             }),
         )
         .on_action(
+            cx.listener(|view, _: &actions::SquashRevision, window, cx| {
+                view.squash_selected(window, cx)
+            }),
+        )
+        .on_action(
+            cx.listener(|view, _: &actions::CopyChangeId, _, cx| view.copy_selected_id(true, cx)),
+        )
+        .on_action(
+            cx.listener(|view, _: &actions::CopyCommitId, _, cx| view.copy_selected_id(false, cx)),
+        )
+        .on_action(
+            cx.listener(|view, _: &actions::CopyCommitLink, window, cx| {
+                view.copy_selected_link(window, cx)
+            }),
+        )
+        .on_action(
             cx.listener(|view, _: &actions::CreateBookmark, window, cx| {
                 view.prompt_create_bookmark(window, cx)
             }),
@@ -213,9 +229,7 @@ impl RepoView {
         }))
         .on_action(cx.listener(|view, _: &actions::CopyFullFilePath, _, cx| {
             if let Some(path) = view.selected_file_full_path() {
-                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                    path.to_string_lossy().into_owned(),
-                ))
+                super::ops::copy_to_clipboard(path.to_string_lossy().into_owned(), cx)
             }
         }))
         .on_action(cx.listener(|view, _: &actions::SquashHunk, window, cx| {

@@ -525,6 +525,26 @@ impl RandoriApp {
                     Box::new(repo::BackoutRevision),
                 ),
                 (
+                    "Squash revision into parent",
+                    IconName::ArrowDownToLine,
+                    Box::new(repo::SquashRevision),
+                ),
+                (
+                    "Copy change ID",
+                    IconName::Copy,
+                    Box::new(repo::CopyChangeId),
+                ),
+                (
+                    "Copy commit ID",
+                    IconName::Copy,
+                    Box::new(repo::CopyCommitId),
+                ),
+                (
+                    "Copy link to commit",
+                    IconName::ExternalLink,
+                    Box::new(repo::CopyCommitLink),
+                ),
+                (
                     "Squash file into parent",
                     IconName::ArrowDownToLine,
                     Box::new(repo::SquashFile),

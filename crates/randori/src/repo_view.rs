@@ -168,7 +168,11 @@ pub mod actions {
             DuplicateRevision,
             AbandonRevision,
             BackoutRevision,
+            SquashRevision,
             CreateBookmark,
+            CopyChangeId,
+            CopyCommitId,
+            CopyCommitLink,
             // bookmarks (on the ref the context menu was opened on)
             PushBookmark,
             RenameBookmark,
@@ -876,6 +880,30 @@ impl RepoView {
     #[cfg(any(test, feature = "screenshot"))]
     pub fn selected_row(&self) -> Option<usize> {
         self.selected
+    }
+
+    /// Whether the menu offers no Squash into parent for row `ix` (the tests').
+    #[cfg(test)]
+    pub(crate) fn squash_refused(&self, ix: usize) -> bool {
+        self.squash_target(ix).is_err()
+    }
+
+    /// A click on the inspector's Commit (the tests').
+    #[cfg(test)]
+    pub(crate) fn click_commit(&self, cx: &mut Context<Self>) {
+        self.copy_inspected_commit_id(cx)
+    }
+
+    /// A click on the inspector's parent `n` (the tests').
+    #[cfg(test)]
+    pub(crate) fn click_parent(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_parent(n, window, cx)
+    }
+
+    /// Row `ix`'s link on GitHub, as the menu offers it (the tests').
+    #[cfg(test)]
+    pub(crate) fn link_of_row(&self, ix: usize) -> Option<String> {
+        self.commit_link(ix)
     }
 
     /// Selects a log row by index (used by `--select-row`).

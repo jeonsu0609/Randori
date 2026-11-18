@@ -1050,6 +1050,7 @@ impl RepoView {
                                         let owner = owner.clone();
                                         let menu_owner = owner.clone();
                                         let drop_owner = owner.clone();
+                                        let link_owner = owner.clone();
                                         let focus = focus.clone();
                                         let immutable = rows[ix].is_immutable;
                                         let email = rows[ix].author_email.as_ref();
@@ -1161,8 +1162,27 @@ impl RepoView {
                                                 });
                                             }
                                         })
-                                        .context_menu(move |menu, _, _| {
-                                            revision_menu(menu, immutable, focus.clone())
+                                        .context_menu({
+                                            move |menu, _, cx| {
+                                                // looked at as the menu opens, not as rows draw
+                                                let (no_squash, linkable) = link_owner
+                                                    .upgrade()
+                                                    .map(|view| {
+                                                        let view = view.read(cx);
+                                                        (
+                                                            view.squash_target(ix).is_err(),
+                                                            view.commit_link(ix).is_some(),
+                                                        )
+                                                    })
+                                                    .unwrap_or_default();
+                                                revision_menu(
+                                                    menu,
+                                                    immutable,
+                                                    no_squash,
+                                                    linkable,
+                                                    focus.clone(),
+                                                )
+                                            }
                                         })
                                         .into_any_element()
                                     })
