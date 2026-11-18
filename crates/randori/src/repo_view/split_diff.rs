@@ -3,9 +3,12 @@
 //! From the keyboard, the palette and the View menu widen either side or even
 //! them. The ratio is a display setting, shared by every tab and diff.
 //!
-//! Split diffs wrap long lines, so each side fits its column and the divider
-//! stays where it is drawn; with horizontal scrolling the two sides would
-//! scroll together and the modified side would start off screen.
+//! Diffs wrap long lines, in both layouts. Split, so each side fits its column
+//! and the divider stays where it is drawn: with horizontal scrolling the two
+//! sides would scroll together and the modified side would start off screen.
+//! Unified, so a line reads to its end without scrolling, as on GitHub, and a
+//! review comment's box under a line is as wide as the screen rather than the
+//! longest line.
 
 use gpui_kit::component::diff::DiffFileStatus;
 
@@ -105,8 +108,7 @@ impl RepoView {
                     DiffFileStatus::Unchanged | DiffFileStatus::Conflicted
                 )
             });
-        let split = self.diff_mode == DiffMode::Split;
-        let diff = diff.soft_wrap(split).split_ratio(ratio).size_full();
+        let diff = diff.soft_wrap(true).split_ratio(ratio).size_full();
         if !two_sides {
             return div().size_full().child(diff).into_any_element();
         }
