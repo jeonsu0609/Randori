@@ -10,6 +10,8 @@
 //! - `click:X;Y`, `cmdclick:X;Y` (with ⌘), `rclick:X;Y`, `dblclick:X;Y` and
 //!   `drag:X1;Y1;X2;Y2`: the mouse pressed at window points
 //! - `resize:WxH`: the window made W by H points, as by dragging its corner
+//! - `wait:MS`: MS milliseconds for what the tab's settling does not wait
+//!   on (GitHub's answers), then a frame drawn
 //! - `move:X;Y`: the pointer moved there, no button, to hover
 //! - `scroll:X;Y;DY`: the wheel turned DY points there
 //! - in any of these pointer steps, a point can be `@name` instead: the
@@ -75,6 +77,21 @@ pub async fn run(
                 });
             }
             wait_until_settled(cx, app).await;
+            continue;
+        }
+        // time for what the tab's settling does not wait on: GitHub's answers
+        if let Some(ms) = key.strip_prefix("wait:") {
+            let Ok(ms) = ms.parse::<u64>() else {
+                eprintln!("keys: wait needs milliseconds, e.g. wait:2000");
+                std::process::exit(2);
+            };
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(ms))
+                .await;
+            let _ = window.update(cx, |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
             continue;
         }
         if let Some(spec) = key.strip_prefix("bench:") {
