@@ -267,6 +267,10 @@ impl PullComposer {
     /// without words, the others with; the author's own pull request takes
     /// comments only.
     pub(super) fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // what would be written now could not be sent
+        if self.busy.is_some() {
+            return;
+        }
         let own = self.detail.viewer_is_author;
         let event = Rc::new(Cell::new(ReviewEvent::Comment));
         let missing = Rc::new(Cell::new(false));
@@ -424,9 +428,9 @@ impl PullComposer {
             Mergeability::Conflicting => {
                 Some("Resolve them on GitHub, or merge the base into the branch and push.")
             }
-            Mergeability::Behind => {
-                Some("Update the branch on GitHub, or merge the base into it and push.")
-            }
+            Mergeability::Behind => Some(
+                "GitHub refuses the merge if the branch's rules want it up to date: update it on GitHub, or merge the base into it and push.",
+            ),
             Mergeability::Blocked => {
                 Some("Someone allowed to bypass the rules can merge it on GitHub.")
             }
@@ -603,7 +607,7 @@ impl PullComposer {
                             .child(
                                 div()
                                     .harness_mark(|| "pull-comment-field")
-                                    .child(Textarea::new(&self.comment)),
+                                    .child(Textarea::new(&self.comment).aria_label("Comment")),
                             )
                             .child(
                                 h_flex()
