@@ -24,6 +24,7 @@ use crate::github::pull::{
     self as gh, Person, PullDetail, PullState, ReviewState, Side, TimelineItem,
 };
 use crate::github::{Checks, FetchError, Review};
+use crate::harness_mark::HarnessMark as _;
 use futures::FutureExt as _;
 
 /// Checks listed before the rest are counted only.
@@ -38,6 +39,7 @@ pub(super) const PULL_CONTEXT: &str = "RandoriPull";
 /// Where Esc closes the view: anywhere in it but a field.
 pub(super) const PULL_KEYS: &str = "RandoriPull && !Input";
 
+mod review;
 mod write;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -152,6 +154,18 @@ pub(super) struct PullView {
     /// through reloads.
     comment: Entity<TextareaState>,
     _comment_events: gpui_kit::Subscription,
+    /// Line comments being written in Files changed, under their lines.
+    drafts: Vec<review::Draft>,
+    /// The lines last dragged over in Files changed.
+    selection: review::DraggedLines,
+    /// The head of the diff shown, once it is in: what a comment box's lines
+    /// are of. `head_oid` moves to a push as the list sees it, before the
+    /// diff of it is in.
+    diff_head: Option<String>,
+    _diff_events: gpui_kit::Subscription,
+    next_draft: u64,
+    /// Replies being written under threads, by the thread's id.
+    replies: HashMap<String, review::Reply>,
     /// Among the list's open pull requests at its last refresh; leaving them
     /// (merged, closed) reloads the detail once. The list holds the 30 last
     /// updated: one pushed out of them reloads once too, to the same page.
@@ -171,7 +185,7 @@ struct Overview {
     facts: Entity<PullFacts>,
     composer: Entity<PullComposer>,
     /// Dropped with the view, so closed pull requests leave nothing behind.
-    _events: [gpui_kit::Subscription; 2],
+    _events: [gpui_kit::Subscription; 3],
 }
 
 impl Overview {
@@ -248,8 +262,8 @@ pub(super) struct PullComposer {
     /// The repository and token merges, comments and reviews go with (the
     /// detail's); kept in memory only, as the list's.
     access: (github::GitHubRepo, String),
-    /// The comment on its way, to empty the box once GitHub has it.
-    pending_comment: Option<String>,
+    /// What is on its way that a box holds, to empty it once GitHub has it.
+    sent: Option<Sent>,
     /// What is on its way to GitHub, on the buttons: one request at a time.
     busy: Option<&'static str>,
     /// Why the last request failed, shown above the comment box.
@@ -287,10 +301,23 @@ impl Render for PullComposer {
 /// "Show in the graph", from the side column.
 pub(super) struct ShowHead;
 
+/// Text on its way to GitHub, by the box it came from.
+#[derive(Clone)]
+pub(super) enum Sent {
+    /// The comment box's.
+    Comment(String),
+    /// A line comment's box (the tab's draft `id`).
+    Draft(u64, String),
+    /// A reply's box under a thread (its id).
+    Reply(String, String),
+}
+
 pub(super) enum OverviewEvent {
     /// A merge, comment or review went to GitHub (or was refused): the pull
     /// request and the list reload.
     Changed,
+    /// A line comment or reply GitHub took: its box, the tab's, goes.
+    Posted(Sent),
     /// "Check again", after the view stopped asking whether it can be merged.
     CheckAgain,
 }
@@ -311,6 +338,12 @@ impl RepoView {
         }
         let mode = self.diff_mode;
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode));
+        // the lines dragged over, for the + at their end (see `review`)
+        let _diff_events = cx.subscribe(&diff, |view: &mut RepoView, _, event: &DiffEvent, _| {
+            if let Some(pull) = view.center.pull_mut() {
+                pull.selection.note(event);
+            }
+        });
         let handle = cx.focus_handle();
         handle.focus(window, cx);
         let comment = cx.new(|cx| {
@@ -362,6 +395,12 @@ impl RepoView {
             _diff_task: None,
             comment,
             _comment_events,
+            drafts: Vec::new(),
+            selection: review::DraggedLines::default(),
+            diff_head: None,
+            _diff_events,
+            next_draft: 0,
+            replies: HashMap::new(),
             listed: true,
             unknown_retries: 0,
             _retry: None,
@@ -481,6 +520,8 @@ impl RepoView {
         });
 
         let diff_task = diff_load.map(|load| {
+            // the head this diff is of, for what is written on its lines
+            let diff_head = head.clone();
             cx.spawn(async move |this, cx| {
                 let local = match root {
                     Some(root) => {
@@ -503,7 +544,7 @@ impl RepoView {
                     }
                 };
                 let _ = this.update(cx, |view, cx| {
-                    view.show_pull_files(number, load, files, source, cx)
+                    view.show_pull_files(number, load, files, source, diff_head, cx)
                 });
             })
         });
@@ -628,7 +669,7 @@ impl RepoView {
                             access,
                             busy: None,
                             error: None,
-                            pending_comment: None,
+                            sent: None,
                             method: None,
                             checking_gave_up: gave_up,
                             owner,
@@ -660,7 +701,10 @@ impl RepoView {
                                     }
                                     view.load_pull(true, false, cx);
                                 }
+                                OverviewEvent::Posted(sent) => view.line_comment_posted(sent, cx),
                             }),
+                            // Files changed reads the composer's requests
+                            cx.observe(&composer, |_, _, cx| cx.notify()),
                         ];
                         if let Some(pull) = self.center.pull_mut() {
                             pull.overview = Some(Overview {
@@ -694,6 +738,7 @@ impl RepoView {
         load: u64,
         files: Result<Vec<DiffFile>, String>,
         source: DiffSource,
+        head: String,
         cx: &mut Context<Self>,
     ) {
         let Some(pull) = self
@@ -705,6 +750,7 @@ impl RepoView {
         };
         match files {
             Ok(files) => {
+                pull.diff_head = Some(head);
                 pull.files = Load::Ready(Rc::new(
                     files
                         .iter()
@@ -1268,20 +1314,87 @@ impl RepoView {
                 .threads_total
                 .saturating_sub(detail.threads.len() as u64)
         });
+        // what the cards under the lines write with, read as the tab draws
+        let busy = pull
+            .overview
+            .as_ref()
+            .is_some_and(|overview| overview.composer.read(cx).busy.is_some());
+        let pending = detail
+            .as_ref()
+            .and_then(|detail| detail.pending_review.clone());
+        // what GitHub refused, shown where it was asked for too
+        let error = pull
+            .overview
+            .as_ref()
+            .and_then(|overview| overview.composer.read(cx).error.clone());
+        let cards = review::ReviewCards {
+            owner: cx.entity().downgrade(),
+            writable: self.pull_takes_comments(),
+            busy,
+            pending: pending.is_some(),
+            drafts: Rc::new(
+                pull.drafts
+                    .iter()
+                    .map(|draft| {
+                        (
+                            draft.id,
+                            review::thread_lines(&draft.range),
+                            draft.editor.clone(),
+                        )
+                    })
+                    .collect(),
+            ),
+            replies: Rc::new(
+                pull.replies
+                    .iter()
+                    .map(|(thread, reply)| (thread.clone(), reply.editor.clone()))
+                    .collect(),
+            ),
+        };
+        // a box being written hangs under the last of its lines
+        let drafts = pull.drafts.iter().map(|draft| {
+            DiffAnnotation::line(
+                ("draft", draft.id as usize),
+                DiffLinePosition::new(
+                    draft.range.path().clone(),
+                    draft.range.end_side(),
+                    draft.range.end(),
+                ),
+            )
+        });
         let diff = split_diff::styled_diff(&pull.diff, cx)
             .line_number(true)
-            .annotations(pull.threads.annotations.iter().cloned())
+            .annotations(pull.threads.annotations.iter().cloned().chain(drafts))
+            .when(cards.writable, |diff| {
+                let owner = cx.entity().downgrade();
+                // GitHub's +: beside the line under the pointer, and at the
+                // end of the lines dragged over
+                diff.on_add_annotation(move |range, window, cx| {
+                    let _ = owner.update(cx, |view, cx| {
+                        view.add_line_comment(range.clone(), window, cx)
+                    });
+                })
+            })
             .render_annotation({
                 let detail = detail.clone();
                 move |annotation, _, cx| {
-                    let gpui_kit::ElementId::NamedInteger(_, ix) = annotation.id() else {
+                    let gpui_kit::ElementId::NamedInteger(kind, ix) = annotation.id() else {
                         return div().into_any_element();
                     };
+                    if kind.as_ref() == "draft" {
+                        return cards.draft_card(*ix, cx);
+                    }
                     match detail
                         .as_ref()
                         .and_then(|detail| detail.threads.get(*ix as usize))
                     {
-                        Some(thread) => thread_card(number, *ix as usize, thread, cx),
+                        Some(thread) => thread_card(
+                            number,
+                            *ix as usize,
+                            thread,
+                            cards.thread_actions(thread, cx),
+                            cx,
+                        ),
                         None => div().into_any_element(),
                     }
                 }
@@ -1425,6 +1538,26 @@ impl RepoView {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(div().flex_1().min_w_0().truncate().child(source))
+                    // GitHub's banner over the files: the review in progress
+                    .when_some(pending, |this, pending| {
+                        this.child(div().flex_none().child(format!(
+                            "{} pending comment{}",
+                            pending.comments,
+                            if pending.comments == 1 { "" } else { "s" }
+                        )))
+                        .child(
+                            div().harness_mark(|| "finish-review").child(
+                                Button::new("pull-finish-review")
+                                    .xsmall()
+                                    .success()
+                                    .label("Finish your review")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.finish_review(window, cx)
+                                    })),
+                            ),
+                        )
+                    })
                     .when(outdated > 0, |this| {
                         this.child(format!(
                             "{outdated} outdated thread{} not shown",
@@ -1451,6 +1584,19 @@ impl RepoView {
                             .child("Split"),
                     ),
             )
+            .children(error.map(|error| {
+                h_flex()
+                    .flex_none()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(gpui_kit::component::Icon::new(IconName::CircleX).xsmall())
+                    .child(div().flex_1().min_w_0().child(error))
+            }))
             .child(div().flex_1().min_h_0().child(if files.is_empty() {
                 pull_note(Some("No changes.".into()), cx)
             } else {
@@ -1706,7 +1852,13 @@ fn commit_row(oid: &str, headline: &str, author: &Person, at: &str, cx: &App) ->
 }
 
 /// A review thread under its line.
-fn thread_card(number: u64, ix: usize, thread: &gh::ReviewThread, cx: &App) -> AnyElement {
+fn thread_card(
+    number: u64,
+    ix: usize,
+    thread: &gh::ReviewThread,
+    actions: Option<AnyElement>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     v_flex()
         .mx_3()
@@ -1715,18 +1867,35 @@ fn thread_card(number: u64, ix: usize, thread: &gh::ReviewThread, cx: &App) -> A
         .border_1()
         .border_color(theme.border)
         .bg(theme.background)
-        .when(thread.resolved, |this| {
-            this.child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(theme.success)
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child("Resolved"),
-            )
-        })
+        .when(
+            thread.resolved || thread.pending || thread.start.is_some(),
+            |this| {
+                this.child(
+                    h_flex()
+                        .px_3()
+                        .py_1()
+                        .gap_2()
+                        .text_xs()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        // a thread on several lines says which, as GitHub's does
+                        .when_some(thread.start.zip(thread.line), |this, (start, line)| {
+                            this.child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child(review::range_label(start, (thread.side, line))),
+                            )
+                        })
+                        .when(thread.pending, |this| {
+                            // only the viewer sees it until the review is submitted
+                            this.child(div().text_color(theme.warning).child("Pending"))
+                        })
+                        .when(thread.resolved, |this| {
+                            this.child(div().text_color(theme.success).child("Resolved"))
+                        }),
+                )
+            },
+        )
         .children(thread.comments.iter().enumerate().map(|(cix, comment)| {
             v_flex()
                 .px_3()
@@ -1781,6 +1950,7 @@ fn thread_card(number: u64, ix: usize, thread: &gh::ReviewThread, cx: &App) -> A
                 )
             },
         )
+        .children(actions)
         .into_any_element()
 }
 
@@ -1823,6 +1993,12 @@ mod tests {
 
     fn thread(path: &str, line: Option<u64>) -> gh::ReviewThread {
         gh::ReviewThread {
+            id: String::new(),
+            start: None,
+            pending: false,
+            can_reply: false,
+            can_resolve: false,
+            can_unresolve: false,
             path: path.to_owned(),
             line,
             side: Side::Right,

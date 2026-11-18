@@ -98,11 +98,20 @@ pub struct ThreadComment {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReviewThread {
+    /// GitHub's node id, which replies and resolving name.
+    pub id: String,
     pub path: String,
     /// The line it is on now; `None` when outdated (the code moved on).
     pub line: Option<u64>,
     pub side: Side,
+    /// Where a thread on several lines starts.
+    pub start: Option<(Side, u64)>,
     pub resolved: bool,
+    /// In the viewer's review not submitted yet: only they see it.
+    pub pending: bool,
+    pub can_reply: bool,
+    pub can_resolve: bool,
+    pub can_unresolve: bool,
     pub comments: Vec<ThreadComment>,
     /// All the thread's comments; more than `comments` when it is long.
     pub comments_total: u64,
@@ -257,6 +266,18 @@ pub struct PullDetail {
     /// The viewer opened it: GitHub refuses their approval or request for
     /// changes.
     pub viewer_is_author: bool,
+    /// The viewer's review in progress: line comments gathered, not submitted.
+    pub pending_review: Option<PendingReview>,
+}
+
+/// A review the viewer started on GitHub ("Start a review") and has not
+/// submitted: it keeps line comments until then, across sessions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingReview {
+    pub id: String,
+    pub comments: u64,
+    /// The commit it was started on: its comments' lines are of that diff.
+    pub commit: String,
 }
 
 const PERSON: &str = "login avatarUrl(size: 64)";
@@ -299,8 +320,12 @@ fn detail_query() -> String {
         ... on HeadRefForcePushedEvent {{ actor {{ {PERSON} }} createdAt }}
       }} }}
       reviewThreads(first: 100) {{ totalCount nodes {{
-        path line diffSide isResolved
-        comments(first: 50) {{ totalCount nodes {{ author {{ {PERSON} }} body createdAt }} }}
+        id path line diffSide startLine startDiffSide isResolved
+        viewerCanReply viewerCanResolve viewerCanUnresolve
+        comments(first: 50) {{ totalCount nodes {{ author {{ {PERSON} }} body createdAt state }} }}
+      }} }}
+      pendingReviews: reviews(states: PENDING, last: 1) {{ nodes {{
+        id author {{ login }} comments {{ totalCount }} commit {{ oid }}
       }} }}
     }}
   }}
@@ -593,6 +618,12 @@ pub fn parse_detail(value: &Value) -> Result<PullDetail> {
 
     let threads = nodes(&pr["reviewThreads"])
         .map(|thread| ReviewThread {
+            id: text(&thread["id"]),
+            pending: nodes(&thread["comments"])
+                .any(|comment| comment["state"].as_str() == Some("PENDING")),
+            can_reply: thread["viewerCanReply"].as_bool().unwrap_or_default(),
+            can_resolve: thread["viewerCanResolve"].as_bool().unwrap_or_default(),
+            can_unresolve: thread["viewerCanUnresolve"].as_bool().unwrap_or_default(),
             path: text(&thread["path"]),
             line: thread["line"].as_u64(),
             side: if thread["diffSide"].as_str() == Some("LEFT") {
@@ -600,6 +631,18 @@ pub fn parse_detail(value: &Value) -> Result<PullDetail> {
             } else {
                 Side::Right
             },
+            // GitHub gives a one-line thread its line as the start too
+            start: thread["startLine"]
+                .as_u64()
+                .filter(|start| Some(*start) != thread["line"].as_u64())
+                .map(|start| {
+                    let side = if thread["startDiffSide"].as_str() == Some("LEFT") {
+                        Side::Left
+                    } else {
+                        Side::Right
+                    };
+                    (side, start)
+                }),
             resolved: thread["isResolved"].as_bool().unwrap_or_default(),
             comments: nodes(&thread["comments"])
                 .map(|comment| ThreadComment {
@@ -619,6 +662,17 @@ pub fn parse_detail(value: &Value) -> Result<PullDetail> {
         merge: merge_info(repository, pr, state),
         viewer: person(&value["data"]["viewer"]),
         viewer_is_author: pr["viewerDidAuthor"].as_bool().unwrap_or_default(),
+        // GitHub shows a pending review to its author only; the viewer's is
+        // the one asked for
+        pending_review: nodes(&pr["pendingReviews"])
+            .find(|review| {
+                review["author"]["login"].as_str() == value["data"]["viewer"]["login"].as_str()
+            })
+            .map(|review| PendingReview {
+                id: text(&review["id"]),
+                comments: total(&review["comments"]),
+                commit: text(&review["commit"]["oid"]),
+            }),
         number: pr["number"].as_u64().unwrap_or_default(),
         title: text(&pr["title"]),
         url: text(&pr["url"]),
@@ -791,6 +845,212 @@ fn review_request(id: &str, event: ReviewEvent, body: &str) -> (&'static str, Va
             "body": (!body.trim().is_empty()).then_some(body),
         }),
     )
+}
+
+/// Lines a new review thread is on, as the diff gives them: the line it
+/// hangs under (`line`, `side`) and, for several, where they start.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadLines {
+    pub path: String,
+    pub side: Side,
+    pub line: u64,
+    pub start: Option<(Side, u64)>,
+}
+
+/// Where a new line comment goes, as GitHub's buttons put it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThreadTarget {
+    /// "Add single comment": a review of that one comment, submitted.
+    Single,
+    /// "Start a review": a review kept pending with it.
+    StartReview,
+    /// "Add review comment": into the viewer's pending review.
+    Pending(String),
+}
+
+fn side_api(side: Side) -> &'static str {
+    match side {
+        Side::Left => "LEFT",
+        Side::Right => "RIGHT",
+    }
+}
+
+/// The thread's fields as GitHub's inputs name them.
+fn thread_fields(lines: &ThreadLines, body: &str) -> Value {
+    let mut fields = json!({
+        "path": lines.path,
+        "line": lines.line,
+        "side": side_api(lines.side),
+        "body": body,
+    });
+    if let Some((side, line)) = lines.start {
+        fields["startLine"] = json!(line);
+        fields["startSide"] = json!(side_api(side));
+    }
+    fields
+}
+
+/// A comment on lines of the diff, and where it goes.
+#[derive(Clone, Debug)]
+pub struct LineComment {
+    pub lines: ThreadLines,
+    pub body: String,
+    pub target: ThreadTarget,
+}
+
+/// Puts `comment` on pull request `id`. A new review is made on `head_oid`,
+/// the commit whose diff the lines are from.
+pub async fn comment_on_lines(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    id: String,
+    head_oid: String,
+    comment: LineComment,
+) -> Result<(), FetchError> {
+    let LineComment {
+        lines,
+        body,
+        target,
+    } = comment;
+    let (query, variables, field) = line_comment_request(&id, &head_oid, &lines, &body, &target);
+    let value = graphql(&client, &repo, &token, query, variables).await?;
+    mutated(&value, field)
+}
+
+fn line_comment_request(
+    id: &str,
+    head_oid: &str,
+    lines: &ThreadLines,
+    body: &str,
+    target: &ThreadTarget,
+) -> (&'static str, Value, &'static str) {
+    let thread = thread_fields(lines, body);
+    match target {
+        ThreadTarget::Pending(review) => {
+            let mut input = thread;
+            input["pullRequestReviewId"] = json!(review);
+            (
+                "mutation($input: AddPullRequestReviewThreadInput!) {
+  addPullRequestReviewThread(input: $input) { clientMutationId }
+}",
+                json!({ "input": input }),
+                "addPullRequestReviewThread",
+            )
+        }
+        ThreadTarget::Single | ThreadTarget::StartReview => {
+            let mut input = json!({
+                "pullRequestId": id,
+                "commitOID": head_oid,
+                "threads": [thread],
+            });
+            // without an event the review stays pending
+            if *target == ThreadTarget::Single {
+                input["event"] = json!("COMMENT");
+            }
+            (
+                "mutation($input: AddPullRequestReviewInput!) {
+  addPullRequestReview(input: $input) { clientMutationId }
+}",
+                json!({ "input": input }),
+                "addPullRequestReview",
+            )
+        }
+    }
+}
+
+/// Answers thread `thread`, into `pending` (the viewer's review in progress)
+/// when there is one, as GitHub's own reply does.
+pub async fn reply(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    thread: String,
+    body: String,
+    pending: Option<String>,
+) -> Result<(), FetchError> {
+    let mut input = json!({ "pullRequestReviewThreadId": thread, "body": body });
+    if let Some(review) = pending {
+        input["pullRequestReviewId"] = json!(review);
+    }
+    let value = graphql(
+        &client,
+        &repo,
+        &token,
+        "mutation($input: AddPullRequestReviewThreadReplyInput!) {
+  addPullRequestReviewThreadReply(input: $input) { clientMutationId }
+}",
+        json!({ "input": input }),
+    )
+    .await?;
+    mutated(&value, "addPullRequestReviewThreadReply")
+}
+
+/// Resolves thread `thread`, or opens it again.
+pub async fn resolve(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    thread: String,
+    resolved: bool,
+) -> Result<(), FetchError> {
+    let (query, field) = if resolved {
+        (
+            "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { clientMutationId } }",
+            "resolveReviewThread",
+        )
+    } else {
+        (
+            "mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { clientMutationId } }",
+            "unresolveReviewThread",
+        )
+    };
+    let value = graphql(&client, &repo, &token, query, json!({ "id": thread })).await?;
+    mutated(&value, field)
+}
+
+/// Submits the viewer's pending review `review`, its line comments with it.
+pub async fn submit_review(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    review: String,
+    event: ReviewEvent,
+    body: String,
+) -> Result<(), FetchError> {
+    let mut input = json!({ "pullRequestReviewId": review, "event": event.api() });
+    if !body.trim().is_empty() {
+        input["body"] = json!(body);
+    }
+    let value = graphql(
+        &client,
+        &repo,
+        &token,
+        "mutation($input: SubmitPullRequestReviewInput!) {
+  submitPullRequestReview(input: $input) { clientMutationId }
+}",
+        json!({ "input": input }),
+    )
+    .await?;
+    mutated(&value, "submitPullRequestReview")
+}
+
+/// Drops the viewer's pending review `review` and its line comments.
+pub async fn discard_review(
+    client: Arc<dyn HttpClient>,
+    repo: GitHubRepo,
+    token: String,
+    review: String,
+) -> Result<(), FetchError> {
+    let value = graphql(
+        &client,
+        &repo,
+        &token,
+        "mutation($id: ID!) { deletePullRequestReview(input: {pullRequestReviewId: $id}) { clientMutationId } }",
+        json!({ "id": review }),
+    )
+    .await?;
+    mutated(&value, "deletePullRequestReview")
 }
 
 /// Reads a mutation's answer: GitHub answers a refusal (a conflict, no
@@ -993,6 +1253,85 @@ mod tests {
         let (_, changes) = review_request("PR_1", ReviewEvent::RequestChanges, "fix it");
         assert_eq!(changes["body"], "fix it");
         assert!(ReviewEvent::Comment.needs_body() && !ReviewEvent::Approve.needs_body());
+    }
+
+    #[test]
+    fn line_comments_ask_github_as_it_wants() {
+        let lines = ThreadLines {
+            path: "src/a.rs".into(),
+            side: Side::Right,
+            line: 7,
+            start: Some((Side::Left, 5)),
+        };
+        // a single comment is a submitted review on the head shown
+        let (query, single, field) =
+            line_comment_request("PR_1", "abc", &lines, "why?", &ThreadTarget::Single);
+        assert!(query.contains("addPullRequestReview(") && field == "addPullRequestReview");
+        assert_eq!(single["input"]["event"], "COMMENT");
+        assert_eq!(single["input"]["commitOID"], "abc");
+        assert_eq!(
+            single["input"]["threads"][0],
+            json!({ "path": "src/a.rs", "line": 7, "side": "RIGHT", "body": "why?",
+                    "startLine": 5, "startSide": "LEFT" })
+        );
+        // a started review has no event: GitHub keeps it pending
+        let (_, started, _) =
+            line_comment_request("PR_1", "abc", &lines, "why?", &ThreadTarget::StartReview);
+        assert!(started["input"].get("event").is_none());
+        // into a pending review, one line
+        let one = ThreadLines {
+            start: None,
+            ..lines
+        };
+        let (query, pending, field) = line_comment_request(
+            "PR_1",
+            "abc",
+            &one,
+            "and this",
+            &ThreadTarget::Pending("PRR_1".into()),
+        );
+        assert!(
+            query.contains("addPullRequestReviewThread") && field == "addPullRequestReviewThread"
+        );
+        assert_eq!(pending["input"]["pullRequestReviewId"], "PRR_1");
+        assert!(pending["input"].get("startLine").is_none());
+    }
+
+    #[test]
+    fn threads_and_the_pending_review_are_read() {
+        let value = json!({ "data": {
+            "viewer": { "login": "van" },
+            "repository": { "pullRequest": {
+                "number": 1, "state": "OPEN",
+                "reviewThreads": { "nodes": [{
+                    "id": "T_1", "path": "a.rs", "line": 3, "diffSide": "RIGHT",
+                    "startLine": 1, "startDiffSide": "LEFT",
+                    "isResolved": false, "viewerCanReply": true, "viewerCanResolve": true,
+                    "viewerCanUnresolve": false,
+                    "comments": { "nodes": [{ "author": { "login": "van" }, "body": "x",
+                        "createdAt": "2026-11-01T00:00:00Z", "state": "PENDING" }] }
+                }] },
+                "pendingReviews": { "nodes": [
+                    { "id": "PRR_2", "author": { "login": "ray" }, "comments": { "totalCount": 9 } },
+                    { "id": "PRR_1", "author": { "login": "van" }, "comments": { "totalCount": 1 },
+                      "commit": { "oid": "abc" } }
+                ] }
+            } }
+        } });
+        let detail = parse_detail(&value).unwrap();
+        let thread = &detail.threads[0];
+        assert_eq!(thread.id, "T_1");
+        assert_eq!(thread.start, Some((Side::Left, 1)));
+        assert!(thread.pending && thread.can_reply && thread.can_resolve && !thread.can_unresolve);
+        // only the viewer's pending review is theirs to finish
+        assert_eq!(
+            detail.pending_review,
+            Some(PendingReview {
+                id: "PRR_1".into(),
+                comments: 1,
+                commit: "abc".into()
+            })
+        );
     }
 
     #[test]
