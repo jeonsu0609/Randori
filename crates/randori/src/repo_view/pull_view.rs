@@ -226,6 +226,9 @@ pub(super) struct PullFacts {
     detail: Rc<PullDetail>,
     composer: Entity<PullComposer>,
     _theme: gpui_kit::Subscription,
+    /// The review button follows the composer's requests: gpui redraws a
+    /// notified view and what is above it, not a cached view that only read it.
+    _composer: gpui_kit::Subscription,
 }
 
 impl Render for PullFacts {
@@ -632,6 +635,7 @@ impl RepoView {
                         });
                         let facts = cx.new(|cx| PullFacts {
                             detail,
+                            _composer: cx.observe(&composer, |_, _, cx| cx.notify()),
                             composer: composer.clone(),
                             _theme: cx
                                 .observe_global::<gpui_kit::component::Theme>(|_, cx| cx.notify()),

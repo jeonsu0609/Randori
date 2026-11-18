@@ -157,7 +157,8 @@ pub enum Mergeability {
     Conflicting,
     /// Branch protection holds it: a review or a check it requires.
     Blocked,
-    /// The base moved on and the protection wants the head up to date.
+    /// The base moved on. GitHub refuses the merge when the branch's rules
+    /// want the head up to date; it is let try, and a refusal says so.
     Behind,
     /// A draft is not merged.
     Draft,
@@ -168,7 +169,10 @@ pub enum Mergeability {
 impl Mergeability {
     /// The merge button may be pressed.
     pub fn allows_merge(self) -> bool {
-        matches!(self, Mergeability::Clean | Mergeability::Unstable)
+        matches!(
+            self,
+            Mergeability::Clean | Mergeability::Unstable | Mergeability::Behind
+        )
     }
 }
 
@@ -178,7 +182,9 @@ pub struct MergeInfo {
     pub state: Mergeability,
     /// The ways the repository allows, in GitHub's order.
     pub methods: Vec<MergeMethod>,
-    /// The viewer may merge (write access or more).
+    /// The viewer may merge: not known to have read or triage access only.
+    /// A permission GitHub leaves out (a custom role) is let try; a refusal
+    /// says why.
     pub can_merge: bool,
     /// GitHub deletes the head branch on merge by itself.
     pub deletes_branch: bool,
@@ -681,9 +687,9 @@ fn merge_info(repository: &Value, pr: &Value, state: PullState) -> MergeInfo {
     MergeInfo {
         state: mergeability,
         methods,
-        can_merge: matches!(
+        can_merge: !matches!(
             repository["viewerPermission"].as_str(),
-            Some("ADMIN" | "MAINTAIN" | "WRITE")
+            Some("READ" | "TRIAGE")
         ),
         deletes_branch: allowed("deleteBranchOnMerge"),
         head_ref_id: (pr["isCrossRepository"].as_bool() == Some(false))
@@ -955,6 +961,14 @@ mod tests {
         );
         assert_eq!(state(json!({ "state": "OPEN" })), Mergeability::Unknown);
         assert!(!Mergeability::Blocked.allows_merge());
+        // GitHub says whether being behind holds it back
+        assert!(Mergeability::Behind.allows_merge());
+        // a permission left out (a custom role) is let try
+        assert!(
+            merge_detail(json!({}), json!({ "state": "OPEN" }))
+                .merge
+                .can_merge
+        );
         // a fork's branch is not this repository's to delete; read access
         // does not merge
         let fork = merge_detail(
