@@ -79,6 +79,12 @@ pub enum SessionEvent {
         tx: Sender<Result<messages::queries::RevsResult>>,
         set: messages::RevSet,
     },
+    /// What changes from one revision's tree to another's.
+    QueryComparison {
+        tx: Sender<Result<messages::queries::RevsResult>>,
+        from: messages::RevId,
+        to: messages::RevId,
+    },
     /// Read one file as it is in a revision.
     QueryFile {
         tx: Sender<Result<messages::queries::FileContent>>,
@@ -316,6 +322,9 @@ impl Session for WorkspaceSession<'_> {
                 SessionEvent::QueryRevisions { tx, set } => {
                     tx.send(queries::query_revisions(&self, set).await)?
                 }
+                SessionEvent::QueryComparison { tx, from, to } => {
+                    tx.send(queries::query_comparison(&self, from, to).await)?
+                }
                 SessionEvent::QueryRemotes {
                     tx,
                     tracking_bookmark,
@@ -540,6 +549,9 @@ impl Session for QuerySession<'_, '_> {
             match evt {
                 Ok(SessionEvent::QueryRevisions { tx, set }) => {
                     tx.send(queries::query_revisions(self.ws, set).await)?
+                }
+                Ok(SessionEvent::QueryComparison { tx, from, to }) => {
+                    tx.send(queries::query_comparison(self.ws, from, to).await)?
                 }
                 Ok(SessionEvent::QueryRemotes {
                     tx,

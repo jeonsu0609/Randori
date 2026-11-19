@@ -1232,3 +1232,94 @@ async fn a_commit_range_diff_starts_at_the_merge_base() -> Result<()> {
     assert!(missing.is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn comparison_is_between_the_two_trees() -> Result<()> {
+    let repo = mkrepo();
+
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+
+    let lines = |result: RevsResult| match result {
+        RevsResult::Detail { changes, .. } => changes
+            .into_iter()
+            .map(|change| {
+                let lines = change
+                    .hunks
+                    .into_iter()
+                    .flat_map(|hunk| hunk.lines.lines)
+                    .filter(|line| line.starts_with(['+', '-']))
+                    .map(|line| line.trim_end().to_owned())
+                    .collect::<Vec<_>>();
+                (change.path.repo_path, lines)
+            })
+            .collect::<Vec<_>>(),
+        RevsResult::NotFound { .. } => panic!("both revisions exist"),
+    };
+
+    // a revision against itself: nothing
+    let same = queries::query_comparison(&ws, revs::hunk_base(), revs::hunk_base()).await?;
+    assert!(lines(same).is_empty());
+
+    // a parent against its child: the child's own changes
+    let child =
+        queries::query_comparison(&ws, revs::hunk_base(), revs::hunk_child_single()).await?;
+    let own = queries::query_revisions(
+        &ws,
+        RevSet {
+            from: revs::hunk_child_single(),
+            to: revs::hunk_child_single(),
+        },
+    )
+    .await?;
+    assert_eq!(lines(child), lines(own));
+
+    // siblings: what tells one from the other, neither's change from the
+    // parent; the answer reads as `to` on `from`
+    let siblings =
+        queries::query_comparison(&ws, revs::hunk_child_single(), revs::hunk_child_multi()).await?;
+    let RevsResult::Detail {
+        ref headers,
+        ref parents,
+        ..
+    } = siblings
+    else {
+        panic!("both revisions exist");
+    };
+    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        headers[0].id.commit.hex,
+        revs::hunk_child_multi().commit.hex
+    );
+    assert_eq!(parents.len(), 1);
+    assert_eq!(
+        parents[0].id.commit.hex,
+        revs::hunk_child_single().commit.hex
+    );
+    let siblings = lines(siblings);
+    assert_eq!(siblings.len(), 1);
+    let (path, changed) = &siblings[0];
+    assert_eq!(path, "hunk_test.txt");
+    for line in ["-modified2", "+changed2", "-line4", "+changed4"] {
+        assert!(changed.iter().any(|l| l == line), "{line} in {changed:?}");
+    }
+
+    // the other way round, each line the other way round
+    let back =
+        queries::query_comparison(&ws, revs::hunk_child_multi(), revs::hunk_child_single()).await?;
+    let back = lines(back);
+    for line in ["+modified2", "-changed2", "+line4", "-changed4"] {
+        assert!(
+            back[0].1.iter().any(|l| l == line),
+            "{line} in {:?}",
+            back[0].1
+        );
+    }
+
+    // a revision the repository does not have
+    let missing =
+        queries::query_comparison(&ws, revs::hunk_base(), mkid("wwwwwwww", &"f".repeat(40)))
+            .await?;
+    assert_matches!(missing, RevsResult::NotFound { .. });
+    Ok(())
+}

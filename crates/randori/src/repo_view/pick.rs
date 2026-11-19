@@ -158,8 +158,12 @@ impl RepoView {
     }
     pub(super) fn cancel_pick(&mut self, cx: &mut Context<Self>) {
         if self.pick.take().is_none() {
-            // Not picking: let Escape reach the workspace (back to the list).
-            cx.propagate();
+            if self.compare.is_some() {
+                self.end_comparison(cx);
+            } else {
+                // Not picking: let Escape reach the workspace (back to the list).
+                cx.propagate();
+            }
         }
         cx.notify();
     }

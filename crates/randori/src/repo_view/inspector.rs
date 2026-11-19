@@ -9,6 +9,9 @@ use crate::harness_mark::HarnessMark as _;
 
 impl RepoView {
     pub(super) fn render_inspector(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(compare) = &self.compare {
+            return self.render_comparison(compare, cx);
+        }
         // the working copy as the next commit: a message, and its changes
         // with a box each for whether the commit includes it
         let commit_mode = self.commit_mode();
@@ -522,7 +525,8 @@ impl RepoView {
     /// Enter in the revisions: the keys go to the selected revision's changed
     /// files, the file shown kept. Nothing while it loads, or without files.
     pub(super) fn enter_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.inspected.loading {
+        // a comparison's files are not the revision's, which are not drawn
+        if self.inspected.loading || self.compare.is_some() {
             return;
         }
         let Some(detail) = self.inspected.detail.as_ref() else {
@@ -871,11 +875,19 @@ impl RepoView {
         }
         let diff = self.split_diff("changes-split", styled, &self.diff, cx);
         let theme = cx.theme();
-        let file = self
-            .inspected
-            .file
-            .and_then(|ix| self.inspected.detail.as_ref()?.files.get(ix));
-        let body = if self.inspected.loading && self.inspected.detail.is_none() {
+        let comparing = self.compare.is_some();
+        let file = if comparing {
+            self.compared_file()
+        } else {
+            self.inspected
+                .file
+                .and_then(|ix| self.inspected.detail.as_ref()?.files.get(ix))
+        };
+        let loading = match &self.compare {
+            Some(compare) => compare.loading && compare.detail.is_none(),
+            None => self.inspected.loading && self.inspected.detail.is_none(),
+        };
+        let body = if loading {
             v_flex()
                 .flex_1()
                 .items_center()
@@ -930,9 +942,10 @@ impl RepoView {
                         )
                     })
                     .child(div().flex_1())
-                    .when(file.is_some() && !self.detail_is_immutable(), |this| {
-                        this.child(self.render_line_actions(cx))
-                    })
+                    .when(
+                        file.is_some() && !comparing && !self.detail_is_immutable(),
+                        |this| this.child(self.render_line_actions(cx)),
+                    )
                     .child(
                         TabBar::new("diff-mode")
                             .segmented()
@@ -955,7 +968,8 @@ impl RepoView {
                             .child("Unified")
                             .child("Split"),
                     )
-                    .when(file.is_some(), |this| {
+                    // the full view is a revision's file, not a comparison's
+                    .when(file.is_some() && !comparing, |this| {
                         this.child(
                             Button::new("open-full-view")
                                 .ghost()
@@ -975,7 +989,7 @@ impl RepoView {
 
 /// What a changed file's row shows: its change letter, name and directory,
 /// and its added and removed lines.
-fn file_summary(file: &FileItem, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+pub(super) fn file_summary(file: &FileItem, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     let (letter, color) = match file.kind {
         ChangeKind::Added => ("A", theme.success),
         ChangeKind::Deleted => ("D", theme.danger),

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use gpui::{Entity, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 
 use crate::repo_view::RepoView;
 use crate::worker::Worker;
@@ -79,8 +79,16 @@ fn open<'a>(
     // every revision, as All branches: the rows do not lean on the user's
     // `revsets.log`, which the app reads
     let query = Some(crate::repo_view::ALL_BRANCHES_QUERY.to_owned());
-    let (view, cx) = cx
-        .add_window_view(|window, cx| RepoView::new(worker, events, Some(path), query, window, cx));
+    // in the root the app's windows have (`gpui_kit::open_window`), which
+    // holds the notifications and dialogs
+    let built = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = built.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| RepoView::new(worker, events, Some(path), query, window, cx));
+        *slot.borrow_mut() = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    let view = built.borrow_mut().take().expect("the tab is built");
     settle(&view, cx);
     // as the app does once a tab has loaded: the keys go to its list
     view.update_in(cx, |view, window, cx| view.focus_log(window, cx));
@@ -618,4 +626,173 @@ fn rebase_a_revision_from_the_keyboard(cx: &mut TestAppContext) {
     };
     assert_eq!(log("description(exact:\"w1\n\")-"), "qa1\n");
     assert_eq!(log("description(exact:\"w2\n\")-"), "base\n");
+}
+
+/// w2 selected, ⌘-click on qa1: what changes from qa1's tree to w2's (qa.txt
+/// gone, w1.txt and w2.txt added), not either's own change. Esc ends it, and
+/// so does a plain click, the selection then where it was clicked.
+#[gpui::test]
+fn compare_two_revisions(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    keys(&view, "down", cx);
+    let compared = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        settle(view, cx);
+        view.read_with(cx, |view, _| view.compared_files())
+    };
+    view.update(cx, |view, cx| view.click_row(3, true, cx));
+    assert_eq!(
+        compared(&view, cx),
+        Some(vec![
+            "D qa.txt".to_owned(),
+            "A w1.txt".to_owned(),
+            "A w2.txt".to_owned(),
+        ])
+    );
+    assert_eq!(view.read_with(cx, |view, _| view.selected_row()), Some(1));
+
+    keys(&view, "escape", cx);
+    assert_eq!(compared(&view, cx), None);
+    assert_eq!(view.read_with(cx, |view, _| view.selected_row()), Some(1));
+
+    // the other way round in the log, the same sides: qa1 is lower
+    view.update(cx, |view, cx| view.click_row(3, false, cx));
+    view.update(cx, |view, cx| view.click_row(1, true, cx));
+    assert_eq!(compared(&view, cx).map(|files| files.len()), Some(3));
+    assert!(
+        compared(&view, cx)
+            .unwrap()
+            .contains(&"D qa.txt".to_owned())
+    );
+
+    // ⌘-click on the compared row again, or a plain click, ends it
+    view.update(cx, |view, cx| view.click_row(1, true, cx));
+    assert_eq!(compared(&view, cx), None);
+    view.update(cx, |view, cx| view.click_row(4, true, cx));
+    assert!(compared(&view, cx).is_some());
+    view.update(cx, |view, cx| view.click_row(2, false, cx));
+    assert_eq!(compared(&view, cx), None);
+    assert_eq!(view.read_with(cx, |view, _| view.selected_row()), Some(2));
+}
+
+/// w2 compared with qa1: a reload that keeps w2 selected keeps the
+/// comparison, asking again only once w2 is rewritten; New, which
+/// leaves the new change selected, ends it rather than compare that change
+/// with qa1.
+#[gpui::test]
+fn a_comparison_ends_when_another_revision_is_selected(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    keys(&view, "down", cx);
+    view.update(cx, |view, cx| view.click_row(3, true, cx));
+    settle(&view, cx);
+    let before = view.read_with(cx, |view, _| view.compared_files());
+    assert_eq!(before.as_ref().map(Vec::len), Some(3));
+
+    assert_eq!(
+        view.read_with(cx, |view, _| view.comparison_queries()),
+        Some(1)
+    );
+    keys(&view, "secondary-r", cx);
+    assert_eq!(view.read_with(cx, |view, _| view.compared_files()), before);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.comparison_queries()),
+        Some(1)
+    );
+
+    // w2 rewritten outside (a new commit, the same change): asked again
+    jj(
+        &repo,
+        &[
+            "--ignore-working-copy",
+            "describe",
+            "-r",
+            "description(exact:\"w2\n\")",
+            "-m",
+            "w2 again",
+        ],
+    );
+    keys(&view, "secondary-r", cx);
+    assert_eq!(view.read_with(cx, |view, _| view.compared_files()), before);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.comparison_queries()),
+        Some(2)
+    );
+
+    let w2 = view.read_with(cx, |view, _| view.selected_change());
+    keys(&view, "n", cx);
+    // the new change on w2 selected, not w2: nothing compared
+    assert_ne!(view.read_with(cx, |view, _| view.selected_change()), w2);
+    assert_eq!(view.read_with(cx, |view, _| view.compared_files()), None);
+}
+
+/// w2 compared with qa1: Squash file from the palette would squash w2's
+/// w2.txt, which the comparison hides, so it waits; once Esc ends the
+/// comparison it squashes, w2 then changing nothing.
+#[gpui::test]
+fn file_commands_wait_while_comparing(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+    let w2 = "description(exact:\"w2\n\")";
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    keys(&view, "down", cx);
+    view.update(cx, |view, cx| view.click_row(3, true, cx));
+    settle(&view, cx);
+    assert!(
+        view.read_with(cx, |view, _| view.compared_files())
+            .is_some()
+    );
+
+    cx.dispatch_action(crate::repo_view::actions::SquashFile);
+    settle(&view, cx);
+    assert_eq!(changed(&repo, w2), "w2.txt");
+    assert!(
+        view.read_with(cx, |view, _| view.compared_files())
+            .is_some()
+    );
+
+    keys(&view, "escape", cx);
+    cx.dispatch_action(crate::repo_view::actions::SquashFile);
+    settle(&view, cx);
+    assert_eq!(changed(&repo, w2), "");
+}
+
+/// While choosing a revision to rebase w2 onto, ⌘-click on qa1 chooses it, as
+/// a click does: no comparison starts.
+#[gpui::test]
+fn command_click_chooses_while_picking(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    keys(&view, "down r", cx);
+    view.update(cx, |view, cx| view.click_row(3, true, cx));
+    settle(&view, cx);
+    assert_eq!(view.read_with(cx, |view, _| view.compared_files()), None);
+    assert_eq!(view.read_with(cx, |view, _| view.selected_row()), Some(3));
 }

@@ -81,17 +81,28 @@ impl RepoView {
             view.select_next_conflict(window, cx)
         }))
         .on_action(cx.listener(|view, _: &actions::OpenFileDiff, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             view.open_focus(FocusTab::Diff, false, window, cx)
         }))
         .on_action(cx.listener(|view, _: &actions::OpenFileView, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             view.open_focus(FocusTab::File, false, window, cx)
         }))
         .on_action(cx.listener(|view, _: &actions::OpenFileBlame, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             view.open_focus(FocusTab::Blame, false, window, cx)
         }))
         .on_action(
             cx.listener(|view, _: &actions::OpenFileHistory, window, cx| {
-                view.open_focus(FocusTab::Diff, true, window, cx)
+                if !view.blocked_by_comparison(window, cx) {
+                    view.open_focus(FocusTab::Diff, true, window, cx)
+                }
             }),
         )
         .on_action(
@@ -114,6 +125,7 @@ impl RepoView {
         .on_action(
             cx.listener(|view, _: &actions::DescribeRevision, window, cx| {
                 if view.blocked_by_pick(window, cx)
+                    || view.blocked_by_comparison(window, cx)
                     || view.refuse_if_immutable("Describe", window, cx)
                 {
                     return;
@@ -203,35 +215,60 @@ impl RepoView {
             }),
         )
         .on_action(cx.listener(|view, _: &actions::PickMoveFile, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             view.pick_move_file(window, cx)
         }))
         .on_action(cx.listener(|view, _: &actions::SquashFile, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             view.squash_file_into_parent(window, cx)
         }))
         .on_action(cx.listener(|view, _: &actions::SplitFiles, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             view.prompt_split_files(window, cx)
         }))
         .on_action(cx.listener(|view, _: &actions::RestoreFile, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             view.confirm_restore_file(window, cx)
         }))
         .on_action(cx.listener(|view, _: &actions::ResolveInTool, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             view.resolve_in_tool(window, cx)
         }))
-        .on_action(
-            cx.listener(|view, _: &actions::DiffInTool, window, cx| view.diff_in_tool(window, cx)),
-        )
+        .on_action(cx.listener(|view, _: &actions::DiffInTool, window, cx| {
+            if !view.blocked_by_comparison(window, cx) {
+                view.diff_in_tool(window, cx)
+            }
+        }))
         // the selected file where it is on disk (the menu offers these only
         // while it is there), and its whole path
-        .on_action(cx.listener(|view, _: &actions::RevealFile, _, cx| {
+        .on_action(cx.listener(|view, _: &actions::RevealFile, window, cx| {
+            if view.blocked_by_comparison(window, cx) {
+                return;
+            }
             if let Some(path) = view.selected_file_full_path().filter(|path| path.exists()) {
                 cx.reveal_path(&path)
             }
         }))
-        .on_action(cx.listener(|view, _: &actions::CopyFullFilePath, _, cx| {
-            if let Some(path) = view.selected_file_full_path() {
-                super::ops::copy_to_clipboard(path.to_string_lossy().into_owned(), cx)
-            }
-        }))
+        .on_action(
+            cx.listener(|view, _: &actions::CopyFullFilePath, window, cx| {
+                if view.blocked_by_comparison(window, cx) {
+                    return;
+                }
+                if let Some(path) = view.selected_file_full_path() {
+                    super::ops::copy_to_clipboard(path.to_string_lossy().into_owned(), cx)
+                }
+            }),
+        )
         .on_action(cx.listener(|view, _: &actions::SquashHunk, window, cx| {
             view.squash_hunk_into_parent(window, cx)
         }))
@@ -239,10 +276,18 @@ impl RepoView {
             view.prompt_split_lines(window, cx)
         }))
         .on_action(
-            cx.listener(|view, _: &actions::IncludeAllChanges, _, cx| view.include_all(true, cx)),
+            cx.listener(|view, _: &actions::IncludeAllChanges, window, cx| {
+                if !view.blocked_by_comparison(window, cx) {
+                    view.include_all(true, cx)
+                }
+            }),
         )
         .on_action(
-            cx.listener(|view, _: &actions::ExcludeAllChanges, _, cx| view.include_all(false, cx)),
+            cx.listener(|view, _: &actions::ExcludeAllChanges, window, cx| {
+                if !view.blocked_by_comparison(window, cx) {
+                    view.include_all(false, cx)
+                }
+            }),
         )
         .on_action(
             cx.listener(|view, _: &actions::FindCommit, window, cx| view.open_find(window, cx)),

@@ -969,6 +969,7 @@ impl RepoView {
         let graph = self.log.graph.clone();
         let focus = self.log_focus.clone();
         let selected = self.selected;
+        let compared = self.compared_row();
         let avatars = self.avatars.clone();
         let github = self.github_active();
         let owner = cx.entity().downgrade();
@@ -1064,7 +1065,7 @@ impl RepoView {
                                             &rows[ix],
                                             &graph,
                                             ix,
-                                            selected == Some(ix),
+                                            selected == Some(ix) || compared == Some(ix),
                                             active,
                                             avatar,
                                             rem,
@@ -1082,9 +1083,16 @@ impl RepoView {
                                             cx,
                                         )
                                         .harness_mark(move || format!("row:{ix}"))
-                                        .on_click(move |_, _, cx| {
-                                            let _ =
-                                                owner.update(cx, |view, cx| view.select(ix, cx));
+                                        // ⌘ compares the row with the selected one
+                                        .on_click(move |event, _, cx| {
+                                            let compare = event.modifiers().secondary(cx);
+                                            let _ = owner.update(cx, |view, cx| {
+                                                if compare {
+                                                    view.click_to_compare(ix, cx)
+                                                } else {
+                                                    view.select(ix, cx)
+                                                }
+                                            });
                                         })
                                         // Right-click selects the row first, so the menu acts on it.
                                         .on_mouse_down(

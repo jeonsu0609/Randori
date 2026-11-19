@@ -19,6 +19,10 @@ impl RepoView {
         if self.center.file().is_some() {
             return self.focus_shown_file();
         }
+        // a comparison's lines are not a revision's to squash or split
+        if self.compare.is_some() {
+            return None;
+        }
         let detail = self.inspected.detail.as_ref()?;
         let file = detail.files.get(self.inspected.file?)?;
         Some(ShownFile {
