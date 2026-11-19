@@ -7618,7 +7618,7 @@ dependencies = [
 
 [[package]]
 name = "randori"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
