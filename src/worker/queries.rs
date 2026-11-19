@@ -570,6 +570,41 @@ pub async fn query_revisions(ws: &WorkspaceSession<'_>, set: RevSet) -> Result<R
     })
 }
 
+/// What changes between two revisions' trees, as `jj diff --from --to`: `to`
+/// is the header and `from` the one parent, so the answer reads as a revision
+/// on `from`. Unlike a set, the two need not be related, and `from`'s own
+/// changes are not counted.
+pub async fn query_comparison(
+    ws: &WorkspaceSession<'_>,
+    from: RevId,
+    to: RevId,
+) -> Result<RevsResult> {
+    let set = RevSet {
+        from: from.clone(),
+        to: to.clone(),
+    };
+    let (Some(from_commit), Some(to_commit)) =
+        (ws.resolve_optional_id(&from)?, ws.resolve_optional_id(&to)?)
+    else {
+        return Ok(RevsResult::NotFound { set });
+    };
+
+    let from_tree = from_commit.tree();
+    let to_tree = to_commit.tree();
+    let mut changes = Vec::new();
+    let tree_diff = from_tree.diff(&to_tree, &EverythingMatcher);
+    let conflict_labels = Diff::new(from_tree.labels(), to_tree.labels());
+    format_tree_changes(ws, &mut changes, tree_diff, conflict_labels).await?;
+
+    Ok(RevsResult::Detail {
+        set,
+        headers: vec![ws.format_header(&to_commit, None)?],
+        parents: vec![ws.format_header(&from_commit, None)?],
+        changes,
+        conflicts: Vec::new(),
+    })
+}
+
 pub fn query_remotes(
     ws: &WorkspaceSession,
     tracking_bookmark: Option<String>,

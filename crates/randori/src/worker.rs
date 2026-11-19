@@ -207,6 +207,12 @@ impl Worker {
         self.call(|tx| SessionEvent::QueryRevisions { tx, set })?
     }
 
+    /// What changes from `from`'s tree to `to`'s, as a detail of `to` with
+    /// `from` for its parent.
+    pub fn query_comparison(&self, from: RevId, to: RevId) -> Result<RevsResult> {
+        self.call(|tx| SessionEvent::QueryComparison { tx, from, to })?
+    }
+
     /// Headers of the first `limit` revisions of `revset`, newest first.
     pub fn query_headers(&self, revset: String, limit: usize) -> Result<Vec<RevHeader>> {
         self.call(|tx| SessionEvent::QueryHeaders { tx, revset, limit })?

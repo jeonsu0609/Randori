@@ -46,6 +46,7 @@ use gpui_kit::{
 use crate::graph::{Graph, row_height};
 
 mod actions_bound;
+mod compare;
 mod dnd;
 mod find;
 mod focus;
@@ -384,6 +385,8 @@ pub struct RepoView {
     scroll: UniformListScrollHandle,
     /// The revision inspected: its detail and the files picked in it.
     inspected: Inspected,
+    /// A revision ⌘-clicked to compare with the selected one.
+    compare: Option<compare::Comparison>,
     diff: Entity<DiffState>,
     diff_mode: DiffMode,
     revset: Entity<InputState>,
@@ -775,6 +778,7 @@ impl RepoView {
             selected: None,
             scroll: UniformListScrollHandle::new(),
             inspected: Inspected::default(),
+            compare: None,
             diff,
             diff_mode,
             revset,
@@ -841,6 +845,7 @@ impl RepoView {
     pub fn is_settled(&self) -> bool {
         matches!(self.state, LoadState::Ready | LoadState::Failed(_))
             && !self.inspected.loading
+            && !self.compare.as_ref().is_some_and(|compare| compare.loading)
             && !self.paging.loading
             && self.busy.is_empty()
             && !self.pulls_fetching()
@@ -905,6 +910,51 @@ impl RepoView {
     #[cfg(test)]
     pub(crate) fn link_of_row(&self, ix: usize) -> Option<String> {
         self.commit_link(ix)
+    }
+
+    /// A click on log row `ix`, ⌘ held or not (the tests').
+    #[cfg(test)]
+    pub(crate) fn click_row(&mut self, ix: usize, secondary: bool, cx: &mut Context<Self>) {
+        if secondary {
+            self.click_to_compare(ix, cx);
+        } else {
+            self.select(ix, cx);
+        }
+    }
+
+    /// The selected revision's change id (the tests').
+    #[cfg(test)]
+    pub(crate) fn selected_change(&self) -> Option<String> {
+        let row = self.log.rows.get(self.selected?)?;
+        Some(row.revision.id.change.hex.clone())
+    }
+
+    /// How many times the comparison on screen was queried (the tests').
+    #[cfg(test)]
+    pub(crate) fn comparison_queries(&self) -> Option<usize> {
+        self.compare.as_ref().map(|compare| compare.queries)
+    }
+
+    /// The files of the comparison on screen, with their change letters
+    /// (the tests').
+    #[cfg(test)]
+    pub(crate) fn compared_files(&self) -> Option<Vec<String>> {
+        let detail = self.compare.as_ref()?.detail.as_ref()?;
+        Some(
+            detail
+                .files
+                .iter()
+                .map(|file| {
+                    let kind = match file.kind {
+                        ChangeKind::Added => "A",
+                        ChangeKind::Deleted => "D",
+                        ChangeKind::Modified => "M",
+                        ChangeKind::None => "-",
+                    };
+                    format!("{kind} {}", file.path)
+                })
+                .collect(),
+        )
     }
 
     /// Selects a log row by index (used by `--select-row`).
@@ -1365,6 +1415,7 @@ impl RepoView {
                 self.select_file(None, cx);
             }
         }
+        self.follow_comparison(cx);
         self.update_find(false, 0, cx);
         self.refresh_focus(cx);
         self.refresh_conflicts(cx);
@@ -1438,8 +1489,10 @@ impl RepoView {
         self.place_panel_items();
     }
 
-    /// Selects a row because the user asked for it: the list scrolls to it.
+    /// Selects a row because the user asked for it: the list scrolls to it,
+    /// and a comparison ends.
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.end_comparison(cx);
         self.set_selection(ix, true, cx);
     }
 
@@ -1542,6 +1595,10 @@ impl RepoView {
 
     fn select_file(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
         self.inspected.file = ix;
+        // while comparing, the changes panel shows the comparison's file
+        if self.compare.is_some() {
+            return;
+        }
         self.line_selection = None;
         let patch = ix.and_then(|ix| file_patch(self.inspected.detail.as_ref()?, ix));
         self.diff.update(cx, |state, cx| state.set_files(patch, cx));
