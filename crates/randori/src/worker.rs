@@ -218,6 +218,11 @@ impl Worker {
         self.call(|tx| SessionEvent::QueryHeaders { tx, revset, limit })?
     }
 
+    /// Every file in revision `id`'s tree, by repository path.
+    pub fn query_tree_files(&self, id: RevId) -> Result<Vec<String>> {
+        self.call(|tx| SessionEvent::QueryTreeFiles { tx, id })?
+    }
+
     /// One file as it is in revision `id`.
     pub fn query_file(&self, id: RevId, path: TreePath) -> Result<FileContent> {
         self.call(|tx| SessionEvent::QueryFile { tx, id, path })?

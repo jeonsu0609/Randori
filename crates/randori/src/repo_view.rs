@@ -48,6 +48,8 @@ use crate::graph::{Graph, row_height};
 mod actions_bound;
 mod compare;
 mod dnd;
+mod file_list;
+mod files_view;
 mod find;
 mod focus;
 mod github_access;
@@ -132,6 +134,13 @@ pub mod actions {
             SelectNext,
             SelectFirst,
             SelectLast,
+            // a tree of files: ← closes a folder or goes to the one above,
+            // → opens it or goes into it
+            CollapseFolder,
+            ExpandFolder,
+            // Enter in the files: a folder opens or closes, a file's full
+            // view opens (`OpenFileDiff`, which ⌘⇧D also sends)
+            ActivateFileRow,
             FocusRevset,
             FocusLog,
             Reload,
@@ -289,9 +298,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("j", SelectNext, Some(FILES_CONTEXT)),
         KeyBinding::new("home", SelectFirst, Some(FILES_CONTEXT)),
         KeyBinding::new("end", SelectLast, Some(FILES_CONTEXT)),
+        KeyBinding::new("left", CollapseFolder, Some(FILES_CONTEXT)),
+        KeyBinding::new("h", CollapseFolder, Some(FILES_CONTEXT)),
+        KeyBinding::new("right", ExpandFolder, Some(FILES_CONTEXT)),
+        KeyBinding::new("l", ExpandFolder, Some(FILES_CONTEXT)),
         // the file's full view, as a double click opens it; Esc closes it
         // when open, else goes back to the revisions (`REPO_CONTEXT`)
-        KeyBinding::new("enter", OpenFileDiff, Some(FILES_CONTEXT)),
+        KeyBinding::new("enter", ActivateFileRow, Some(FILES_CONTEXT)),
         KeyBinding::new("escape", CloseFileFocus, Some(FILES_CONTEXT)),
         KeyBinding::new(platform_key!("l"), FocusRevset, Some(REPO_CONTEXT)),
         KeyBinding::new(platform_key!("f"), FindCommit, Some(REPO_CONTEXT)),
@@ -387,6 +400,15 @@ pub struct RepoView {
     inspected: Inspected,
     /// A revision ⌘-clicked to compare with the selected one.
     compare: Option<compare::Comparison>,
+    /// Every file of the inspected revision, with all files shown.
+    all_files: files_view::AllFiles,
+    /// The file lists' folders opened and closed.
+    folders: files_view::Folders,
+    /// What the inspector's files are filtered by, with all files shown.
+    file_filter: Entity<InputState>,
+    /// The rows of the inspector's and of a comparison's file list.
+    inspector_rows: std::cell::RefCell<file_list::FileRows>,
+    comparison_rows: std::cell::RefCell<file_list::FileRows>,
     diff: Entity<DiffState>,
     diff_mode: DiffMode,
     revset: Entity<InputState>,
@@ -403,7 +425,8 @@ pub struct RepoView {
     /// The inspector's scroll, and where its file rows were drawn: a file
     /// chosen with the keys is scrolled into view.
     inspector_scroll: gpui_kit::ScrollHandle,
-    file_rows: gpui_kit::ScrollHandle,
+    file_rows: UniformListScrollHandle,
+    compared_file_rows: UniformListScrollHandle,
     /// Focus for the tab itself while there is no list to focus.
     root_focus: FocusHandle,
     _events: Task<()>,
@@ -488,6 +511,8 @@ pub struct RepoView {
     picked_up: Vec<TreePath>,
     /// The order the loaded rows were queried in (see `settings::log_by_date`).
     log_by_date: bool,
+    /// Path or Tree and All files as this tab last followed them.
+    file_list_seen: files_view::FileListSeen,
     /// The revision list's width in rems, measured when it paints.
     log_width: Rc<std::cell::Cell<f32>>,
     /// Where the pointer went down on a column handle.
@@ -508,6 +533,11 @@ struct Inspected {
     /// Files picked in the inspector with ⌘- or ⇧-click, by path, for Split.
     /// They stay picked when the revision reloads, not when another is shown.
     marked: Vec<SharedString>,
+    /// A file the revision does not change, shown from all its files
+    /// instead of `file`.
+    unchanged: Option<files_view::UnchangedFile>,
+    /// The folder of a tree ↑↓ are on, by path; the file shown stays.
+    folder: Option<SharedString>,
 }
 
 /// The description editor of the revision inspected.
@@ -626,7 +656,15 @@ impl RepoView {
         let revset =
             cx.new(|cx| InputState::new(window, cx).placeholder("Revset, e.g. ancestors(@, 50)"));
         let panel_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter (⌘⌥F)"));
+        let file_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files"));
         let _subscriptions = vec![
+            cx.subscribe(&file_filter, |view, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    // the folder ↑↓ were on can be filtered out
+                    view.drop_lost_folder(cx);
+                    view.notify_pane(PaneId::Inspector, cx);
+                }
+            }),
             cx.subscribe(&panel_filter, |view, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
                     view.notify_pane(PaneId::Side, cx);
@@ -779,6 +817,11 @@ impl RepoView {
             scroll: UniformListScrollHandle::new(),
             inspected: Inspected::default(),
             compare: None,
+            all_files: Default::default(),
+            folders: Default::default(),
+            file_filter,
+            inspector_rows: Default::default(),
+            comparison_rows: Default::default(),
             diff,
             diff_mode,
             revset,
@@ -788,7 +831,8 @@ impl RepoView {
             log_active: false,
             files_active: false,
             inspector_scroll: gpui_kit::ScrollHandle::new(),
-            file_rows: gpui_kit::ScrollHandle::new(),
+            file_rows: UniformListScrollHandle::new(),
+            compared_file_rows: UniformListScrollHandle::new(),
             root_focus: cx.focus_handle(),
             _events,
             _subscriptions,
@@ -830,6 +874,7 @@ impl RepoView {
             column_press: None,
             log_width: Rc::default(),
             log_by_date: settings::get(cx).display.log_by_date,
+            file_list_seen: files_view::FileListSeen::of(cx),
             check_picked_up: None,
             picked_up_checking: false,
             picked_up: Vec::new(),
@@ -846,6 +891,12 @@ impl RepoView {
         matches!(self.state, LoadState::Ready | LoadState::Failed(_))
             && !self.inspected.loading
             && !self.compare.as_ref().is_some_and(|compare| compare.loading)
+            && !self.all_files.loading
+            && !self
+                .inspected
+                .unchanged
+                .as_ref()
+                .is_some_and(|shown| shown.loading)
             && !self.paging.loading
             && self.busy.is_empty()
             && !self.pulls_fetching()
@@ -1120,6 +1171,130 @@ impl RepoView {
         let detail = self.inspected.detail.as_ref()?;
         let file = detail.files.get(self.inspected.file?)?;
         Some(file.path.to_string())
+    }
+
+    /// The inspector's file list as text: a folder as `name/` after `+` or
+    /// `-` (open or closed), a changed file as `*path`, an unchanged one by
+    /// its path, two spaces a level.
+    #[cfg(test)]
+    pub(crate) fn file_list(&self, cx: &App) -> Vec<String> {
+        use file_list::FileRow;
+        let Some(detail) = self.inspected.detail.as_ref() else {
+            return Vec::new();
+        };
+        self.inspector_rows(cx)
+            .iter()
+            .map(|row| match row {
+                FileRow::Folder {
+                    name, depth, open, ..
+                } => format!(
+                    "{}{}{name}/",
+                    "  ".repeat(*depth),
+                    if *open { "+" } else { "-" }
+                ),
+                FileRow::Changed { ix, depth } => {
+                    format!("{}*{}", "  ".repeat(*depth), detail.files[*ix].path)
+                }
+                FileRow::Unchanged { path, depth, .. } => format!("{}{path}", "  ".repeat(*depth)),
+            })
+            .collect()
+    }
+
+    /// The unchanged file shown, and why it shows no text (the tests').
+    #[cfg(test)]
+    pub(crate) fn shown_unchanged(&self) -> Option<(String, Option<String>)> {
+        let shown = self.inspected.unchanged.as_ref()?;
+        Some((
+            shown.path.to_string(),
+            shown.note.as_ref().map(|n| n.to_string()),
+        ))
+    }
+
+    /// A click on Expand all (`true`) or Collapse all (the tests').
+    #[cfg(test)]
+    pub(crate) fn click_all_folders(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.set_all_folders(open, cx);
+    }
+
+    /// A click on the unchanged file `path`'s row (the tests').
+    #[cfg(test)]
+    pub(crate) fn click_unchanged(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.click_unchanged_row(path.to_owned().into(), window, cx);
+    }
+
+    /// A click on the changed file `path`, ⇧ held or not (the tests').
+    #[cfg(test)]
+    pub(crate) fn click_changed(&mut self, path: &str, shift: bool, cx: &mut Context<Self>) {
+        let ix = self
+            .inspected
+            .detail
+            .as_ref()
+            .and_then(|detail| {
+                detail
+                    .files
+                    .iter()
+                    .position(|file| file.path.as_ref() == path)
+            })
+            .expect("a changed file");
+        let modifiers = gpui_kit::Modifiers {
+            shift,
+            ..Default::default()
+        };
+        self.click_file(ix, modifiers, cx);
+    }
+
+    /// The folder ↑↓ are on (the tests').
+    #[cfg(test)]
+    pub(crate) fn file_cursor_folder(&self) -> Option<String> {
+        self.inspected.folder.as_ref().map(|path| path.to_string())
+    }
+
+    /// The box of the working copy's `folder`: "all", "some" or "none" of
+    /// the files under it included (the tests').
+    #[cfg(test)]
+    pub(crate) fn folder_box(&self, folder: &str) -> &'static str {
+        match self.folder_inclusion(folder) {
+            included::Inclusion::All => "all",
+            included::Inclusion::Some => "some",
+            included::Inclusion::Nothing => "none",
+        }
+    }
+
+    /// A click on the box of the working copy's `folder` (the tests').
+    #[cfg(test)]
+    pub(crate) fn click_folder_box(&mut self, folder: &str, cx: &mut Context<Self>) {
+        let state = self.folder_inclusion(folder);
+        self.include_folder(folder, state != included::Inclusion::All, cx);
+    }
+
+    /// The files picked with ⌘ or ⇧ (the tests').
+    #[cfg(test)]
+    pub(crate) fn picked_files(&self) -> Vec<String> {
+        self.inspected
+            .marked
+            .iter()
+            .map(|path| path.to_string())
+            .collect()
+    }
+
+    /// Puts the keys in the file filter, to type in it (the tests').
+    #[cfg(test)]
+    pub(crate) fn focus_file_filter(&self, window: &mut Window, cx: &mut App) {
+        self.file_filter
+            .update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// Types `text` in the file filter (the tests').
+    #[cfg(test)]
+    pub(crate) fn filter_files(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.to_owned();
+        self.file_filter
+            .update(cx, |state, cx| state.set_value(text, window, cx));
     }
 
     /// The summaries of the commit box and of the working copy's row.
@@ -1562,6 +1737,7 @@ impl RepoView {
                                 .retain(|path| detail.files.iter().any(|file| &file.path == path));
                         } else {
                             view.inspected.marked.clear();
+                            view.inspected.folder = None;
                         }
                         // this tab's working copy: what was included of it
                         // stays while it is there as it was
@@ -1572,8 +1748,24 @@ impl RepoView {
                                 next.lines_left_out = true;
                             }
                         }
+                        let unchanged = view
+                            .inspected
+                            .unchanged
+                            .as_ref()
+                            .filter(|_| same_revision)
+                            .map(|shown| shown.path.clone());
                         view.inspected.detail = Some(detail);
-                        view.select_file(keep.or(first), cx);
+                        // a file it does not change stays, its text read again
+                        match unchanged {
+                            Some(path) => view.select_unchanged(path, cx),
+                            None if keep.is_some() => view.select_file(keep, cx),
+                            None => {
+                                let first = view.first_changed(cx).or(first);
+                                view.select_file(first, cx)
+                            }
+                        }
+                        view.load_all_files(cx);
+                        view.drop_lost_folder(cx);
                     }
                     Ok(None) => {
                         view.inspected.detail = None;
@@ -1595,11 +1787,17 @@ impl RepoView {
 
     fn select_file(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
         self.inspected.file = ix;
+        self.inspected.unchanged = None;
         // while comparing, the changes panel shows the comparison's file
         if self.compare.is_some() {
             return;
         }
         self.line_selection = None;
+        if let Some(path) =
+            ix.and_then(|ix| Some(self.inspected.detail.as_ref()?.files.get(ix)?.path.clone()))
+        {
+            self.reveal_file(&path, cx);
+        }
         let patch = ix.and_then(|ix| file_patch(self.inspected.detail.as_ref()?, ix));
         self.diff.update(cx, |state, cx| state.set_files(patch, cx));
         cx.notify();
@@ -1659,6 +1857,7 @@ impl RepoView {
             self.reopen_pending = matches!(self.state, LoadState::Ready);
         }
         self.show_diff_mode(mode, cx);
+        self.follow_file_list(cx);
         if by_date_changed {
             self.reload(cx);
         }

@@ -732,19 +732,9 @@ impl RepoView {
     }
 
     /// The next or previous changed file of the selected revision.
+    /// The full view's next and previous file, as the inspector lists them.
     pub(super) fn focus_file(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = self
-            .inspected
-            .detail
-            .as_ref()
-            .map_or(0, |detail| detail.files.len());
-        if count == 0 {
-            return;
-        }
-        let current = self.inspected.file.unwrap_or(0) as isize;
-        let next = current.saturating_add(delta).clamp(0, count as isize - 1) as usize;
-        self.select_file(Some(next), cx);
-        self.retarget_focus(cx);
+        self.step_through_files(delta, cx);
     }
 
     fn focus_change(&mut self, next: bool, cx: &mut Context<Self>) {

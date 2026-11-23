@@ -101,10 +101,20 @@ impl RepoView {
         true
     }
 
-    /// Back to the selected revision, its file's diff in the changes panel.
+    /// Back to the selected revision, its file's diff (or the text of a file
+    /// it does not change) in the changes panel.
     pub(super) fn end_comparison(&mut self, cx: &mut Context<Self>) {
         if self.compare.take().is_some() {
-            self.select_file(self.inspected.file, cx);
+            // a file the revision does not change, if one was shown
+            match self
+                .inspected
+                .unchanged
+                .as_ref()
+                .map(|shown| shown.path.clone())
+            {
+                Some(path) => self.select_unchanged(path, cx),
+                None => self.select_file(self.inspected.file, cx),
+            }
             cx.notify();
         }
     }
@@ -231,6 +241,8 @@ impl RepoView {
         compare: &Comparison,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let toolbar = self.render_file_toolbar(false, cx);
+        let file_rows = self.comparison_rows(cx);
         let theme = cx.theme();
         let rows = &self.log.row_data;
         let lower = self.selected.max(Some(compare.row));
@@ -338,9 +350,12 @@ impl RepoView {
                     (a + file.additions, d + file.deletions)
                 });
                 v_flex()
+                    .flex_1()
+                    .min_h(gpui_kit::rems(10.))
                     .child(
                         h_flex()
                             .h_10()
+                            .flex_none()
                             .px_4()
                             .gap_2()
                             .child(div().text_sm().font_medium().child("Changed files"))
@@ -374,6 +389,7 @@ impl RepoView {
                                     .child(format!("−{deletions}")),
                             ),
                     )
+                    .child(toolbar)
                     .when(detail.files.is_empty(), |this| {
                         this.child(
                             div()
@@ -383,43 +399,116 @@ impl RepoView {
                                 .child("The two trees are the same"),
                         )
                     })
-                    .children(detail.files.iter().enumerate().map(|(ix, file)| {
-                        ListItem::new(("compared-file", ix))
-                            .harness_mark(|| format!("compared:{}", file.tree_path.repo_path))
-                            .px_4()
-                            .py_1()
-                            .map(|item| {
-                                super::log_list::select_row(
-                                    item,
-                                    compare.file == Some(ix),
-                                    true,
-                                    theme,
+                    .child({
+                        let rows = file_rows;
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .child(
+                                uniform_list(
+                                    "compared-file-rows",
+                                    rows.len(),
+                                    cx.processor(
+                                        move |view, range: std::ops::Range<usize>, _, cx| {
+                                            range
+                                                .map(|row| {
+                                                    view.render_compared_row(&rows[row], row, cx)
+                                                })
+                                                .collect::<Vec<_>>()
+                                        },
+                                    ),
                                 )
-                            })
-                            .child(super::inspector::file_summary(file, theme))
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.select_compared_file(Some(ix), cx)
-                            }))
-                    }))
+                                .track_scroll(&self.compared_file_rows)
+                                .size_full(),
+                            )
+                            .child(Scrollbar::vertical(&self.compared_file_rows))
+                    })
                     .into_any_element()
             }
         };
 
-        let inspector = v_flex()
+        // the two revisions above, the files below taking the rest
+        v_flex()
             .id("comparison")
             .size_full()
             .min_h_0()
             .bg(theme.sidebar)
-            .overflow_y_scroll()
-            .track_scroll(&self.inspector_scroll)
-            .child(head)
-            .child(body);
-        div()
-            .relative()
-            .size_full()
-            .min_h_0()
-            .child(inspector)
-            .child(Scrollbar::vertical(&self.inspector_scroll))
+            .child(
+                v_flex()
+                    .relative()
+                    .flex_shrink(1.)
+                    .min_h_0()
+                    .child(
+                        v_flex()
+                            .id("comparison-head")
+                            .min_h_0()
+                            .flex_shrink(1.)
+                            .overflow_y_scroll()
+                            .track_scroll(&self.inspector_scroll)
+                            .child(head),
+                    )
+                    .child(Scrollbar::vertical(&self.inspector_scroll)),
+            )
+            .child(body)
             .into_any_element()
+    }
+
+    fn render_compared_row(
+        &self,
+        row: &super::file_list::FileRow,
+        at: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use super::file_list::FileRow;
+        match row {
+            FileRow::Folder {
+                path,
+                name,
+                depth,
+                open,
+                counts,
+            } => self.render_file_folder_row(
+                "compared-folder",
+                at,
+                path,
+                name,
+                *depth,
+                *open,
+                *counts,
+                cx,
+            ),
+            FileRow::Changed { ix, depth } => {
+                let ix = *ix;
+                let Some(file) = self
+                    .compare
+                    .as_ref()
+                    .and_then(|compare| compare.detail.as_ref()?.files.get(ix))
+                else {
+                    return div().into_any_element();
+                };
+                let selected = self.compare.as_ref().is_some_and(|c| c.file == Some(ix));
+                let theme = cx.theme();
+                ListItem::new(("compared-file", ix))
+                    .harness_mark(|| format!("compared:{}", file.tree_path.repo_path))
+                    .w_full()
+                    .h_7()
+                    .pl(super::files_view::indent(*depth))
+                    .pr_4()
+                    .py_0()
+                    .map(|item| super::log_list::select_row(item, selected, true, theme))
+                    .child(super::inspector::file_summary(
+                        file,
+                        !self.file_tree(cx),
+                        theme,
+                    ))
+                    .on_click(
+                        cx.listener(move |view, _, _, cx| view.select_compared_file(Some(ix), cx)),
+                    )
+                    .into_any_element()
+            }
+            // a comparison lists the changed files alone
+            FileRow::Unchanged { .. } => div().into_any_element(),
+        }
     }
 }

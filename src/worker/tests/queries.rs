@@ -1323,3 +1323,26 @@ async fn comparison_is_between_the_two_trees() -> Result<()> {
     assert_matches!(missing, RevsResult::NotFound { .. });
     Ok(())
 }
+
+#[tokio::test]
+async fn tree_files_are_every_file_of_the_revision() -> Result<()> {
+    let repo = mkrepo();
+
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+
+    // the hunk tests' base has hunk_test.txt, and a child that changes it
+    // has the same files
+    let base = queries::query_tree_files(&ws, &revs::hunk_base()).await?;
+    assert!(base.contains(&"hunk_test.txt".to_owned()), "{base:?}");
+    let child = queries::query_tree_files(&ws, &revs::hunk_child_single()).await?;
+    assert_eq!(base, child);
+
+    // the tree's order: sorted, as jj keeps it
+    let all = queries::query_tree_files(&ws, &revs::main_bookmark()).await?;
+    assert!(!all.is_empty());
+    let mut sorted = all.clone();
+    sorted.sort();
+    assert_eq!(all, sorted);
+    Ok(())
+}

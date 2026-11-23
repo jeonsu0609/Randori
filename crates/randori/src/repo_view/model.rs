@@ -239,6 +239,9 @@ pub(super) enum Load<T = ()> {
 }
 
 pub(super) struct Detail {
+    /// Different for every detail built: what the file list's rows were
+    /// built from (`file_list::RowsKey`).
+    pub(super) serial: u64,
     pub(super) header: RevHeader,
     pub(super) parents: Vec<SharedString>,
     pub(super) parent_ids: Vec<RevId>,
@@ -357,7 +360,9 @@ pub(super) fn build_detail(result: RevsResult) -> Option<Detail> {
     let header = headers.into_iter().last()?;
     let files: Vec<FileItem> = changes.iter().map(FileItem::from).collect();
     let patches = diff_files(&changes);
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     Some(Detail {
+        serial: SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         parent_ids: parents.iter().map(|parent| parent.id.clone()).collect(),
         parents: parents
             .iter()

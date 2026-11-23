@@ -15,6 +15,21 @@ impl RepoView {
     /// selected one to `ix`) in the working copy: the files' boxes ticked, or
     /// cleared when file `ix` was in already, as its box would be.
     pub(super) fn include_clicked(&mut self, ix: usize, range: bool, cx: &mut Context<Self>) {
+        let Some(count) = self
+            .inspected
+            .detail
+            .as_ref()
+            .map(|detail| detail.files.len())
+        else {
+            return;
+        };
+        let anchor = if range {
+            self.inspected.file.filter(|&at| at < count).unwrap_or(ix)
+        } else {
+            ix
+        };
+        // from the file shown to this one as the list shows them
+        let picked = self.changed_between(anchor, ix, cx);
         let Some(files) = self.inspected.detail.as_ref().map(|detail| &detail.files) else {
             return;
         };
@@ -24,15 +39,7 @@ impl RepoView {
         let included = &mut self.next_commit.included;
         let tick = included.file(&clicked.tree_path.repo_path, &clicked.hunks)
             != super::included::Inclusion::All;
-        let anchor = if range {
-            self.inspected
-                .file
-                .filter(|&at| at < files.len())
-                .unwrap_or(ix)
-        } else {
-            ix
-        };
-        for file in &files[anchor.min(ix)..=anchor.max(ix)] {
+        for file in picked.iter().filter_map(|ix| files.get(*ix)) {
             included.set_file(&file.tree_path.repo_path, tick);
         }
         self.next_commit.lines_left_out = false;
@@ -68,6 +75,46 @@ impl RepoView {
         };
         let path = file.tree_path.repo_path.clone();
         self.next_commit.included.set_file(&path, included);
+        self.next_commit.lines_left_out = false;
+        cx.notify();
+    }
+
+    /// The working copy's changed files under the folder `path` of a tree.
+    fn files_in_folder<'a>(&'a self, path: &'a str) -> impl Iterator<Item = &'a FileItem> + 'a {
+        self.inspected
+            .detail
+            .as_ref()
+            .map_or(&[][..], |detail| &detail.files[..])
+            .iter()
+            .filter(move |file| {
+                file.tree_path
+                    .repo_path
+                    .strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+    }
+
+    /// How much of the working copy's files under the folder `path` the next
+    /// commit includes (the folder's box).
+    pub(super) fn folder_inclusion(&self, path: &str) -> super::included::Inclusion {
+        self.next_commit
+            .included
+            .files_of(self.files_in_folder(path))
+    }
+
+    /// Includes the working copy's files under the folder `path` whole in
+    /// the next commit, or leaves them out.
+    pub(super) fn include_folder(&mut self, path: &str, included: bool, cx: &mut Context<Self>) {
+        if !self.commit_mode() {
+            return;
+        }
+        let paths: Vec<String> = self
+            .files_in_folder(path)
+            .map(|file| file.tree_path.repo_path.clone())
+            .collect();
+        for path in paths {
+            self.next_commit.included.set_file(&path, included);
+        }
         self.next_commit.lines_left_out = false;
         cx.notify();
     }
