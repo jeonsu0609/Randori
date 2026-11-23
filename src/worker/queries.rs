@@ -1007,6 +1007,20 @@ fn commit_id_identity(commit_id: &CommitId) -> &CommitId {
 /// Files larger than this are not read whole for the file view or blame.
 const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 
+/// Every file in revision `id`'s tree, by repository path in the tree's
+/// order, as `jj file list` lists them (conflicted files included).
+pub async fn query_tree_files(ws: &WorkspaceSession<'_>, id: &RevId) -> Result<Vec<String>> {
+    let commit = ws.resolve_commit_id(&id.commit)?;
+    let tree = commit.tree();
+    let mut paths = Vec::new();
+    let mut entries = tree.entries();
+    while let Some((path, value)) = futures_util::StreamExt::next(&mut entries).await {
+        value?;
+        paths.push(path.as_internal_file_string().to_owned());
+    }
+    Ok(paths)
+}
+
 /// Reads `path` as it is in the revision `id`.
 pub async fn query_file(
     ws: &WorkspaceSession<'_>,

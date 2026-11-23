@@ -96,6 +96,21 @@ fn open<'a>(
     (view, cx)
 }
 
+/// A second tab on `repo` beside the first, as another tab of the window,
+/// loaded.
+fn open_beside(repo: &Path, cx: &mut VisualTestContext) -> Entity<RepoView> {
+    let path = repo.to_path_buf();
+    let (settings, _, _, _) =
+        gg_lib::read_config(Some(&path)).expect("the repository's config is read");
+    let (worker, events) = Worker::spawn(Some(path.clone()), settings).expect("a worker");
+    let query = Some(crate::repo_view::ALL_BRANCHES_QUERY.to_owned());
+    let view = cx.update(|window, cx| {
+        cx.new(|cx| RepoView::new(worker, events, Some(path), query, window, cx))
+    });
+    settle(&view, cx);
+    view
+}
+
 /// Waits, in real time, until the tab has nothing on its way: its worker is
 /// a thread of its own, which the test's clock does not drive.
 fn settle(view: &Entity<RepoView>, cx: &mut VisualTestContext) {
@@ -795,4 +810,516 @@ fn command_click_chooses_while_picking(cx: &mut TestAppContext) {
     settle(&view, cx);
     assert_eq!(view.read_with(cx, |view, _| view.compared_files()), None);
     assert_eq!(view.read_with(cx, |view, _| view.selected_row()), Some(3));
+}
+
+/// A revision adding a.txt, a/y.txt and b/x.txt: as a tree the folders come
+/// first, and ↑↓ and ⇧-click go through the files in that order, not the
+/// detail's (a.txt, a/y.txt, b/x.txt). Not the working copy, whose ⇧-click
+/// ticks boxes.
+#[gpui::test]
+fn files_as_a_tree_go_in_its_order(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    std::fs::create_dir(repo.join("a")).unwrap();
+    std::fs::create_dir(repo.join("b")).unwrap();
+    for file in ["a.txt", "a/y.txt", "b/x.txt"] {
+        std::fs::write(repo.join(file), "x\n").unwrap();
+    }
+    jj(&repo, &["commit", "-m", "files"]);
+    let (view, cx) = open(&repo, cx);
+    // the log from the working copy: @, files
+    keys(&view, "down", cx);
+    cx.update(|_, cx| crate::settings::update_display(cx, |display| display.file_tree = true));
+    settle(&view, cx);
+
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["+a/", "  *a/y.txt", "+b/", "  *b/x.txt", "*a.txt"]
+    );
+    let shown = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| view.shown_file())
+    };
+    let folder = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| view.file_cursor_folder())
+    };
+    let list = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| view.file_list(cx))
+    };
+    // ↑↓ stop on the folders too, the file shown staying
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    keys(&view, "home", cx);
+    assert_eq!(folder(&view, cx), Some("a".into()));
+    assert_eq!(shown(&view, cx), Some("a/y.txt".into()));
+    keys(&view, "down", cx);
+    assert_eq!(
+        (folder(&view, cx), shown(&view, cx)),
+        (None, Some("a/y.txt".into()))
+    );
+    keys(&view, "down down", cx);
+    assert_eq!(
+        (folder(&view, cx), shown(&view, cx)),
+        (None, Some("b/x.txt".into()))
+    );
+    keys(&view, "down", cx);
+    assert_eq!(shown(&view, cx), Some("a.txt".into()));
+
+    // ← goes to the folder a file is in and closes it, → opens it and
+    // goes in; Enter opens and closes it too
+    keys(&view, "up", cx);
+    keys(&view, "left", cx);
+    assert_eq!(folder(&view, cx), Some("b".into()));
+    keys(&view, "left", cx);
+    assert_eq!(list(&view, cx), ["+a/", "  *a/y.txt", "-b/", "*a.txt"]);
+    keys(&view, "right", cx);
+    assert_eq!(
+        list(&view, cx),
+        ["+a/", "  *a/y.txt", "+b/", "  *b/x.txt", "*a.txt"]
+    );
+    keys(&view, "enter", cx);
+    assert_eq!(list(&view, cx), ["+a/", "  *a/y.txt", "-b/", "*a.txt"]);
+    assert!(!view.read_with(cx, |view, _| view.full_view_open()));
+    keys(&view, "enter right", cx);
+    assert_eq!(
+        (folder(&view, cx), shown(&view, cx)),
+        (None, Some("b/x.txt".into()))
+    );
+    // a file at the top has no folder to go to: ← does nothing
+    keys(&view, "down left", cx);
+    assert_eq!(
+        (folder(&view, cx), shown(&view, cx)),
+        (None, Some("a.txt".into()))
+    );
+    // ⌘⇧D on a folder still opens the full view of the file shown
+    keys(&view, "home secondary-shift-d", cx);
+    assert_eq!(
+        list(&view, cx),
+        ["+a/", "  *a/y.txt", "+b/", "  *b/x.txt", "*a.txt"]
+    );
+    assert!(view.read_with(cx, |view, _| view.full_view_open()));
+    keys(&view, "escape", cx);
+    assert!(!view.read_with(cx, |view, _| view.full_view_open()));
+
+    // ⇧ from a/y.txt to a.txt picks the three, as the list shows them
+    view.update(cx, |view, cx| {
+        view.click_changed("a/y.txt", false, cx);
+        view.click_changed("a.txt", true, cx);
+    });
+    let mut picked = view.read_with(cx, |view, _| view.picked_files());
+    picked.sort();
+    assert_eq!(picked, ["a.txt", "a/y.txt", "b/x.txt"]);
+
+    // with all files the folders start closed, but the one of the file
+    // shown opens
+    view.update(cx, |view, cx| view.click_changed("b/x.txt", false, cx));
+    cx.update(|_, cx| crate::settings::update_display(cx, |display| display.all_files = true));
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["-a/", "+b/", "  *b/x.txt", "*a.txt"]
+    );
+
+    // a file shown in paths stays in the list when they turn to a tree
+    // (each turn a click of its own: the tabs follow Settings after it)
+    view.update(cx, |view, cx| view.set_file_tree(false, cx));
+    view.update(cx, |view, cx| view.click_changed("a/y.txt", false, cx));
+    view.update(cx, |view, cx| view.set_file_tree(true, cx));
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["+a/", "  *a/y.txt", "+b/", "  *b/x.txt", "*a.txt"]
+    );
+}
+
+/// A folder ↑↓ are on that the list no longer has, filtered out or of
+/// files the revision does not change with all files off: they go on from
+/// the file shown.
+#[gpui::test]
+fn a_folder_out_of_the_list_is_left(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    std::fs::create_dir(repo.join("c")).unwrap();
+    std::fs::write(repo.join("c/z.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "c"]);
+    std::fs::create_dir(repo.join("a")).unwrap();
+    std::fs::write(repo.join("a/y.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "a"]);
+    let (view, cx) = open(&repo, cx);
+    // the log from the working copy: @, a, c
+    keys(&view, "down", cx);
+    cx.update(|_, cx| {
+        crate::settings::update_display(cx, |display| {
+            display.file_tree = true;
+            display.all_files = true;
+        })
+    });
+    settle(&view, cx);
+    let state = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| (view.file_cursor_folder(), view.shown_file()))
+    };
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    keys(&view, "end", cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["+a/", "  *a/y.txt", "-c/"]
+    );
+    assert_eq!(state(&view, cx), (Some("c".into()), Some("a/y.txt".into())));
+
+    // typed, as the filter's events come
+    view.update_in(cx, |view, window, cx| view.focus_file_filter(window, cx));
+    keys(&view, "y . t x t", cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["+a/", "  *a/y.txt"]
+    );
+    assert_eq!(state(&view, cx), (None, Some("a/y.txt".into())));
+    view.update_in(cx, |view, window, cx| view.filter_files("", window, cx));
+
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    keys(&view, "end", cx);
+    assert_eq!(state(&view, cx), (Some("c".into()), Some("a/y.txt".into())));
+    view.update(cx, |view, cx| view.set_all_files(false, cx));
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["+a/", "  *a/y.txt"]
+    );
+    assert_eq!(state(&view, cx), (None, Some("a/y.txt".into())));
+    // ↑ from the file shown, not from the end
+    keys(&view, "up", cx);
+    assert_eq!(state(&view, cx), (Some("a".into()), Some("a/y.txt".into())));
+}
+
+/// Path or Tree and All files turned in another tab: this one follows as
+/// if they were turned here.
+#[gpui::test]
+fn the_file_list_follows_another_tab(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    std::fs::create_dir(repo.join("c")).unwrap();
+    std::fs::write(repo.join("c/z.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "c"]);
+    std::fs::create_dir(repo.join("a")).unwrap();
+    std::fs::write(repo.join("a/y.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "a"]);
+    let (view, cx) = open(&repo, cx);
+    let other = open_beside(&repo, cx);
+    // the log from the working copy: @, a, c
+    keys(&view, "down", cx);
+    other.update(cx, |other, cx| other.set_file_tree(true, cx));
+    other.update(cx, |other, cx| other.set_all_files(true, cx));
+    settle(&view, cx);
+    let state = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| (view.file_cursor_folder(), view.shown_file()))
+    };
+    let list = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| view.file_list(cx))
+    };
+    assert_eq!(list(&view, cx), ["+a/", "  *a/y.txt", "-c/"]);
+
+    // to paths: the folder ↑↓ were on goes
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    keys(&view, "end", cx);
+    assert_eq!(state(&view, cx), (Some("c".into()), Some("a/y.txt".into())));
+    other.update(cx, |other, cx| other.set_file_tree(false, cx));
+    settle(&view, cx);
+    assert_eq!(list(&view, cx), ["*a/y.txt", "c/z.txt"]);
+    assert_eq!(state(&view, cx), (None, Some("a/y.txt".into())));
+
+    // back to a tree: the folder of the file shown opens
+    view.update(cx, |view, cx| view.click_all_folders(false, cx));
+    other.update(cx, |other, cx| other.set_file_tree(true, cx));
+    settle(&view, cx);
+    assert_eq!(list(&view, cx), ["+a/", "  *a/y.txt", "-c/"]);
+
+    // All files off: the unchanged file shown and the folder ↑↓ were on
+    // go, the folders start as a new list (here a/ closed, c/ opened)
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    keys(&view, "end right home left", cx);
+    view.update_in(cx, |view, window, cx| {
+        view.click_unchanged("c/z.txt", window, cx)
+    });
+    settle(&view, cx);
+    keys(&view, "up", cx);
+    assert_eq!(list(&view, cx), ["-a/", "+c/", "  c/z.txt"]);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.file_cursor_folder()),
+        Some("c".into())
+    );
+    other.update(cx, |other, cx| other.set_all_files(false, cx));
+    settle(&view, cx);
+    assert_eq!(list(&view, cx), ["+a/", "  *a/y.txt"]);
+    assert_eq!(view.read_with(cx, |view, _| view.shown_unchanged()), None);
+    assert_eq!(state(&view, cx), (None, Some("a/y.txt".into())));
+}
+
+/// All files turned on again for a revision whose files came before, and
+/// Home and End from a file shown in a closed folder.
+#[gpui::test]
+fn the_file_shown_stays_in_a_list_of_all_files_again(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    std::fs::write(repo.join("b.txt"), "x\n").unwrap();
+    std::fs::create_dir(repo.join("a")).unwrap();
+    std::fs::write(repo.join("a/y.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "a"]);
+    let (view, cx) = open(&repo, cx);
+    let list = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| view.file_list(cx))
+    };
+    let state = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| (view.file_cursor_folder(), view.shown_file()))
+    };
+    // the log from the working copy: @, a
+    keys(&view, "down", cx);
+    view.update(cx, |view, cx| view.set_file_tree(true, cx));
+    view.update(cx, |view, cx| view.click_changed("a/y.txt", false, cx));
+    view.update(cx, |view, cx| view.set_all_files(true, cx));
+    settle(&view, cx);
+    assert_eq!(list(&view, cx), ["+a/", "  *a/y.txt", "*b.txt"]);
+    view.update(cx, |view, cx| view.set_all_files(false, cx));
+    view.update(cx, |view, cx| view.set_all_files(true, cx));
+    settle(&view, cx);
+    assert_eq!(list(&view, cx), ["+a/", "  *a/y.txt", "*b.txt"]);
+
+    // Home and End from a/y.txt in a closed a/: to the ends
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    view.update(cx, |view, cx| view.click_all_folders(false, cx));
+    assert_eq!(list(&view, cx), ["-a/", "*b.txt"]);
+    keys(&view, "end", cx);
+    assert_eq!(state(&view, cx), (None, Some("b.txt".into())));
+    view.update(cx, |view, cx| view.click_changed("a/y.txt", false, cx));
+    view.update(cx, |view, cx| view.click_all_folders(false, cx));
+    assert_eq!(list(&view, cx), ["-a/", "*b.txt"]);
+    keys(&view, "home", cx);
+    assert_eq!(state(&view, cx), (Some("a".into()), Some("a/y.txt".into())));
+}
+
+/// ↑↓ and the full view's next and previous file from a file shown in a
+/// closed folder: on from that folder's row, the file just below it.
+#[gpui::test]
+fn arrows_go_on_from_a_closed_folder(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    for folder in ["a", "b"] {
+        std::fs::create_dir(repo.join(folder)).unwrap();
+    }
+    std::fs::write(repo.join("a/y.txt"), "x\n").unwrap();
+    std::fs::write(repo.join("b/x.txt"), "x\n").unwrap();
+    std::fs::write(repo.join("c.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "abc"]);
+    let (view, cx) = open(&repo, cx);
+    let state = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| (view.file_cursor_folder(), view.shown_file()))
+    };
+    // the file shown, then every folder closed over it
+    let hide = |view: &Entity<RepoView>, path: &str, cx: &mut VisualTestContext| {
+        view.update(cx, |view, cx| view.click_changed(path, false, cx));
+        view.update(cx, |view, cx| view.click_all_folders(false, cx));
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.file_list(cx)),
+            ["-a/", "-b/", "*c.txt"]
+        );
+    };
+    // the log from the working copy: @, abc
+    keys(&view, "down", cx);
+    view.update(cx, |view, cx| view.set_file_tree(true, cx));
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+
+    hide(&view, "b/x.txt", cx);
+    keys(&view, "down", cx);
+    assert_eq!(state(&view, cx), (None, Some("c.txt".into())));
+    hide(&view, "b/x.txt", cx);
+    keys(&view, "up", cx);
+    assert_eq!(state(&view, cx), (Some("b".into()), Some("b/x.txt".into())));
+    hide(&view, "a/y.txt", cx);
+    keys(&view, "up", cx);
+    assert_eq!(state(&view, cx), (Some("a".into()), Some("a/y.txt".into())));
+    // ← as ↑: to the folder the file shown is in
+    hide(&view, "b/x.txt", cx);
+    keys(&view, "left", cx);
+    assert_eq!(state(&view, cx), (Some("b".into()), Some("b/x.txt".into())));
+    hide(&view, "a/y.txt", cx);
+
+    // the full view stops at changed files: none before a/
+    keys(&view, "secondary-shift-d", cx);
+    assert!(view.read_with(cx, |view, _| view.full_view_open()));
+    view.update(cx, |view, cx| view.click_all_folders(false, cx));
+    keys(&view, "[", cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.shown_file()),
+        Some("a/y.txt".into())
+    );
+    keys(&view, "]", cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.shown_file()),
+        Some("c.txt".into())
+    );
+}
+
+/// The working copy as a tree: a folder's box includes every file under
+/// it in the next commit, and says how much of them is.
+#[gpui::test]
+fn a_folder_s_box_includes_its_files(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    std::fs::create_dir_all(repo.join("a/c")).unwrap();
+    for file in ["a/1.txt", "a/c/2.txt", "b.txt"] {
+        std::fs::write(repo.join(file), "x\n").unwrap();
+    }
+    jj(&repo, &["status"]);
+    let (view, cx) = open(&repo, cx);
+    cx.update(|_, cx| crate::settings::update_display(cx, |display| display.file_tree = true));
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["+a/", "  +c/", "    *a/c/2.txt", "  *a/1.txt", "*b.txt"]
+    );
+    let boxes = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| (view.folder_box("a"), view.folder_box("a/c")))
+    };
+    assert_eq!(boxes(&view, cx), ("none", "none"));
+    view.update(cx, |view, cx| view.click_folder_box("a/c", cx));
+    assert_eq!(boxes(&view, cx), ("some", "all"));
+    view.update(cx, |view, cx| view.click_folder_box("a", cx));
+    assert_eq!(boxes(&view, cx), ("all", "all"));
+
+    keys(&view, "d f i x", cx);
+    keys(&view, "secondary-enter", cx);
+    let repo = repo.as_path();
+    assert_eq!(changed(repo, "@-"), "a/1.txt a/c/2.txt");
+    assert_eq!(changed(repo, "@"), "b.txt");
+
+    // the folder ↑↓ are on gone in a reload: they are on it no more
+    std::fs::create_dir(repo.join("d")).unwrap();
+    std::fs::write(repo.join("d/e.txt"), "x\n").unwrap();
+    jj(repo, &["status"]);
+    // the commit stays selected: the working copy, at the top
+    view.update_in(cx, |view, window, cx| view.focus_log(window, cx));
+    keys(&view, "secondary-r home", cx);
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["+d/", "  *d/e.txt", "*b.txt"]
+    );
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    keys(&view, "home", cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.file_cursor_folder()),
+        Some("d".into())
+    );
+    std::fs::remove_dir_all(repo.join("d")).unwrap();
+    jj(repo, &["status"]);
+    keys(&view, "secondary-r", cx);
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["*b.txt"]
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.file_cursor_folder()),
+        None
+    );
+}
+
+/// w2 with all files: base.txt and w1.txt, which it does not change, are
+/// listed with w2.txt; one clicked shows its text, the filter keeps the
+/// paths with its text, the working copy lists only what it changes, and
+/// without all files the changed file is shown again.
+#[gpui::test]
+fn all_files_list_and_show_the_unchanged_ones(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = branch_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+
+    // the log from the working copy: @, w2, w1, qa1, base
+    keys(&view, "down", cx);
+    cx.update(|_, cx| crate::settings::update_display(cx, |display| display.all_files = true));
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["base.txt", "w1.txt", "*w2.txt"]
+    );
+
+    // from the full view of w2.txt: it closes, the text shows below
+    keys(&view, "secondary-shift-d", cx);
+    assert!(view.read_with(cx, |view, _| view.full_view_open()));
+    view.update_in(cx, |view, window, cx| {
+        view.click_unchanged("w1.txt", window, cx)
+    });
+    settle(&view, cx);
+    assert!(!view.read_with(cx, |view, _| view.full_view_open()));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.shown_unchanged()),
+        Some(("w1.txt".to_owned(), None))
+    );
+    assert_eq!(view.read_with(cx, |view, _| view.shown_file()), None);
+
+    // a comparison started and ended (⌘-click on qa1, twice) leaves it shown
+    view.update(cx, |view, cx| view.click_row(3, true, cx));
+    settle(&view, cx);
+    view.update(cx, |view, cx| view.click_row(3, true, cx));
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.shown_unchanged()),
+        Some(("w1.txt".to_owned(), None))
+    );
+
+    view.update_in(cx, |view, window, cx| view.filter_files("W1", window, cx));
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["w1.txt"]
+    );
+    view.update_in(cx, |view, window, cx| view.filter_files("", window, cx));
+
+    // the working copy, the next commit, lists what it changes: nothing
+    view.update_in(cx, |view, window, cx| view.focus_log(window, cx));
+    keys(&view, "up", cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        Vec::<String>::new()
+    );
+    keys(&view, "down", cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["base.txt", "w1.txt", "*w2.txt"]
+    );
+
+    view.update(cx, |view, cx| view.set_all_files(false, cx));
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["*w2.txt"]
+    );
+    assert_eq!(view.read_with(cx, |view, _| view.shown_unchanged()), None);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.shown_file()),
+        Some("w2.txt".into())
+    );
 }

@@ -857,9 +857,16 @@ impl RepoView {
                 }
             }
         } else if modifiers.shift {
+            // from the file shown to this one as the list shows them
             let anchor = self.inspected.file.unwrap_or(ix);
-            let (start, end) = (anchor.min(ix), anchor.max(ix));
-            self.inspected.marked = (start..=end).filter_map(path).collect();
+            let range = self.changed_between(anchor, ix, cx);
+            let Some(files) = self.inspected.detail.as_ref().map(|detail| &detail.files) else {
+                return;
+            };
+            self.inspected.marked = range
+                .into_iter()
+                .filter_map(|ix| files.get(ix).map(|file| file.path.clone()))
+                .collect();
         } else {
             self.inspected.marked.clear();
         }

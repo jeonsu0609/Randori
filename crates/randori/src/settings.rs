@@ -148,6 +148,10 @@ pub struct DisplaySettings {
     /// The application "Open in diff tool" opens (`diff_apps`); `None` is
     /// none chosen.
     pub diff_app: Option<String>,
+    /// The inspector's files as a tree of folders instead of paths.
+    pub file_tree: bool,
+    /// Every file of the revision in the inspector, the changed ones marked.
+    pub all_files: bool,
 }
 
 impl Default for DisplaySettings {
@@ -173,6 +177,8 @@ impl Default for DisplaySettings {
             terminal_font: None,
             terminal_font_size: None,
             diff_app: None,
+            file_tree: false,
+            all_files: false,
         }
     }
 }

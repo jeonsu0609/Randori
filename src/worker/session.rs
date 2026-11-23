@@ -85,6 +85,11 @@ pub enum SessionEvent {
         from: messages::RevId,
         to: messages::RevId,
     },
+    /// Every file in a revision's tree.
+    QueryTreeFiles {
+        tx: Sender<Result<Vec<String>>>,
+        id: messages::RevId,
+    },
     /// Read one file as it is in a revision.
     QueryFile {
         tx: Sender<Result<messages::queries::FileContent>>,
@@ -334,6 +339,9 @@ impl Session for WorkspaceSession<'_> {
                 }
                 SessionEvent::QueryFile { tx, id, path } => {
                     tx.send(queries::query_file(&self, &id, &path).await)?
+                }
+                SessionEvent::QueryTreeFiles { tx, id } => {
+                    tx.send(queries::query_tree_files(&self, &id).await)?
                 }
                 SessionEvent::QueryAnnotation { tx, id, path } => {
                     tx.send(queries::query_annotation(&self, &id, &path).await)?

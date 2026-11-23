@@ -82,8 +82,13 @@ impl Included {
 
     /// How much of every file of `files` is included.
     pub(super) fn all_files(&self, files: &[FileItem]) -> Inclusion {
+        self.files_of(files)
+    }
+
+    /// How much of the files `files` is included: all, none, or some.
+    pub(super) fn files_of<'a>(&self, files: impl IntoIterator<Item = &'a FileItem>) -> Inclusion {
         let mut states = files
-            .iter()
+            .into_iter()
             .map(|file| self.file(&file.tree_path.repo_path, &file.hunks));
         match states.next() {
             None => Inclusion::Nothing,

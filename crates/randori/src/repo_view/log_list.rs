@@ -308,7 +308,7 @@ pub(super) fn render_row(
 /// What the working copy changes, by kind, after its summary: a pencil
 /// for files modified, + added, − deleted, ⚠ conflicted; a kind with none is
 /// left out, and so is the whole when nothing changes.
-fn render_wip_counts(counts: gg_lib::messages::ChangeCounts, cx: &App) -> AnyElement {
+pub(super) fn render_wip_counts(counts: gg_lib::messages::ChangeCounts, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let mark = |icon: IconName, n: usize, color: gpui_kit::Hsla, what: &'static str| {
         (n > 0).then(|| {
