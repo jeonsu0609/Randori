@@ -16,6 +16,9 @@ impl RepoView {
         // with a box each for whether the commit includes it
         let commit_mode = self.commit_mode();
         let commit_box = commit_mode.then(|| self.render_commit_box(cx));
+        // under the description, read-only or edited (the commit box has its
+        // own)
+        let mut handle = (!commit_mode).then(|| self.render_message_handle(cx));
         let theme = cx.theme();
         let Some(detail) = &self.inspected.detail else {
             return v_flex()
@@ -63,8 +66,10 @@ impl RepoView {
                 .child(div().text_sm().min_w_0().truncate().child(value))
         };
 
-        // the revision above, with a scroll of its own when it is long; the
-        // files below take the rest, at least 10rem
+        let message_lines = self.message_lines(cx) as f32;
+        // the revision above, its description in a box of its own height
+        // (as GitKraken's, `message_lines`); the files below take the rest,
+        // at least 10rem. A window too low for both scrolls the revision.
         let top = v_flex()
             .id("inspector")
             .min_h_0()
@@ -139,13 +144,29 @@ impl RepoView {
                                 .text_color(theme.muted_foreground)
                                 .child("(no description set)"),
                         })
+                        // a long description scrolls in its box, the files
+                        // keeping their room
                         .when(!body.is_empty(), |this| {
+                            let line = message::LINE_REMS;
                             this.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(body.clone()),
+                                v_flex()
+                                    .relative()
+                                    .max_h(gpui_kit::rems(line * message_lines))
+                                    .child(
+                                        div()
+                                            .id("message-body")
+                                            .flex_shrink(1.)
+                                            .min_h_0()
+                                            .overflow_y_scroll()
+                                            .track_scroll(&self.message_scroll)
+                                            .text_sm()
+                                            .line_height(gpui_kit::rems(line))
+                                            .text_color(theme.muted_foreground)
+                                            .child(body.clone()),
+                                    )
+                                    .child(Scrollbar::vertical(&self.message_scroll)),
                             )
+                            .children(handle.take())
                         })
                     })
                     // the working copy's description is the next commit's message
@@ -153,6 +174,7 @@ impl RepoView {
                     .when(!header.is_immutable && !commit_mode, |this| {
                         let dirty = self.description_dirty(cx);
                         this.child(self.description.editor.render(subject_limits, cx))
+                            .children(handle.take())
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -352,6 +374,12 @@ impl RepoView {
             .size_full()
             .min_h_0()
             .bg(theme.sidebar)
+            // the message box's handle, wherever the pointer goes
+            .on_drag_move(cx.listener(
+                |view, event: &gpui_kit::DragMoveEvent<message::MessageResize>, window, cx| {
+                    view.drag_message(event, window, cx)
+                },
+            ))
             .child(
                 v_flex()
                     .relative()
@@ -397,6 +425,7 @@ impl RepoView {
     /// The commit message box of the working copy's inspector, with Commit:
     /// the changes included, or every one when none is.
     fn render_commit_box(&self, cx: &mut Context<Self>) -> AnyElement {
+        let handle = self.render_message_handle(cx);
         let theme = cx.theme();
         let files = self
             .inspected
@@ -431,6 +460,7 @@ impl RepoView {
                     .message
                     .render(settings::get(cx).display.subject_limits, cx),
             )
+            .child(handle)
             .child(
                 h_flex()
                     .gap_2()
