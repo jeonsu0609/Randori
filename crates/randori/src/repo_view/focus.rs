@@ -533,7 +533,8 @@ impl RepoView {
                     .gap_2()
                     .text_sm()
                     // the name stays whole; the summary gives way first (it has
-                    // only the room left), then the directory
+                    // only the room left), then the directory, cut at its
+                    // start so the folders nearest the file stay
                     .child(
                         h_flex()
                             .max_w(gpui_kit::rems(28.))
@@ -544,6 +545,10 @@ impl RepoView {
                                     div()
                                         .min_w_0()
                                         .truncate()
+                                        .text_ellipsis_start()
+                                        // against the name: a cut leaves
+                                        // the box a little wider than its text
+                                        .text_right()
                                         .text_color(theme.muted_foreground)
                                         .child(format!("{}/", focus.dir)),
                                 )

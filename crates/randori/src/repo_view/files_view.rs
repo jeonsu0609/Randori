@@ -1036,6 +1036,7 @@ impl RepoView {
                             // the change letter's column, empty
                             .child(div().w_3().flex_none())
                             .child(file_label(
+                                path,
                                 name,
                                 dir,
                                 !self.file_tree(cx),
