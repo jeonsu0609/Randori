@@ -49,8 +49,9 @@ pub(super) fn styled_diff(state: &Entity<DiffState>, cx: &App) -> Diff {
 /// inspector and the full file view can both be on screen.
 pub(super) struct SplitResize(pub(super) &'static str);
 
-/// Nothing follows the pointer while the divider moves.
-struct DividerGhost;
+/// Nothing follows the pointer while a divider moves (this one, and the
+/// message box's handle).
+pub(super) struct DividerGhost;
 
 impl Render for DividerGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

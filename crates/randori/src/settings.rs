@@ -56,6 +56,10 @@ impl Default for ColumnWidths {
 /// A split diff starts with its two sides the same width.
 pub const DEFAULT_SPLIT_RATIO: f32 = 0.5;
 
+/// Lines of a commit message's description the inspector shows before it
+/// scrolls, as GitKraken's message box; its handle drags it.
+pub const DEFAULT_MESSAGE_LINES: u32 = 8;
+
 /// How a diff marks changed lines beside the code.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -152,6 +156,9 @@ pub struct DisplaySettings {
     pub file_tree: bool,
     /// Every file of the revision in the inspector, the changed ones marked.
     pub all_files: bool,
+    /// Lines of a description the inspector shows before it scrolls, as
+    /// last dragged (`DEFAULT_MESSAGE_LINES`).
+    pub message_lines: u32,
 }
 
 impl Default for DisplaySettings {
@@ -179,6 +186,7 @@ impl Default for DisplaySettings {
             diff_app: None,
             file_tree: false,
             all_files: false,
+            message_lines: DEFAULT_MESSAGE_LINES,
         }
     }
 }
@@ -343,6 +351,7 @@ mod tests {
         assert!(old.github);
         assert_eq!(old.pull_refresh_secs, 60);
         assert_eq!(old.split_ratio, DEFAULT_SPLIT_RATIO);
+        assert_eq!(old.message_lines, DEFAULT_MESSAGE_LINES);
         // what the Settings window added reads as its defaults
         assert_eq!(old.auto_fetch_mins, 0);
         assert!(old.mark_changed_tabs && old.syntax_highlight);

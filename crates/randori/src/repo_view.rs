@@ -425,6 +425,8 @@ pub struct RepoView {
     /// The inspector's scroll, and where its file rows were drawn: a file
     /// chosen with the keys is scrolled into view.
     inspector_scroll: gpui_kit::ScrollHandle,
+    /// The scroll of a read-only description in its box.
+    message_scroll: gpui_kit::ScrollHandle,
     file_rows: UniformListScrollHandle,
     compared_file_rows: UniformListScrollHandle,
     /// Focus for the tab itself while there is no list to focus.
@@ -489,6 +491,10 @@ pub struct RepoView {
     column_drag: Option<(log_list::Column, gpui_kit::Pixels, f32)>,
     /// The split diff's ratio while its divider is dragged.
     split_drag: Option<f32>,
+    /// The message box's handle: where it was pressed, with the lines then,
+    /// and the drag that follows.
+    message_press: Option<(gpui_kit::Pixels, u32)>,
+    message_drag: Option<message::MessageDrag>,
     /// The working copy changes files, from the last status.
     working_copy_changed: bool,
     /// What this workspace's working copy changes, from the last status, for
@@ -830,6 +836,7 @@ impl RepoView {
             log_active: false,
             files_active: false,
             inspector_scroll: gpui_kit::ScrollHandle::new(),
+            message_scroll: gpui_kit::ScrollHandle::new(),
             file_rows: UniformListScrollHandle::new(),
             compared_file_rows: UniformListScrollHandle::new(),
             root_focus: cx.focus_handle(),
@@ -864,6 +871,8 @@ impl RepoView {
             derived_at: std::time::Instant::now(),
             column_drag: None,
             split_drag: None,
+            message_press: None,
+            message_drag: None,
             working_copy_changed: false,
             wip: None,
             jj_generation: settings::get(cx).jj_generation,
@@ -1735,6 +1744,9 @@ impl RepoView {
                         } else {
                             view.inspected.marked.clear();
                             view.inspected.folder = None;
+                            // another description starts at its top
+                            view.message_scroll
+                                .set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
                         }
                         // this tab's working copy: what was included of it
                         // stays while it is there as it was
@@ -1855,6 +1867,7 @@ impl RepoView {
         }
         self.show_diff_mode(mode, cx);
         self.follow_file_list(cx);
+        self.show_message_lines(cx);
         if by_date_changed {
             self.reload(cx);
         }
@@ -1944,6 +1957,9 @@ impl Render for RepoView {
         }
         if self.split_drag.is_some() && !cx.has_active_drag() {
             cx.defer_in(window, |view, _, cx| view.finish_split_resize(cx));
+        }
+        if self.message_drag.is_some() && !cx.has_active_drag() {
+            cx.defer_in(window, |view, _, cx| view.finish_message_resize(cx));
         }
         if std::mem::take(&mut self.show_head_pending) {
             cx.defer_in(window, |view, window, cx| view.show_pull_head(window, cx));

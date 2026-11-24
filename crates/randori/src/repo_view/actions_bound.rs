@@ -53,6 +53,9 @@ impl RepoView {
         .on_drop(
             cx.listener(|view, _: &split_diff::SplitResize, _, cx| view.finish_split_resize(cx)),
         )
+        .on_drop(
+            cx.listener(|view, _: &message::MessageResize, _, cx| view.finish_message_resize(cx)),
+        )
         .on_action(
             cx.listener(|view, _: &actions::ToggleTerminal, window, cx| {
                 view.toggle_terminal(window, cx)
