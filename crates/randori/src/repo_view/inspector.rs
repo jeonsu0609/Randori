@@ -365,17 +365,15 @@ impl RepoView {
             .into_any_element()
     }
 
-    /// Enter in the revisions: the keys go to the selected revision's changed
-    /// files, the file shown kept. Nothing while it loads, or without files.
+    /// Enter in the revisions: the keys go to the selected revision's files,
+    /// the file shown kept. Nothing while it loads, or with no file listed
+    /// (all files list some a revision does not change).
     pub(super) fn enter_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // a comparison's files are not the revision's, which are not drawn
         if self.inspected.loading || self.compare.is_some() {
             return;
         }
-        let Some(detail) = self.inspected.detail.as_ref() else {
-            return;
-        };
-        if detail.files.is_empty() {
+        if self.inspector_rows(cx).is_empty() {
             return;
         }
         // the first changed file, as a revision shows first; not a file

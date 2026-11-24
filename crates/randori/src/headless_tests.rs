@@ -1169,6 +1169,86 @@ fn a_filter_opens_the_folders_of_its_matches(cx: &mut TestAppContext) {
     assert_eq!(list(&view, cx), ["+a/", "  a/y.txt", "  a/z.txt", "*b.txt"]);
 }
 
+/// A comparison's folders are its own: each comparison starts with them
+/// open whatever the inspector's are, and the inspector's stay as they
+/// were whatever is opened or closed in it.
+#[gpui::test]
+fn a_comparison_has_folders_of_its_own(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    std::fs::create_dir(repo.join("a")).unwrap();
+    std::fs::write(repo.join("a/y.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "a"]);
+    std::fs::create_dir(repo.join("c")).unwrap();
+    std::fs::write(repo.join("c/z.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "c"]);
+    let (view, cx) = open(&repo, cx);
+    let list = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| view.file_list(cx))
+    };
+    let compared = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        settle(view, cx);
+        view.read_with(cx, |view, cx| view.compared_list(cx))
+    };
+    // the log from the working copy: @, c, a
+    keys(&view, "down", cx);
+    view.update(cx, |view, cx| view.set_file_tree(true, cx));
+    settle(&view, cx);
+    assert_eq!(list(&view, cx), ["+c/", "  *c/z.txt"]);
+
+    // closed in the inspector, open in a comparison of c with a
+    view.update(cx, |view, cx| view.click_all_folders(false, cx));
+    assert_eq!(list(&view, cx), ["-c/"]);
+    view.update(cx, |view, cx| view.click_row(2, true, cx));
+    assert_eq!(
+        compared(&view, cx),
+        Some(vec!["+c/".to_owned(), "  *c/z.txt".to_owned()])
+    );
+    keys(&view, "escape", cx);
+    assert_eq!(compared(&view, cx), None);
+
+    // closed in a comparison, open in the inspector after it
+    view.update(cx, |view, cx| view.click_all_folders(true, cx));
+    view.update(cx, |view, cx| view.click_row(2, true, cx));
+    assert!(compared(&view, cx).is_some());
+    view.update(cx, |view, cx| view.click_all_compared_folders(false, cx));
+    assert_eq!(compared(&view, cx), Some(vec!["-c/".to_owned()]));
+    keys(&view, "escape", cx);
+    assert_eq!(compared(&view, cx), None);
+    assert_eq!(list(&view, cx), ["+c/", "  *c/z.txt"]);
+}
+
+/// A revision that changes nothing, with all files: Enter in the revisions
+/// goes to its files all the same, ↓ to the first.
+#[gpui::test]
+fn enter_goes_to_the_files_of_a_revision_with_no_changes(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    std::fs::write(repo.join("y.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "y"]);
+    jj(&repo, &["commit", "-m", "nothing"]);
+    let (view, cx) = open(&repo, cx);
+    // the log from the working copy: @, nothing, y
+    keys(&view, "down", cx);
+    view.update(cx, |view, cx| view.set_all_files(true, cx));
+    settle(&view, cx);
+    assert_eq!(view.read_with(cx, |view, cx| view.file_list(cx)), ["y.txt"]);
+    keys(&view, "enter down", cx);
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.shown_unchanged()),
+        Some(("y.txt".to_owned(), None))
+    );
+}
+
 /// ↑↓ and the full view's next and previous file from a file shown in a
 /// closed folder: on from that folder's row, the file just below it.
 #[gpui::test]

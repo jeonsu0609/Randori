@@ -1177,26 +1177,24 @@ impl RepoView {
     /// its path, two spaces a level.
     #[cfg(test)]
     pub(crate) fn file_list(&self, cx: &App) -> Vec<String> {
-        use file_list::FileRow;
         let Some(detail) = self.inspected.detail.as_ref() else {
             return Vec::new();
         };
-        self.inspector_rows(cx)
-            .iter()
-            .map(|row| match row {
-                FileRow::Folder {
-                    name, depth, open, ..
-                } => format!(
-                    "{}{}{name}/",
-                    "  ".repeat(*depth),
-                    if *open { "+" } else { "-" }
-                ),
-                FileRow::Changed { ix, depth } => {
-                    format!("{}*{}", "  ".repeat(*depth), detail.files[*ix].path)
-                }
-                FileRow::Unchanged { path, depth, .. } => format!("{}{path}", "  ".repeat(*depth)),
-            })
-            .collect()
+        rows_as_text(&self.inspector_rows(cx), detail)
+    }
+
+    /// A comparison's file list as text, as `file_list` (the tests').
+    #[cfg(test)]
+    pub(crate) fn compared_list(&self, cx: &App) -> Option<Vec<String>> {
+        let detail = self.compare.as_ref()?.detail.as_ref()?;
+        Some(rows_as_text(&self.comparison_rows(cx), detail))
+    }
+
+    /// A click on a comparison's Expand all (`true`) or Collapse all (the
+    /// tests').
+    #[cfg(test)]
+    pub(crate) fn click_all_compared_folders(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.set_all_compared_folders(open, cx);
     }
 
     /// The unchanged file shown, and why it shows no text (the tests').
@@ -2222,6 +2220,29 @@ fn field_text(query: &str, default: &str) -> String {
     } else {
         query.to_owned()
     }
+}
+
+/// A file list's rows as text: a folder as `name/` after `+` or `-` (open or
+/// closed), a changed file of `detail` as `*path`, an unchanged one by its
+/// path, two spaces a level (the tests').
+#[cfg(test)]
+fn rows_as_text(rows: &[file_list::FileRow], detail: &model::Detail) -> Vec<String> {
+    use file_list::FileRow;
+    rows.iter()
+        .map(|row| match row {
+            FileRow::Folder {
+                name, depth, open, ..
+            } => format!(
+                "{}{}{name}/",
+                "  ".repeat(*depth),
+                if *open { "+" } else { "-" }
+            ),
+            FileRow::Changed { ix, depth } => {
+                format!("{}*{}", "  ".repeat(*depth), detail.files[*ix].path)
+            }
+            FileRow::Unchanged { path, depth, .. } => format!("{}{path}", "  ".repeat(*depth)),
+        })
+        .collect()
 }
 
 #[cfg(test)]

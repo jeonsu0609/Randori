@@ -731,7 +731,6 @@ impl RepoView {
             .into_any_element()
     }
 
-    /// The next or previous changed file of the selected revision.
     /// The full view's next and previous file, as the inspector lists them.
     pub(super) fn focus_file(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.step_through_files(delta, cx);
