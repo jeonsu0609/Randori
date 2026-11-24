@@ -796,7 +796,9 @@ impl RepoView {
                             div()
                                 .flex_shrink_0()
                                 .max_w(gpui_kit::rems(16.))
+                                // cut at the start, the name staying
                                 .truncate()
+                                .text_ellipsis_start()
                                 .text_xs()
                                 .font_family(theme.mono_font_family.clone())
                                 .text_color(theme.muted_foreground)
@@ -805,13 +807,14 @@ impl RepoView {
                         .child(Tag::secondary().xsmall().child("Unchanged"))
                     })
                     .when_some(file, |this, file| {
-                        // the file keeps up to 16rem; the hint after it
-                        // gives way first
+                        // the file keeps up to 16rem, cut at its start so the
+                        // name stays; the hint after it gives way first
                         this.child(
                             div()
                                 .flex_shrink_0()
                                 .max_w(gpui_kit::rems(16.))
                                 .truncate()
+                                .text_ellipsis_start()
                                 .text_xs()
                                 .font_family(theme.mono_font_family.clone())
                                 .text_color(theme.muted_foreground)
@@ -865,21 +868,32 @@ impl RepoView {
 }
 
 /// A file's name and, when `dir` is shown, its folder after it, dimmed: one
-/// line, as every row of a file list is as high as the others.
+/// line, as every row of a file list is as high as the others. Narrow, the
+/// folder gives way first, cut at its start so the folders nearest the file
+/// stay (`…/src/pages`), as GitKraken's; the name is cut only when it alone
+/// does not fit. Hovered, it shows the whole `path` when the file is in a
+/// folder.
 pub(super) fn file_label(
+    path: &SharedString,
     name: &SharedString,
     dir: &SharedString,
     show_dir: bool,
     color: gpui_kit::Hsla,
     theme: &gpui_kit::component::Theme,
-) -> gpui_kit::Div {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let tip = path.clone();
     h_flex()
+        .id(SharedString::from(format!("file-label:{path}")))
         .flex_1()
         .min_w_0()
         .gap_2()
+        // the name never shrinks for the folder: a shrink shared by weight
+        // would still take a fraction of a point from it, and cut it. At
+        // most the label's width, it is cut only when it alone is wider.
         .child(
             div()
-                .min_w_0()
+                .flex_shrink_0()
+                .max_w_full()
                 .truncate()
                 .text_sm()
                 .text_color(color)
@@ -891,10 +905,17 @@ pub(super) fn file_label(
                     .min_w_0()
                     .flex_shrink(1.)
                     .truncate()
+                    .text_ellipsis_start()
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(dir.clone()),
             )
+        })
+        // a file at the top shows its whole path already
+        .when(path != name, |this| {
+            this.tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
         })
 }
 
@@ -930,6 +951,7 @@ pub(super) fn file_summary(
                 .child(letter),
         )
         .child(file_label(
+            &file.path,
             &file.name,
             &file.dir,
             show_dir,
