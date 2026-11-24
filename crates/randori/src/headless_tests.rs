@@ -1109,6 +1109,66 @@ fn the_file_shown_stays_in_a_list_of_all_files_again(cx: &mut TestAppContext) {
     assert_eq!(state(&view, cx), (Some("a".into()), Some("a/y.txt".into())));
 }
 
+/// A filter typed after folders were closed: the matches show, their
+/// folders open; emptied, the folders close again but the shown file's.
+#[gpui::test]
+fn a_filter_opens_the_folders_of_its_matches(cx: &mut TestAppContext) {
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    std::fs::create_dir(repo.join("a")).unwrap();
+    std::fs::write(repo.join("a/y.txt"), "x\n").unwrap();
+    std::fs::write(repo.join("a/z.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "a"]);
+    std::fs::write(repo.join("b.txt"), "x\n").unwrap();
+    jj(&repo, &["commit", "-m", "b"]);
+    let (view, cx) = open(&repo, cx);
+    let list = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| view.file_list(cx))
+    };
+    // the log from the working copy: @, b, a
+    keys(&view, "down", cx);
+    cx.update(|_, cx| {
+        crate::settings::update_display(cx, |display| {
+            display.file_tree = true;
+            display.all_files = true;
+        })
+    });
+    settle(&view, cx);
+    assert_eq!(list(&view, cx), ["-a/", "*b.txt"]);
+
+    // closed by Collapse all, then filtered
+    view.update(cx, |view, cx| view.click_all_folders(false, cx));
+    view.update_in(cx, |view, window, cx| view.focus_file_filter(window, cx));
+    keys(&view, "z", cx);
+    assert_eq!(list(&view, cx), ["+a/", "  a/z.txt"]);
+    // closed while filtering: as clicked
+    view.update(cx, |view, cx| view.click_all_folders(false, cx));
+    assert_eq!(list(&view, cx), ["-a/"]);
+    keys(&view, "backspace", cx);
+    assert_eq!(list(&view, cx), ["-a/", "*b.txt"]);
+
+    // opened while filtering, then emptied: closed again
+    keys(&view, "y", cx);
+    view.update(cx, |view, cx| view.click_all_folders(true, cx));
+    keys(&view, "backspace", cx);
+    assert_eq!(list(&view, cx), ["-a/", "*b.txt"]);
+
+    // a file shown in a folder closed while filtering: its folder opens
+    keys(&view, "z", cx);
+    view.update_in(cx, |view, window, cx| {
+        view.click_unchanged("a/z.txt", window, cx)
+    });
+    view.update(cx, |view, cx| view.click_all_folders(false, cx));
+    assert_eq!(list(&view, cx), ["-a/"]);
+    view.update_in(cx, |view, window, cx| view.focus_file_filter(window, cx));
+    keys(&view, "backspace", cx);
+    assert_eq!(list(&view, cx), ["+a/", "  a/y.txt", "  a/z.txt", "*b.txt"]);
+}
+
 /// ↑↓ and the full view's next and previous file from a file shown in a
 /// closed folder: on from that folder's row, the file just below it.
 #[gpui::test]

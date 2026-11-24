@@ -56,6 +56,8 @@ pub(super) struct Folders {
     open: HashMap<String, bool>,
     all: Option<bool>,
     generation: u64,
+    /// Whether they were set while the filter had something in it.
+    filtering: bool,
 }
 
 /// A file of the inspected revision that it does not change, shown.
@@ -234,6 +236,34 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Every folder as its list starts: open with the changed files alone or
+    /// a filter, closed with all files.
+    fn reset_folders(&mut self, cx: &mut Context<Self>) {
+        self.folders.open.clear();
+        self.folders.all = None;
+        self.folders.generation += 1;
+        cx.notify();
+    }
+
+    /// Follows the filter typed. Filtering opens every folder with a match,
+    /// whatever was opened or closed before; emptied, the folders close
+    /// again but the shown file's.
+    pub(super) fn follow_file_filter(&mut self, cx: &mut Context<Self>) {
+        let filtering = !self.file_filter.read(cx).value().trim().is_empty();
+        if filtering != self.folders.filtering {
+            self.folders.filtering = filtering;
+            self.reset_folders(cx);
+            if !filtering && let Some(path) = self.shown_path() {
+                self.reveal_file(&path, cx);
+            }
+        }
+        // the folder ↑↓ were on can be filtered out
+        self.drop_lost_folder(cx);
+        if !filtering {
+            self.scroll_file_into_view(cx);
+        }
+    }
+
     /// Path or Tree, for every tab: each follows it (`follow_file_list`).
     pub(crate) fn set_file_tree(&mut self, tree: bool, cx: &mut Context<Self>) {
         settings::update_display(cx, |display| display.file_tree = tree);
@@ -251,10 +281,7 @@ impl RepoView {
         if now.all != seen.all {
             // closed or open as the new list starts, not as the last one
             // was left
-            self.folders.open.clear();
-            self.folders.all = None;
-            self.folders.generation += 1;
-            cx.notify();
+            self.reset_folders(cx);
         }
         self.load_all_files(cx);
         if !seen.all && now.all && !self.all_files.loading {
