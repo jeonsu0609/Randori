@@ -72,6 +72,8 @@ mod refs_panel;
 mod remote;
 mod split_diff;
 mod switcher;
+#[cfg(test)]
+pub(crate) use message::MessageBox;
 pub use switcher::scan_source_folders;
 mod terminal_panel;
 
@@ -491,9 +493,9 @@ pub struct RepoView {
     column_drag: Option<(log_list::Column, gpui_kit::Pixels, f32)>,
     /// The split diff's ratio while its divider is dragged.
     split_drag: Option<f32>,
-    /// The message box's handle: where it was pressed, with the lines then,
-    /// and the drag that follows.
-    message_press: Option<(gpui_kit::Pixels, u32)>,
+    /// The message box's handle: where it was pressed, with its box's lines
+    /// then, and the drag that follows.
+    message_press: Option<message::MessageDrag>,
     message_drag: Option<message::MessageDrag>,
     /// The working copy changes files, from the last status.
     working_copy_changed: bool,

@@ -126,6 +126,15 @@ impl MessageEditor {
         });
     }
 
+    /// Lines the description's field shows as last drawn: fewer than its
+    /// limit while the text is shorter. `None` before it is drawn.
+    pub(super) fn shown_lines(&self, cx: &App) -> Option<u32> {
+        let state = self.body.read(cx);
+        let line = state.line_height()?;
+        let height = state.input_bounds().size.height;
+        (height > gpui_kit::px(0.)).then(|| (height / line).round() as u32)
+    }
+
     /// The box of the two fields, the summary with its length against
     /// `limits` (long past the first, too long past the second).
     pub(super) fn render(&self, limits: (u32, u32), cx: &App) -> AnyElement {
@@ -188,22 +197,40 @@ pub(super) fn clamp_lines(lines: u32) -> u32 {
     lines.clamp(MIN_LINES, MAX_LINES)
 }
 
-/// The lines after the handle is dragged `dy` pixels from where it showed
-/// `from` lines, a line being `line` pixels high.
-fn dragged_lines(from: u32, dy: f32, line: f32) -> u32 {
-    let lines = from as f32 + (dy / line).round();
-    clamp_lines(lines.max(0.) as u32)
+/// The lines after the handle is dragged `dy` pixels from a box showing
+/// `shown` lines of at most `limit`, a line being `line` pixels high. Above
+/// the text's end the box follows the pointer at once; below it the box has
+/// no more to show, so the limit only rises past where it was, never falls.
+fn dragged_lines(shown: u32, limit: u32, dy: f32, line: f32) -> u32 {
+    let lines = clamp_lines((shown as f32 + (dy / line).round()).max(0.) as u32);
+    if lines < shown {
+        lines
+    } else {
+        lines.max(limit)
+    }
 }
 
 /// What the message box's handle drags.
 pub(super) struct MessageResize;
 
-/// The message box's handle dragged: from where, from how many lines, and
-/// the lines now.
+/// Which box a handle is under, whose shown lines a drag starts from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MessageBox {
+    /// An immutable revision's description.
+    ReadOnly,
+    /// The description editor of a mutable revision.
+    Description,
+    /// The working copy's commit box.
+    Commit,
+}
+
+/// The message box's handle pressed, then dragged: from where, the lines
+/// its box showed then and its limit, and the lines now.
 #[derive(Clone, Copy)]
 pub(super) struct MessageDrag {
     from_y: gpui_kit::Pixels,
-    from: u32,
+    shown: u32,
+    limit: u32,
     lines: u32,
 }
 
@@ -223,9 +250,48 @@ impl RepoView {
         self.next_commit.message.set_lines(lines, cx);
     }
 
-    /// The handle under a message box, as GitKraken's: dragged, it makes the
-    /// box taller or shorter (by lines), and a double click puts it back.
-    pub(super) fn render_message_handle(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Lines `which` box showed as last drawn; `None` before it was drawn.
+    fn shown_message_lines(&self, which: MessageBox, window: &Window, cx: &App) -> Option<u32> {
+        match which {
+            MessageBox::ReadOnly => {
+                let height = self.message_scroll.bounds().size.height;
+                let line = window.rem_size() * LINE_REMS;
+                (height > gpui_kit::px(0.)).then(|| (height / line).round() as u32)
+            }
+            MessageBox::Description => self.description.editor.shown_lines(cx),
+            MessageBox::Commit => self.next_commit.message.shown_lines(cx),
+        }
+    }
+
+    /// The handle of `which` box pressed at `y`: a drag starts from the
+    /// lines the box shows, fewer than its limit while its text is short.
+    pub(super) fn press_message_handle(
+        &mut self,
+        which: MessageBox,
+        y: gpui_kit::Pixels,
+        window: &Window,
+        cx: &App,
+    ) {
+        let limit = self.message_lines(cx);
+        let shown = self
+            .shown_message_lines(which, window, cx)
+            .map_or(limit, |shown| shown.min(limit));
+        self.message_press = Some(MessageDrag {
+            from_y: y,
+            shown,
+            limit,
+            lines: limit,
+        });
+    }
+
+    /// The handle under `which` message box, as GitKraken's: dragged, it
+    /// makes the box taller or shorter (by lines), and a double click puts
+    /// it back.
+    pub(super) fn render_message_handle(
+        &self,
+        which: MessageBox,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let (bar, hover) = (theme.border, theme.primary);
         let dragging = self.message_drag.is_some();
@@ -250,7 +316,7 @@ impl RepoView {
             )
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
-                cx.listener(|view, event: &gpui_kit::MouseDownEvent, _, cx| {
+                cx.listener(move |view, event: &gpui_kit::MouseDownEvent, window, cx| {
                     if event.click_count >= 2 {
                         view.message_press = None;
                         view.message_drag = None;
@@ -258,7 +324,7 @@ impl RepoView {
                             display.message_lines = settings::DEFAULT_MESSAGE_LINES
                         });
                     } else {
-                        view.message_press = Some((event.position.y, view.message_lines(cx)));
+                        view.press_message_handle(which, event.position.y, window, cx);
                     }
                     cx.stop_propagation();
                 }),
@@ -267,11 +333,7 @@ impl RepoView {
                 let view = cx.entity().downgrade();
                 move |_, _, _, cx| {
                     let _ = view.update(cx, |view, _| {
-                        view.message_drag = view.message_press.map(|(from_y, from)| MessageDrag {
-                            from_y,
-                            from,
-                            lines: from,
-                        });
+                        view.message_drag = view.message_press;
                     });
                     cx.new(|_| super::split_diff::DividerGhost)
                 }
@@ -286,15 +348,21 @@ impl RepoView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.move_message_handle(event.event.position.y, window, cx);
+    }
+
+    /// The handle, pressed and dragged, now at `y`.
+    pub(super) fn move_message_handle(
+        &mut self,
+        y: gpui_kit::Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(drag) = self.message_drag.as_mut() else {
             return;
         };
         let line = LINE_REMS * f32::from(window.rem_size());
-        let lines = dragged_lines(
-            drag.from,
-            f32::from(event.event.position.y - drag.from_y),
-            line,
-        );
+        let lines = dragged_lines(drag.shown, drag.limit, f32::from(y - drag.from_y), line);
         if lines != drag.lines {
             drag.lines = lines;
             self.show_message_lines(cx);
@@ -308,6 +376,43 @@ impl RepoView {
         if let Some(drag) = self.message_drag.take() {
             settings::update_display(cx, |display| display.message_lines = drag.lines);
         }
+    }
+
+    /// The handle under `which` box pressed, dragged to each of `dys`
+    /// pixels from there in turn, then let go: the box's limit after each
+    /// (the tests'). One update, as the drawing ends a drag gpui does not
+    /// hold.
+    #[cfg(test)]
+    pub(crate) fn drag_message_handle(
+        &mut self,
+        which: MessageBox,
+        dys: &[f32],
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<u32> {
+        let y = gpui_kit::px(100.);
+        self.press_message_handle(which, y, window, cx);
+        self.message_drag = self.message_press;
+        let lines = dys
+            .iter()
+            .map(|dy| {
+                self.move_message_handle(y + gpui_kit::px(*dy), window, cx);
+                self.message_lines(cx)
+            })
+            .collect();
+        self.finish_message_resize(cx);
+        lines
+    }
+
+    /// Lines `which` box showed as last drawn (the tests').
+    #[cfg(test)]
+    pub(crate) fn message_box_lines(
+        &self,
+        which: MessageBox,
+        window: &Window,
+        cx: &App,
+    ) -> Option<u32> {
+        self.shown_message_lines(which, window, cx)
     }
 }
 
@@ -366,13 +471,25 @@ mod tests {
 
     #[test]
     fn a_drag_moves_the_box_by_whole_lines_within_its_limits() {
-        assert_eq!(dragged_lines(8, 0., 20.), 8);
-        assert_eq!(dragged_lines(8, 29., 20.), 9, "past half a line");
-        assert_eq!(dragged_lines(8, 9., 20.), 8, "short of half a line");
-        assert_eq!(dragged_lines(8, -60., 20.), 5);
-        assert_eq!(dragged_lines(8, -1000., 20.), MIN_LINES);
-        assert_eq!(dragged_lines(8, 10_000., 20.), MAX_LINES);
+        assert_eq!(dragged_lines(8, 8, 0., 20.), 8);
+        assert_eq!(dragged_lines(8, 8, 29., 20.), 9, "past half a line");
+        assert_eq!(dragged_lines(8, 8, 9., 20.), 8, "short of half a line");
+        assert_eq!(dragged_lines(8, 8, -60., 20.), 5);
+        assert_eq!(dragged_lines(8, 8, -1000., 20.), MIN_LINES);
+        assert_eq!(dragged_lines(8, 8, 10_000., 20.), MAX_LINES);
         assert_eq!(clamp_lines(0), MIN_LINES, "a hand-edited session");
+    }
+
+    #[test]
+    fn a_short_box_follows_the_drag_up_and_keeps_its_limit_down() {
+        // three lines shown of eight: up a line, two at once
+        assert_eq!(dragged_lines(3, 8, -20., 20.), 2);
+        // down, the box has no more to show: the limit stays, then rises
+        assert_eq!(dragged_lines(3, 8, 0., 20.), 8);
+        assert_eq!(dragged_lines(3, 8, 40., 20.), 8);
+        assert_eq!(dragged_lines(3, 8, 140., 20.), 10);
+        // one line shown: the box is at its fewest already
+        assert_eq!(dragged_lines(1, 8, -20., 20.), 8);
     }
 
     #[test]

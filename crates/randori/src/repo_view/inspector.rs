@@ -18,7 +18,11 @@ impl RepoView {
         let commit_box = commit_mode.then(|| self.render_commit_box(cx));
         // under the description, read-only or edited (the commit box has its
         // own)
-        let mut handle = (!commit_mode).then(|| self.render_message_handle(cx));
+        let which = match &self.inspected.detail {
+            Some(detail) if detail.header.is_immutable => message::MessageBox::ReadOnly,
+            _ => message::MessageBox::Description,
+        };
+        let mut handle = (!commit_mode).then(|| self.render_message_handle(which, cx));
         let theme = cx.theme();
         let Some(detail) = &self.inspected.detail else {
             return v_flex()
@@ -425,7 +429,7 @@ impl RepoView {
     /// The commit message box of the working copy's inspector, with Commit:
     /// the changes included, or every one when none is.
     fn render_commit_box(&self, cx: &mut Context<Self>) -> AnyElement {
-        let handle = self.render_message_handle(cx);
+        let handle = self.render_message_handle(message::MessageBox::Commit, cx);
         let theme = cx.theme();
         let files = self
             .inspected

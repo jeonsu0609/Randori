@@ -1463,3 +1463,68 @@ fn all_files_list_and_show_the_unchanged_ones(cx: &mut TestAppContext) {
         Some("w2.txt".into())
     );
 }
+
+/// The message box's handle under a description shorter than its limit
+/// (three lines of eight): dragged up, the box shrinks at once; dragged
+/// down, it has no more to show, so the limit stays where it was until the
+/// drag passes it. Read-only (a tagged revision), edited and in the commit
+/// box alike.
+#[gpui::test]
+fn a_short_description_s_box_follows_its_handle(cx: &mut TestAppContext) {
+    use crate::repo_view::MessageBox;
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init(dir.path());
+    for (file, message) in [
+        ("base.txt", "base\n\none\ntwo\nthree"),
+        ("work.txt", "work\n\nfirst\nsecond\nthird"),
+    ] {
+        std::fs::write(repo.join(file), "x\n").unwrap();
+        jj(&repo, &["commit", "-m", message]);
+    }
+    jj(&repo, &["tag", "set", "-r", "@--", "v1"]);
+    let (view, cx) = open(&repo, cx);
+    let saved = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| crate::settings::get(cx).display.message_lines)
+    };
+    let drag = |view: &Entity<RepoView>, which, dys: &[f32], cx: &mut VisualTestContext| {
+        let lines = view.update_in(cx, |view, window, cx| {
+            view.drag_message_handle(which, dys, window, cx)
+        });
+        settle(view, cx);
+        lines
+    };
+    let shown = |view: &Entity<RepoView>, which, cx: &mut VisualTestContext| {
+        view.update_in(cx, |view, window, cx| {
+            view.message_box_lines(which, window, cx)
+        })
+    };
+    // a line is 1.25rem: 20 pixels in a test window
+    assert_eq!(saved(cx), 8);
+
+    // the working copy's commit box: D, a summary, then three lines
+    keys(&view, "d s enter a enter b enter c", cx);
+    assert_eq!(shown(&view, MessageBox::Commit, cx), Some(3));
+    assert_eq!(drag(&view, MessageBox::Commit, &[-20., 0.], cx), [2, 8]);
+    assert_eq!(saved(cx), 8);
+
+    // the log from the working copy: @, work, base
+    view.update_in(cx, |view, window, cx| view.focus_log(window, cx));
+    keys(&view, "down down", cx);
+    assert_eq!(shown(&view, MessageBox::ReadOnly, cx), Some(3));
+    assert_eq!(
+        drag(&view, MessageBox::ReadOnly, &[-20., 0., 60., 140., 0.], cx),
+        [2, 8, 8, 10, 8]
+    );
+    assert_eq!(saved(cx), 8, "let go where it started, nothing changes");
+    assert_eq!(shown(&view, MessageBox::ReadOnly, cx), Some(3));
+
+    keys(&view, "up", cx);
+    assert_eq!(shown(&view, MessageBox::Description, cx), Some(3));
+    assert_eq!(drag(&view, MessageBox::Description, &[-20.], cx), [2]);
+    assert_eq!(saved(cx), 2);
+    assert_eq!(shown(&view, MessageBox::Description, cx), Some(2));
+}
