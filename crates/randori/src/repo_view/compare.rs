@@ -32,6 +32,9 @@ pub(super) struct Comparison {
     pub(super) loading: bool,
     /// The file whose diff shows.
     pub(super) file: Option<usize>,
+    /// Its file list's folders, apart from the inspector's: each comparison
+    /// starts with them as the list starts.
+    pub(super) folders: super::files_view::Folders,
     /// The query of the detail; a newer comparison drops the last one.
     task: Option<Task<()>>,
     /// The commits (from, to) of the detail shown: a reload that leaves both
@@ -73,6 +76,7 @@ impl RepoView {
             // until `load_comparison` asks
             loading: false,
             file: None,
+            folders: Default::default(),
             task: None,
             shown: None,
             #[cfg(test)]
@@ -241,7 +245,7 @@ impl RepoView {
         compare: &Comparison,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let toolbar = self.render_file_toolbar(false, cx);
+        let toolbar = self.render_file_toolbar(false, true, cx);
         let file_rows = self.comparison_rows(cx);
         let theme = cx.theme();
         let rows = &self.log.row_data;

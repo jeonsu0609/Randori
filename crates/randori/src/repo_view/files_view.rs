@@ -29,10 +29,6 @@ pub(super) struct AllFiles {
     task: Option<Task<()>>,
 }
 
-/// The folders opened or closed by hand, by path; the others are as `all`
-/// says (Expand all, Collapse all), else open with the changed files alone
-/// and closed with all of them. `generation` counts the changes, for the
-/// rows built from them.
 /// Path or Tree and All files, as a tab last followed them, to tell what a
 /// change of Settings turned.
 #[derive(Clone, Copy)]
@@ -51,6 +47,11 @@ impl FileListSeen {
     }
 }
 
+/// A file list's folders opened or closed by hand, by path; the others are
+/// as `all` says (Expand all, Collapse all), else open with the changed
+/// files alone or a filter and closed with all files. `generation` counts
+/// the changes, for the rows built from them. The inspector has its own,
+/// and so has each comparison (`Comparison::folders`).
 #[derive(Default)]
 pub(super) struct Folders {
     open: HashMap<String, bool>,
@@ -58,6 +59,35 @@ pub(super) struct Folders {
     generation: u64,
     /// Whether they were set while the filter had something in it.
     filtering: bool,
+}
+
+impl Folders {
+    fn is_open(&self, path: &str, default: bool) -> bool {
+        self.open
+            .get(path)
+            .copied()
+            .unwrap_or(self.all.unwrap_or(default))
+    }
+
+    /// Closes the folder at `path` when it is `open`, else opens it.
+    fn toggle(&mut self, path: &str, open: bool) {
+        self.open.insert(path.to_owned(), !open);
+        self.generation += 1;
+    }
+
+    /// Expand all (`true`) or Collapse all.
+    fn set_all(&mut self, open: bool) {
+        self.open.clear();
+        self.all = Some(open);
+        self.generation += 1;
+    }
+
+    /// Every folder as the list starts.
+    fn reset(&mut self) {
+        self.open.clear();
+        self.all = None;
+        self.generation += 1;
+    }
 }
 
 /// A file of the inspected revision that it does not change, shown.
@@ -87,16 +117,6 @@ pub(super) fn indent(depth: usize) -> gpui_kit::Pixels {
 }
 
 impl RepoView {
-    fn file_folder_open(&self) -> impl Fn(&str, bool) -> bool + '_ {
-        move |path, default| {
-            self.folders
-                .open
-                .get(path)
-                .copied()
-                .unwrap_or(self.folders.all.unwrap_or(default))
-        }
-    }
-
     /// Whether the inspector lists every file of the revision: as Settings
     /// says, except for this tab's working copy, which is the next commit
     /// and lists what it changes.
@@ -139,14 +159,19 @@ impl RepoView {
                 all: all.as_ref().map(|paths| paths.as_slice()),
                 filter: &filter,
             };
-            file_rows(&detail.files, &spec, &self.file_folder_open())
+            file_rows(&detail.files, &spec, &|path, default| {
+                self.folders.is_open(path, default)
+            })
         })
     }
 
     /// The rows of a comparison's file list: its changed files, as paths or
-    /// a tree.
+    /// a tree, its folders its own.
     pub(super) fn comparison_rows(&self, cx: &App) -> Rc<Vec<FileRow>> {
-        let Some(detail) = self.compare.as_ref().and_then(|c| c.detail.as_ref()) else {
+        let Some(compare) = self.compare.as_ref() else {
+            return Rc::default();
+        };
+        let Some(detail) = compare.detail.as_ref() else {
             return Rc::default();
         };
         let tree = settings::get(cx).display.file_tree;
@@ -155,7 +180,7 @@ impl RepoView {
             all: None,
             tree,
             filter: String::new(),
-            folders: self.folders.generation,
+            folders: compare.folders.generation,
         };
         self.comparison_rows.borrow_mut().get(key, || {
             let spec = FileListSpec {
@@ -163,7 +188,9 @@ impl RepoView {
                 all: None,
                 filter: "",
             };
-            file_rows(&detail.files, &spec, &self.file_folder_open())
+            file_rows(&detail.files, &spec, &|path, default| {
+                compare.folders.is_open(path, default)
+            })
         })
     }
 
@@ -173,9 +200,24 @@ impl RepoView {
         open: bool,
         cx: &mut Context<Self>,
     ) {
-        self.folders.open.insert(path.to_string(), !open);
-        self.folders.generation += 1;
+        self.folders.toggle(&path, open);
         cx.notify();
+    }
+
+    /// A click on a folder of a comparison's tree.
+    fn toggle_compared_folder(&mut self, path: &str, open: bool, cx: &mut Context<Self>) {
+        if let Some(compare) = self.compare.as_mut() {
+            compare.folders.toggle(path, open);
+            cx.notify();
+        }
+    }
+
+    /// Expand all (`true`) or Collapse all in a comparison.
+    pub(super) fn set_all_compared_folders(&mut self, open: bool, cx: &mut Context<Self>) {
+        if let Some(compare) = self.compare.as_mut() {
+            compare.folders.set_all(open);
+            cx.notify();
+        }
     }
 
     /// Opens the folders on the way to `path` when all files are shown as a
@@ -230,18 +272,14 @@ impl RepoView {
     pub(super) fn set_all_folders(&mut self, open: bool, cx: &mut Context<Self>) {
         // the folder ↑↓ were on can be in one closed now
         self.inspected.folder = None;
-        self.folders.open.clear();
-        self.folders.all = Some(open);
-        self.folders.generation += 1;
+        self.folders.set_all(open);
         cx.notify();
     }
 
-    /// Every folder as its list starts: open with the changed files alone or
-    /// a filter, closed with all files.
+    /// The inspector's folders as its list starts: open with the changed
+    /// files alone or a filter, closed with all files.
     fn reset_folders(&mut self, cx: &mut Context<Self>) {
-        self.folders.open.clear();
-        self.folders.all = None;
-        self.folders.generation += 1;
+        self.folders.reset();
         cx.notify();
     }
 
@@ -761,10 +799,23 @@ impl RepoView {
         cx.notify();
     }
 
-    /// Path or Tree, All files and, in a tree, Expand all and Collapse all;
-    /// `all` is offered in the inspector of a revision other than this tab's
-    /// working copy, not in a comparison.
-    pub(super) fn render_file_toolbar(&self, all: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// Path or Tree, All files and, in a tree, Expand all and Collapse all
+    /// (of a comparison's folders when `comparison`); `all` is offered in the
+    /// inspector of a revision other than this tab's working copy, not in a
+    /// comparison.
+    pub(super) fn render_file_toolbar(
+        &self,
+        all: bool,
+        comparison: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let set_all = move |view: &mut Self, open: bool, cx: &mut Context<Self>| {
+            if comparison {
+                view.set_all_compared_folders(open, cx)
+            } else {
+                view.set_all_folders(open, cx)
+            }
+        };
         let theme = cx.theme();
         let display = &settings::get(cx).display;
         let tree = display.file_tree;
@@ -792,7 +843,7 @@ impl RepoView {
                         .xsmall()
                         .icon(IconName::ChevronsUpDown)
                         .tooltip("Expand all")
-                        .on_click(cx.listener(|view, _, _, cx| view.set_all_folders(true, cx))),
+                        .on_click(cx.listener(move |view, _, _, cx| set_all(view, true, cx))),
                 )
                 .child(
                     Button::new("collapse-folders")
@@ -800,7 +851,7 @@ impl RepoView {
                         .xsmall()
                         .icon(IconName::ChevronsDownUp)
                         .tooltip("Collapse all")
-                        .on_click(cx.listener(|view, _, _, cx| view.set_all_folders(false, cx))),
+                        .on_click(cx.listener(move |view, _, _, cx| set_all(view, false, cx))),
                 )
             })
             .child(div().flex_1())
@@ -812,8 +863,7 @@ impl RepoView {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .on_click(cx.listener(|view, checked: &bool, _, cx| {
-                            view.set_all_files(*checked, cx);
-                            view.load_all_files(cx);
+                            view.set_all_files(*checked, cx)
                         })),
                 )
             })
@@ -835,7 +885,7 @@ impl RepoView {
         v_flex()
             .flex_1()
             .min_h(gpui_kit::rems(10.))
-            .child(self.render_file_toolbar(offered, cx))
+            .child(self.render_file_toolbar(offered, false, cx))
             .when(all_files, |this| {
                 this.child(
                     div().px_4().pb_2().flex_none().child(
@@ -1092,7 +1142,7 @@ impl RepoView {
                 if inspector {
                     view.click_inspector_folder(toggled.clone(), open, window, cx)
                 } else {
-                    view.toggle_file_folder(toggled.clone(), open, cx)
+                    view.toggle_compared_folder(&toggled, open, cx)
                 }
             }))
             .into_any_element()
