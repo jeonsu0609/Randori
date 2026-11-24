@@ -660,8 +660,7 @@ impl RepoView {
         let _subscriptions = vec![
             cx.subscribe(&file_filter, |view, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
-                    // the folder ↑↓ were on can be filtered out
-                    view.drop_lost_folder(cx);
+                    view.follow_file_filter(cx);
                     view.notify_pane(PaneId::Inspector, cx);
                 }
             }),

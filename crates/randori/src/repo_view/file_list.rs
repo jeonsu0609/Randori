@@ -235,9 +235,9 @@ pub(super) struct FileRows {
     rows: Rc<Vec<FileRow>>,
 }
 
-/// What the rows were built from: the files (by the address of the detail's
-/// list, which a new detail replaces), all of them, the layout, the filter
-/// and the folders opened or closed.
+/// What the rows were built from: the files (by the detail's serial, which a
+/// new detail changes), all of them, the layout, the filter and the folders
+/// opened or closed.
 #[derive(Clone, PartialEq)]
 pub(super) struct RowsKey {
     pub(super) files: usize,
