@@ -155,7 +155,9 @@ fn count(counts: &mut ChangeCounts, file: &FileItem) {
     match file.kind {
         ChangeKind::Added => counts.added += 1,
         ChangeKind::Deleted => counts.deleted += 1,
-        ChangeKind::Modified | ChangeKind::None => counts.modified += 1,
+        ChangeKind::Modified => counts.modified += 1,
+        // a conflict kept from the parent: counted as a conflict alone
+        ChangeKind::None => {}
     }
     if file.has_conflict {
         counts.conflicted += 1;
@@ -357,6 +359,29 @@ mod tests {
         };
         assert_eq!(path.as_ref(), "crates/app");
         assert_eq!((counts.modified, counts.added, counts.deleted), (2, 1, 0));
+    }
+
+    /// A conflict kept from the parent counts as a conflict, not as a
+    /// modified file.
+    #[test]
+    fn a_kept_conflict_counts_as_a_conflict_alone() {
+        let mut files = changed();
+        files.push(FileItem {
+            has_conflict: true,
+            ..file("src/kept.rs", ChangeKind::None)
+        });
+        let rows = file_rows(&files, &spec(true, None, ""), &open_all);
+        let src = rows
+            .iter()
+            .find_map(|row| match row {
+                FileRow::Folder { path, counts, .. } if path.as_ref() == "src" => Some(counts),
+                _ => None,
+            })
+            .expect("the src folder");
+        assert_eq!(
+            (src.modified, src.added, src.deleted, src.conflicted),
+            (0, 0, 1, 1)
+        );
     }
 
     #[test]

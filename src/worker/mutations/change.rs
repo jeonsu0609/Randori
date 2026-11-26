@@ -1731,6 +1731,58 @@ mod tests {
         Ok(())
     }
 
+    /// A conflict a revision's own change makes is one of its changes, once,
+    /// marked as conflicted, and in its conflicts as well.
+    #[tokio::test]
+    async fn a_conflict_a_revision_makes_is_one_of_its_changes() -> anyhow::Result<()> {
+        let repo = mkrepo();
+        let mut session = WorkerSession::default();
+        let mut ws = session.load_workspace(repo.path()).await?;
+
+        // as in move_hunk_unrelated_different_structure_creates_conflict: the
+        // working copy's b.txt ends in a conflict its parent does not have
+        let result = MoveHunk {
+            from_id: revs::hunk_source(),
+            to_id: revs::working_copy().commit,
+            path: TreePath {
+                repo_path: "b.txt".to_owned(),
+                relative_path: "".into(),
+            },
+            hunk: ChangeHunk {
+                location: ChangeLocation {
+                    from_file: ChangeRange { start: 1, len: 1 },
+                    to_file: ChangeRange { start: 1, len: 1 },
+                },
+                lines: MultilineString {
+                    lines: vec!["-1".to_owned(), "+11".to_owned()],
+                },
+            },
+        }
+        .execute_unboxed(&mut ws)
+        .await?;
+        assert_matches!(result, MutationResult::Updated { .. });
+
+        let RevsResult::Detail {
+            changes, conflicts, ..
+        } = query_by_id(&ws, revs::working_copy()).await?
+        else {
+            panic!("Expected RevsResult::Detail");
+        };
+        let b: Vec<_> = changes
+            .iter()
+            .filter(|change| change.path.repo_path == "b.txt")
+            .collect();
+        assert_eq!(b.len(), 1, "b.txt once in the changes");
+        assert!(b[0].has_conflict, "b.txt marked as conflicted");
+        assert!(
+            conflicts
+                .iter()
+                .any(|conflict| conflict.path.repo_path == "b.txt")
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn move_hunk_ancestor_to_descendant() -> anyhow::Result<()> {
         // Test moving a hunk FROM an ancestor TO a descendant (the from_is_ancestor code path).

@@ -49,13 +49,15 @@ pub(super) fn revision_menu(
 /// working copy, which is split by committing what is ticked. `diff_tool`:
 /// a diff application is chosen in Settings (without one the full view is
 /// the diff, and the item is left out); `on_disk`: the file is in the
-/// workspace's folder, to show. The names are the same on every
-/// system.
+/// workspace's folder, to show; `changed`: the revision changes the file
+/// (a conflict kept from the parent is listed with no change, and nothing
+/// moves or discards it). The names are the same on every system.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn file_menu(
     menu: PopupMenu,
     has_conflict: bool,
     immutable: bool,
+    changed: bool,
     picked: Option<usize>,
     diff_tool: bool,
     on_disk: bool,
@@ -83,7 +85,7 @@ pub(super) fn file_menu(
     let menu = menu
         .menu_with_disabled("Show in folder", Box::new(RevealFile), !on_disk)
         .menu("Copy full path", Box::new(CopyFullFilePath));
-    if immutable {
+    if immutable || !changed {
         menu
     } else {
         let menu = menu.separator();

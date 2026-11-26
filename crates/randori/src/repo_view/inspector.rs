@@ -315,7 +315,7 @@ impl RepoView {
             .border_t_1()
             .border_color(theme.border)
             // every file in the commit, or none
-            .when(commit_mode && !detail.files.is_empty(), |this| {
+            .when(commit_mode && detail.has_changes(), |this| {
                 let all = self.next_commit.included.all_files(&detail.files);
                 this.child(
                     inclusion_box(
@@ -439,7 +439,12 @@ impl RepoView {
         let included = &self.next_commit.included;
         let typed = !self.next_commit.message.text(cx).is_empty();
         let everything = included.is_empty() || included.all_files(files) == Inclusion::All;
-        let hint = if files.is_empty() {
+        let nothing = !self
+            .inspected
+            .detail
+            .as_ref()
+            .is_some_and(Detail::has_changes);
+        let hint = if nothing {
             "No changes to commit".to_owned()
         } else if self.next_commit.lines_left_out {
             "Included lines changed and were left out · ⌘↩".to_owned()
@@ -515,7 +520,7 @@ impl RepoView {
                                 "Commit with this message: the new working copy has what is \
                                  not included (jj commit)",
                             )
-                            .disabled(!typed || files.is_empty() || !self.busy.is_empty())
+                            .disabled(!typed || nothing || !self.busy.is_empty())
                             .on_click(
                                 cx.listener(|view, _, window, cx| view.commit_changes(window, cx)),
                             ),
@@ -542,6 +547,9 @@ impl RepoView {
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(match command {
+                    _ if self.shows_kept_conflict() => {
+                        "The conflict comes from the parent: resolve it to change the file"
+                    }
                     Some(LineCommand::Include) => {
                         "Tick lines, or drag over their numbers, to include them in the commit"
                     }

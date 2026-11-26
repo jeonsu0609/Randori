@@ -194,6 +194,8 @@ async fn revision_with_conflict() -> Result<()> {
     Ok(())
 }
 
+/// A path is once in the changes, and a conflicted one there is marked as
+/// conflicted (it is in the conflicts as well).
 #[tokio::test]
 async fn conflicted_paths_are_not_duplicated() -> Result<()> {
     let repo = mkrepo();
@@ -201,36 +203,76 @@ async fn conflicted_paths_are_not_duplicated() -> Result<()> {
     let mut session = WorkerSession::default();
     let ws = session.load_workspace(repo.path()).await?;
 
-    let result = queries::query_revisions(
-        &ws,
-        RevSet {
-            from: revs::hunk_source(),
-            to: revs::inherited_conflict(),
-        },
-    )
-    .await?;
+    for (from, to) in [
+        (revs::hunk_source(), revs::inherited_conflict()),
+        (revs::conflict_bookmark(), revs::inherited_conflict()),
+        (revs::conflict_bookmark(), revs::conflict_bookmark()),
+        (revs::chain_conflict(), revs::chain_conflict()),
+    ] {
+        let RevsResult::Detail {
+            changes, conflicts, ..
+        } = queries::query_revisions(&ws, RevSet { from, to }).await?
+        else {
+            panic!("Expected RevsResult::Detail");
+        };
 
+        assert!(!conflicts.is_empty(), "Expected conflicts");
+        let conflict_paths: HashSet<String> = conflicts
+            .into_iter()
+            .map(|conflict| conflict.path.repo_path)
+            .collect();
+        let paths: HashSet<&str> = changes
+            .iter()
+            .map(|change| change.path.repo_path.as_str())
+            .collect();
+        assert_eq!(paths.len(), changes.len(), "a path twice: {paths:?}");
+        for change in &changes {
+            assert_eq!(
+                change.has_conflict,
+                conflict_paths.contains(&change.path.repo_path),
+                "{} marked as conflicted or not",
+                change.path.repo_path
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// A conflict a revision keeps from its parent, unchanged, is in its
+/// conflicts and not in its changes.
+#[tokio::test]
+async fn an_inherited_conflict_is_no_change() -> Result<()> {
+    let repo = mkrepo();
+
+    let mut session = WorkerSession::default();
+    let ws = session.load_workspace(repo.path()).await?;
+
+    let id = revs::inherited_conflict();
     let RevsResult::Detail {
         changes, conflicts, ..
-    } = result
+    } = queries::query_revisions(
+        &ws,
+        RevSet {
+            from: id.clone(),
+            to: id,
+        },
+    )
+    .await?
     else {
         panic!("Expected RevsResult::Detail");
     };
 
-    let conflict_paths: HashSet<String> = conflicts
-        .into_iter()
-        .map(|conflict| conflict.path.repo_path)
-        .collect();
-    let duplicated_paths: Vec<String> = changes
-        .into_iter()
-        .map(|change| change.path.repo_path)
-        .filter(|path| conflict_paths.contains(path))
-        .collect();
-
     assert!(
-        duplicated_paths.is_empty(),
-        "Expected conflicted paths to appear once, duplicates: {:?}",
-        duplicated_paths
+        conflicts
+            .iter()
+            .any(|conflict| conflict.path.repo_path == "b.txt")
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.path.repo_path != "b.txt"),
+        "b.txt is not changed"
     );
 
     Ok(())

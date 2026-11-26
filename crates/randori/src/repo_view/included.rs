@@ -85,10 +85,12 @@ impl Included {
         self.files_of(files)
     }
 
-    /// How much of the files `files` is included: all, none, or some.
+    /// How much of the files `files` is included: all, none, or some. A
+    /// file the revision does not change counts for nothing.
     pub(super) fn files_of<'a>(&self, files: impl IntoIterator<Item = &'a FileItem>) -> Inclusion {
         let mut states = files
             .into_iter()
+            .filter(|file| file.is_change())
             .map(|file| self.file(&file.tree_path.repo_path, &file.hunks));
         match states.next() {
             None => Inclusion::Nothing,
@@ -115,11 +117,11 @@ impl Included {
         }
     }
 
-    /// Includes every file of `files`, or nothing.
+    /// Includes every file of `files` the revision changes, or nothing.
     pub(super) fn set_all(&mut self, files: &[FileItem], included: bool) {
         self.files.clear();
         if included {
-            for file in files {
+            for file in files.iter().filter(|file| file.is_change()) {
                 self.set_file(&file.tree_path.repo_path, true);
             }
         }
@@ -288,6 +290,42 @@ mod tests {
             deletions: 1,
             has_conflict: false,
         }
+    }
+
+    /// A conflict the working copy keeps from its parent counts for nothing
+    /// and is never included: the commit has no change of it to take.
+    #[test]
+    fn a_kept_conflict_is_never_included() {
+        let changed = file();
+        let kept = FileItem {
+            tree_path: TreePath {
+                repo_path: "k.txt".to_owned(),
+                relative_path: "k.txt".into(),
+            },
+            hunks: Vec::new(),
+            path: "k.txt".into(),
+            name: "k.txt".into(),
+            kind: ChangeKind::None,
+            additions: 0,
+            deletions: 0,
+            has_conflict: true,
+            ..file()
+        };
+        let files = [changed, kept];
+        let mut included = Included::default();
+        assert_eq!(included.files_of(&files[1..]), Inclusion::Nothing);
+        included.set_all(&files, true);
+        assert_eq!(included.all_files(&files), Inclusion::All);
+        assert_eq!(included.summary(&files), "f.txt");
+        let (paths, hunks) = included.changes(&files);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|path| path.repo_path.as_str())
+                .collect::<Vec<_>>(),
+            ["f.txt"]
+        );
+        assert!(hunks.is_empty());
     }
 
     #[test]

@@ -1069,7 +1069,8 @@ impl RepoView {
     ) -> AnyElement {
         let inspector = list == INSPECTOR_FOLDER;
         let selected = inspector && self.inspected.folder.as_ref() == Some(path);
-        let inclusion = (inspector && self.commit_mode()).then(|| self.folder_inclusion(path));
+        let boxed = inspector && self.commit_mode();
+        let inclusion = boxed.then(|| self.folder_inclusion(path)).flatten();
         let theme = cx.theme();
         let toggled = path.clone();
         ListItem::new((list, at))
@@ -1088,6 +1089,12 @@ impl RepoView {
                     .w_full()
                     .min_w_0()
                     .gap_1()
+                    // a folder of conflicts kept from the parent alone has
+                    // nothing to include: its box's room, so the names stay
+                    // in line
+                    .when(boxed && inclusion.is_none(), |row| {
+                        row.child(div().flex_none().mr_1().size_4())
+                    })
                     .when_some(inclusion, |row, state| {
                         let folder = path.clone();
                         row.child(
@@ -1183,7 +1190,12 @@ impl RepoView {
                     .gap_2()
                     // whether the commit includes the file, as GitHub
                     // Desktop's box beside each
-                    .when(commit_mode, |row| {
+                    // a conflict kept from the parent has no change to
+                    // include: its room, so the names stay in line
+                    .when(commit_mode && !file.is_change(), |row| {
+                        row.child(div().flex_none().size_4())
+                    })
+                    .when(commit_mode && file.is_change(), |row| {
                         let state = self
                             .next_commit
                             .included
@@ -1242,27 +1254,38 @@ impl RepoView {
                     view.command_focus().focus(window, cx);
                 }),
             )
-            .on_drag(
-                DraggedFile {
-                    path: file.tree_path.clone(),
-                    from: header.id.clone(),
-                    label: file.name.clone(),
-                },
-                |dragged, _, _, cx| {
-                    cx.new(|_| DragChip {
-                        label: format!("Move {}", dragged.label).into(),
-                        icon: IconName::File,
-                    })
-                },
-            )
+            // a conflict kept from the parent has no change to move
+            .when(file.is_change(), |item| {
+                item.on_drag(
+                    DraggedFile {
+                        path: file.tree_path.clone(),
+                        from: header.id.clone(),
+                        label: file.name.clone(),
+                    },
+                    |dragged, _, _, cx| {
+                        cx.new(|_| DragChip {
+                            label: format!("Move {}", dragged.label).into(),
+                            icon: IconName::File,
+                        })
+                    },
+                )
+            })
             .context_menu({
                 let focus = self.command_focus();
                 let has_conflict = file.has_conflict;
                 let immutable = header.is_immutable;
+                let changed = file.is_change();
                 // the working copy picks no files for Split (its boxes are
-                // for Split off): the file clicked
+                // for Split off): the file clicked. Those Split takes: a
+                // conflict kept from the parent has nothing to split off
                 let picked = Some(if marked {
-                    self.inspected.marked.len()
+                    detail
+                        .files
+                        .iter()
+                        .filter(|file| {
+                            file.is_change() && self.inspected.marked.contains(&file.path)
+                        })
+                        .count()
                 } else {
                     1
                 });
@@ -1277,6 +1300,7 @@ impl RepoView {
                         menu,
                         has_conflict,
                         immutable,
+                        changed,
                         picked,
                         diff_tool,
                         on_disk,

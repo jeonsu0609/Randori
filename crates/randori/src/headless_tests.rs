@@ -1464,6 +1464,149 @@ fn all_files_list_and_show_the_unchanged_ones(cx: &mut TestAppContext) {
     );
 }
 
+/// c/f.txt changed apart in "one" and "two", then "two" rebased onto
+/// "one": "two" changes c/f.txt into a conflict, and the working copy on it
+/// adds other.txt and keeps the conflict.
+fn conflict_repo(holder: &Path) -> std::path::PathBuf {
+    let dir = &init(holder);
+    std::fs::create_dir(dir.join("c")).unwrap();
+    std::fs::write(dir.join("c/f.txt"), "x\n").unwrap();
+    jj(dir, &["commit", "-m", "base"]);
+    std::fs::write(dir.join("c/f.txt"), "one\n").unwrap();
+    jj(dir, &["commit", "-m", "one"]);
+    jj(dir, &["new", "@--"]);
+    std::fs::write(dir.join("c/f.txt"), "two\n").unwrap();
+    jj(dir, &["commit", "-m", "two"]);
+    std::fs::write(dir.join("other.txt"), "o\n").unwrap();
+    jj(
+        dir,
+        &[
+            "rebase",
+            "-s",
+            "description(exact:\"two\n\")",
+            "-o",
+            "description(exact:\"one\n\")",
+        ],
+    );
+    dir.clone()
+}
+
+/// A conflicted file is in the changed files, marked: in the revision whose
+/// change makes the conflict, with that change's diff, and in a child that
+/// keeps it unchanged, with its conflicted text and nothing of it to
+/// include in a commit (its folder has no box).
+#[gpui::test]
+fn conflicted_files_are_in_the_changed_files(cx: &mut TestAppContext) {
+    use gpui_kit::component::diff::DiffFileStatus;
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = conflict_repo(dir.path());
+    let (view, cx) = open(&repo, cx);
+    let files = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| view.file_list(cx))
+    };
+    let conflicts = |view: &Entity<RepoView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| view.conflicts_shown(cx))
+    };
+
+    // the working copy: other.txt its change, then c/f.txt, the conflict it keeps
+    assert_eq!(files(&view, cx), ["*other.txt", "*c/f.txt"]);
+    view.update(cx, |view, cx| view.click_changed("c/f.txt", false, cx));
+    settle(&view, cx);
+    assert_eq!(
+        conflicts(&view, cx),
+        (
+            vec!["c/f.txt".to_owned()],
+            vec![("c/f.txt".to_owned(), DiffFileStatus::Unchanged)]
+        )
+    );
+    cx.update(|_, cx| crate::settings::update_display(cx, |display| display.file_tree = true));
+    settle(&view, cx);
+    assert_eq!(view.read_with(cx, |view, _| view.folder_box("c")), "");
+    cx.update(|_, cx| crate::settings::update_display(cx, |display| display.file_tree = false));
+    settle(&view, cx);
+
+    // "two": its change to f.txt, the conflict
+    keys(&view, "down", cx);
+    assert_eq!(files(&view, cx), ["*c/f.txt"]);
+    assert_eq!(
+        conflicts(&view, cx),
+        (
+            vec!["c/f.txt".to_owned()],
+            vec![("c/f.txt".to_owned(), DiffFileStatus::Modified)]
+        )
+    );
+}
+
+/// A working copy whose only file is a conflict kept from its parent has
+/// nothing to commit, and the file's commands that would move or discard
+/// its change refuse, saying why.
+#[gpui::test]
+fn a_kept_conflict_is_nothing_to_commit_or_move(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt as _;
+    if !has_jj() {
+        eprintln!("skipped: no jj on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = conflict_repo(dir.path());
+    jj(&repo, &["new"]);
+    let (view, cx) = open(&repo, cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["*c/f.txt"]
+    );
+
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    view.update(cx, |view, cx| view.click_changed("c/f.txt", false, cx));
+    settle(&view, cx);
+    let state = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| (window.has_active_dialog(cx), window.notifications(cx).len()))
+    };
+    let (_, before) = state(cx);
+    cx.dispatch_action(crate::repo_view::actions::SquashFile);
+    settle(&view, cx);
+    assert_eq!(state(cx), (false, before + 1));
+    cx.dispatch_action(crate::repo_view::actions::RestoreFile);
+    settle(&view, cx);
+    assert_eq!(state(cx), (false, before + 2));
+    cx.dispatch_action(crate::repo_view::actions::SplitFiles);
+    settle(&view, cx);
+    assert_eq!(state(cx), (false, before + 3));
+    assert_eq!(changed(&repo, "@"), "");
+
+    // the revision below, not the working copy: its file picked, Split
+    // refuses it the same
+    view.update_in(cx, |view, window, cx| view.focus_log(window, cx));
+    keys(&view, "down", cx);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.file_list(cx)),
+        ["*other.txt", "*c/f.txt"]
+    );
+    view.update(cx, |view, cx| view.click_changed("c/f.txt", false, cx));
+    view.update(cx, |view, cx| view.click_changed("c/f.txt", true, cx));
+    settle(&view, cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.picked_files()),
+        ["c/f.txt"]
+    );
+    view.update_in(cx, |view, window, cx| view.focus_files(window, cx));
+    cx.dispatch_action(crate::repo_view::actions::SplitFiles);
+    settle(&view, cx);
+    assert_eq!(state(cx), (false, before + 4));
+    view.update_in(cx, |view, window, cx| view.focus_log(window, cx));
+    keys(&view, "up", cx);
+
+    // a summary typed and ⌘↩: no commit
+    keys(&view, "d f i x", cx);
+    assert_eq!(view.read_with(cx, |view, cx| view.summaries(cx)).0, "fix");
+    keys(&view, "secondary-enter", cx);
+    assert_eq!(changed(&repo, "@-"), "other.txt");
+}
+
 /// The message box's handle under a description shorter than its limit
 /// (three lines of eight): dragged up, the box shrinks at once; dragged
 /// down, it has no more to show, so the limit stays where it was until the

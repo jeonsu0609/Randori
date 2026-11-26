@@ -12,7 +12,8 @@ pub struct RevChange {
     pub hunks: Vec<ChangeHunk>,
 }
 
-/// A file-level conflict in a revision's parent tree.
+/// A file-level conflict in a revision's tree (a range's newest one),
+/// whether the revisions change the file or keep the conflict from a parent.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RevConflict {
     pub path: TreePath,
