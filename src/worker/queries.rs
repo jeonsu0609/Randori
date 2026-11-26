@@ -1,11 +1,5 @@
 use std::{
-    borrow::Borrow,
-    cmp::Reverse,
-    collections::{HashMap, HashSet},
-    io::Write,
-    mem,
-    ops::Range,
-    pin::Pin,
+    borrow::Borrow, cmp::Reverse, collections::HashMap, io::Write, mem, ops::Range, pin::Pin,
 };
 
 use anyhow::{Result, anyhow};
@@ -534,12 +528,6 @@ pub async fn query_revisions(ws: &WorkspaceSession<'_>, set: RevSet) -> Result<R
             }
         }
     }
-
-    let conflicted_paths: HashSet<String> = conflicts
-        .iter()
-        .map(|conflict| conflict.path.repo_path.clone())
-        .collect();
-    changes.retain(|change| !conflicted_paths.contains(&change.path.repo_path));
 
     // details for each revision in the set
     let mut headers = Vec::new();

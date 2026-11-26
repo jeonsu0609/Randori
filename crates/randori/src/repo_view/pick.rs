@@ -115,7 +115,9 @@ impl RepoView {
         );
     }
     pub(super) fn pick_move_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.refuse_if_immutable("Move file", window, cx) {
+        if self.refuse_if_immutable("Move file", window, cx)
+            || self.refuse_unchanged_file("Move file", window, cx)
+        {
             return;
         }
         let Some((detail, file)) = self

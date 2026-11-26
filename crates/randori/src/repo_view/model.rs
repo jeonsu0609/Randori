@@ -344,6 +344,22 @@ impl From<&RevChange> for FileItem {
     }
 }
 
+impl FileItem {
+    /// Whether the revision changes the file: a conflict it keeps from its
+    /// parent is listed with no change, so nothing of it goes in a commit.
+    pub(super) fn is_change(&self) -> bool {
+        !matches!(self.kind, ChangeKind::None)
+    }
+}
+
+impl Detail {
+    /// Whether the revision changes a file: one whose files are conflicts
+    /// kept from the parent alone has nothing to commit or include.
+    pub(super) fn has_changes(&self) -> bool {
+        self.files.iter().any(FileItem::is_change)
+    }
+}
+
 /// Turns a revision query into the inspector's model, parsing every file's
 /// patch for the diff view. Runs on a background thread.
 pub(super) fn build_detail(result: RevsResult) -> Option<Detail> {
@@ -358,8 +374,30 @@ pub(super) fn build_detail(result: RevsResult) -> Option<Detail> {
         return None;
     };
     let header = headers.into_iter().last()?;
-    let files: Vec<FileItem> = changes.iter().map(FileItem::from).collect();
-    let patches = diff_files(&changes);
+    let mut files: Vec<FileItem> = changes.iter().map(FileItem::from).collect();
+    let mut patches = diff_files(&changes);
+    // a conflict the revision keeps from its parent is in no change of its
+    // own, as `jj status` lists it apart: listed after the changes, its
+    // conflicted text shown as it is, with no hunk to move
+    for conflict in &conflicts {
+        if changes
+            .iter()
+            .any(|change| change.path.repo_path == conflict.path.repo_path)
+        {
+            continue;
+        }
+        let change = RevChange {
+            kind: ChangeKind::None,
+            path: conflict.path.clone(),
+            has_conflict: true,
+            hunks: Vec::new(),
+        };
+        files.push(FileItem::from(&change));
+        patches.push(DiffFile::unchanged(
+            conflict.path.repo_path.clone(),
+            &conflicted_text(&conflict.hunk),
+        ));
+    }
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     Some(Detail {
         serial: SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -379,6 +417,20 @@ pub(super) fn build_detail(result: RevsResult) -> Option<Detail> {
         patches,
         conflicts: conflicts.len(),
     })
+}
+
+/// The conflicted text of a file, with its markers, from GG's conflict hunk,
+/// which has every line as a removed one.
+fn conflicted_text(hunk: &ChangeHunk) -> String {
+    let mut text = String::new();
+    for line in &hunk.lines.lines {
+        let line = line.strip_prefix('-').unwrap_or(line);
+        text.push_str(line);
+        if !line.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    text
 }
 
 /// Zero counts carry no signal, so they stay muted instead of red or green.
@@ -675,9 +727,9 @@ fn bucket_starts(rows: impl Iterator<Item = (u32, bool)>) -> Vec<bool> {
 #[cfg(test)]
 pub(super) mod tests {
     use super::{
-        RefsHover, RevHeader, Side, StoreRef, changed_line_positions, is_this_working_copy,
-        nearest_in, panel_items, partial_hunk, ref_chips, selected_hunk_lines,
-        selects_every_change, time_bucket, unified_start,
+        RefsHover, RevHeader, Side, StoreRef, changed_line_positions, conflicted_text,
+        is_this_working_copy, nearest_in, panel_items, partial_hunk, ref_chips,
+        selected_hunk_lines, selects_every_change, time_bucket, unified_start,
     };
     use gg_lib::messages::ChangeHunk;
     use gg_lib::messages::{ChangeLocation, ChangeRange, MultilineString};
@@ -698,6 +750,22 @@ pub(super) mod tests {
                 lines: lines.iter().map(|line| format!("{line}\n")).collect(),
             },
         }
+    }
+
+    #[test]
+    fn a_conflict_s_text_is_its_hunk_s_lines_unmarked() {
+        let mut conflict = hunk(
+            (1, 5),
+            (0, 0),
+            &["-<<<<<<< one", "-one", "-=======", "-two\r", "->>>>>>> two"],
+        );
+        // the file's last line with no line break
+        let last = conflict.lines.lines.last_mut().unwrap();
+        last.pop();
+        assert_eq!(
+            conflicted_text(&conflict),
+            "<<<<<<< one\none\n=======\ntwo\r\n>>>>>>> two\n"
+        );
     }
 
     #[test]

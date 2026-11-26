@@ -35,6 +35,25 @@ impl RepoView {
         })
     }
 
+    /// Whether the diff on screen, the inspector's or the full view's of the
+    /// inspected revision, is a conflict the revision keeps from its parent:
+    /// no change, so no line to take.
+    pub(super) fn shows_kept_conflict(&self) -> bool {
+        let Some(detail) = self.inspected.detail.as_ref() else {
+            return false;
+        };
+        let file = match self.center.file() {
+            Some(focus) if focus.rev.id.commit.hex == detail.header.id.commit.hex => detail
+                .files
+                .iter()
+                .find(|file| file.tree_path.repo_path == focus.path.repo_path),
+            Some(_) => None,
+            None if self.compare.is_some() => None,
+            None => self.inspected.file.and_then(|ix| detail.files.get(ix)),
+        };
+        file.is_some_and(|file| !file.is_change())
+    }
+
     /// The lines selected in the diff on screen (see [`Self::shown_diff_file`]).
     pub(super) fn selected_lines(&self) -> Option<LineSelection> {
         let range = self.shown_line_range()?;

@@ -1183,6 +1183,39 @@ impl RepoView {
         Some(file.path.to_string())
     }
 
+    /// The inspector's changed files marked as conflicted, and the files the
+    /// diff below shows with their status (the tests').
+    #[cfg(test)]
+    pub(crate) fn conflicts_shown(
+        &self,
+        cx: &App,
+    ) -> (
+        Vec<String>,
+        Vec<(String, gpui_kit::component::diff::DiffFileStatus)>,
+    ) {
+        let conflicted = self
+            .inspected
+            .detail
+            .as_ref()
+            .map(|detail| {
+                detail
+                    .files
+                    .iter()
+                    .filter(|file| file.has_conflict)
+                    .map(|file| file.path.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shown = self
+            .diff
+            .read(cx)
+            .files()
+            .iter()
+            .map(|file| (file.path().to_string(), file.status()))
+            .collect();
+        (conflicted, shown)
+    }
+
     /// The inspector's file list as text: a folder as `name/` after `+` or
     /// `-` (open or closed), a changed file as `*path`, an unchanged one by
     /// its path, two spaces a level.
@@ -1263,13 +1296,14 @@ impl RepoView {
     }
 
     /// The box of the working copy's `folder`: "all", "some" or "none" of
-    /// the files under it included (the tests').
+    /// the files under it included, or "" with none to include (the tests').
     #[cfg(test)]
     pub(crate) fn folder_box(&self, folder: &str) -> &'static str {
         match self.folder_inclusion(folder) {
-            included::Inclusion::All => "all",
-            included::Inclusion::Some => "some",
-            included::Inclusion::Nothing => "none",
+            Some(included::Inclusion::All) => "all",
+            Some(included::Inclusion::Some) => "some",
+            Some(included::Inclusion::Nothing) => "none",
+            None => "",
         }
     }
 
@@ -1277,7 +1311,7 @@ impl RepoView {
     #[cfg(test)]
     pub(crate) fn click_folder_box(&mut self, folder: &str, cx: &mut Context<Self>) {
         let state = self.folder_inclusion(folder);
-        self.include_folder(folder, state != included::Inclusion::All, cx);
+        self.include_folder(folder, state != Some(included::Inclusion::All), cx);
     }
 
     /// The files picked with ⌘ or ⇧ (the tests').

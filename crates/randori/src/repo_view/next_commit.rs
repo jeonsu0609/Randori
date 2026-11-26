@@ -39,7 +39,11 @@ impl RepoView {
         let included = &mut self.next_commit.included;
         let tick = included.file(&clicked.tree_path.repo_path, &clicked.hunks)
             != super::included::Inclusion::All;
-        for file in picked.iter().filter_map(|ix| files.get(*ix)) {
+        for file in picked
+            .iter()
+            .filter_map(|ix| files.get(*ix))
+            .filter(|file| file.is_change())
+        {
             included.set_file(&file.tree_path.repo_path, tick);
         }
         self.next_commit.lines_left_out = false;
@@ -70,6 +74,7 @@ impl RepoView {
             .detail
             .as_ref()
             .and_then(|detail| detail.files.get(ix))
+            .filter(|file| file.is_change())
         else {
             return;
         };
@@ -79,7 +84,8 @@ impl RepoView {
         cx.notify();
     }
 
-    /// The working copy's changed files under the folder `path` of a tree.
+    /// The working copy's changed files under the folder `path` of a tree,
+    /// those it changes: a conflict it keeps goes in no commit.
     fn files_in_folder<'a>(&'a self, path: &'a str) -> impl Iterator<Item = &'a FileItem> + 'a {
         self.inspected
             .detail
@@ -87,19 +93,21 @@ impl RepoView {
             .map_or(&[][..], |detail| &detail.files[..])
             .iter()
             .filter(move |file| {
-                file.tree_path
-                    .repo_path
-                    .strip_prefix(path)
-                    .is_some_and(|rest| rest.starts_with('/'))
+                file.is_change()
+                    && file
+                        .tree_path
+                        .repo_path
+                        .strip_prefix(path)
+                        .is_some_and(|rest| rest.starts_with('/'))
             })
     }
 
     /// How much of the working copy's files under the folder `path` the next
-    /// commit includes (the folder's box).
-    pub(super) fn folder_inclusion(&self, path: &str) -> super::included::Inclusion {
-        self.next_commit
-            .included
-            .files_of(self.files_in_folder(path))
+    /// commit includes (the folder's box), or nothing to include there.
+    pub(super) fn folder_inclusion(&self, path: &str) -> Option<super::included::Inclusion> {
+        let mut files = self.files_in_folder(path).peekable();
+        files.peek()?;
+        Some(self.next_commit.included.files_of(files))
     }
 
     /// Includes the working copy's files under the folder `path` whole in
@@ -238,7 +246,7 @@ impl RepoView {
         let Some(detail) = self.inspected.detail.as_ref() else {
             return;
         };
-        if detail.files.is_empty() || self.blocked_by_pick(window, cx) {
+        if !detail.has_changes() || self.blocked_by_pick(window, cx) {
             return;
         }
         let id = detail.header.id.clone();

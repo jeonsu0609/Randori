@@ -812,6 +812,35 @@ impl RepoView {
             .map(|file| file.tree_path.clone())
     }
 
+    /// Whether `action` is refused as the selected file is a conflict the
+    /// revision keeps from its parent: listed, but with no change to move or
+    /// discard.
+    pub(super) fn refuse_unchanged_file(
+        &self,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(file) = self
+            .inspected
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.files.get(self.inspected.file?))
+            .filter(|file| !file.is_change())
+        else {
+            return false;
+        };
+        window.push_notification(
+            Notification::info(format!(
+                "This revision does not change {}: its conflict comes from the parent.",
+                file.path
+            ))
+            .title(action.to_owned()),
+            cx,
+        );
+        true
+    }
+
     /// A click on file `ix` in the inspector: ⌘ adds it to the picked files
     /// or takes it out, ⇧ picks the files from the selected one to it, a
     /// plain click picks none. In the working copy, whose files have boxes
@@ -874,18 +903,25 @@ impl RepoView {
     }
 
     /// The files Split takes: the picked ones in the list's order, else the
-    /// selected one.
+    /// selected one; those the revision changes (a conflict kept from the
+    /// parent has nothing to split off).
     fn split_paths(&self) -> Vec<TreePath> {
         let Some(detail) = self.inspected.detail.as_ref() else {
             return Vec::new();
         };
         if self.inspected.marked.is_empty() {
-            return self.selected_file_path().into_iter().collect();
+            return detail
+                .files
+                .get(self.inspected.file.unwrap_or(usize::MAX))
+                .filter(|file| file.is_change())
+                .map(|file| file.tree_path.clone())
+                .into_iter()
+                .collect();
         }
         detail
             .files
             .iter()
-            .filter(|file| self.inspected.marked.contains(&file.path))
+            .filter(|file| file.is_change() && self.inspected.marked.contains(&file.path))
             .map(|file| file.tree_path.clone())
             .collect()
     }
@@ -913,6 +949,22 @@ impl RepoView {
             return;
         };
         let paths = self.split_paths();
+        if paths.is_empty() {
+            if self.inspected.marked.is_empty() {
+                self.refuse_unchanged_file("Split", window, cx);
+            } else {
+                // every file picked a conflict kept from the parent
+                window.push_notification(
+                    Notification::info(
+                        "This revision does not change the files picked: their conflicts come \
+                         from the parent.",
+                    )
+                    .title("Split"),
+                    cx,
+                );
+            }
+            return;
+        }
         let what = match paths.as_slice() {
             [] => return,
             [one] => one.repo_path.clone(),
@@ -946,7 +998,9 @@ impl RepoView {
 
     /// Moves the selected file's changes into the parent (`jj squash <path>`).
     pub(super) fn squash_file_into_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.refuse_if_immutable("Squash", window, cx) {
+        if self.refuse_if_immutable("Squash", window, cx)
+            || self.refuse_unchanged_file("Squash", window, cx)
+        {
             return;
         }
         let (Some((id, parent)), Some(path)) = (self.detail_ids(), self.selected_file_path())
@@ -1018,7 +1072,9 @@ impl RepoView {
         if self.blocked_by_pick(window, cx) {
             return;
         }
-        if self.refuse_if_immutable("Discard", window, cx) {
+        if self.refuse_if_immutable("Discard", window, cx)
+            || self.refuse_unchanged_file("Discard", window, cx)
+        {
             return;
         }
         let (Some((id, parent)), Some(path)) = (self.detail_ids(), self.selected_file_path())
